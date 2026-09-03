@@ -1,0 +1,17 @@
+[project]
+name = "theia-agent"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "discord.py",
+    "discord-ext-voice-recv>=0.5.2a179",
+    "python-dotenv",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
+
+[tool.celtest]
+display_name = "Theia Agent"

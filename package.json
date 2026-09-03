@@ -1,0 +1,12 @@
+{
+  "name": "theia-agent-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local runtime dependency for Theia Agent",
+  "engines": {
+    "node": ">=16"
+  },
+  "dependencies": {
+    "@openai/codex": "0.153.0"
+  }
+}
