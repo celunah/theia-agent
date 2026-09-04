@@ -22,6 +22,7 @@ from scripts.configure import (
     save_configuration,
     validate_configuration,
 )
+from theia import core as core_module
 from theia.bot import _handle_voice_transcript
 from theia.core import _path_is_under
 
@@ -113,6 +114,27 @@ class _HistoryChannel(_Channel):
 
 
 class CommandSurfaceTests(unittest.TestCase):
+    def test_environment_loads_from_compiled_executable_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "dist" / "theia"
+            executable.parent.mkdir()
+            dotenv_path = executable.parent / ".env"
+            dotenv_path.write_text("TOKEN=private-token\n", encoding="utf-8")
+            with (
+                patch.object(core_module.sys, "argv", [str(executable)]),
+                patch.object(
+                    core_module.sys,
+                    "executable",
+                    str(root / ".venv" / "bin" / "python"),
+                ),
+                patch.object(core_module.Path, "cwd", return_value=root / "working"),
+                patch.object(core_module, "load_dotenv") as load_dotenv,
+            ):
+                core_module._load_environment()
+
+        load_dotenv.assert_called_once_with(dotenv_path, override=False)
+
     def test_only_requested_slash_commands_are_registered(self) -> None:
         names = {command.name for command in main.bot.tree.get_commands()}
         self.assertEqual(

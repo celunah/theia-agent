@@ -82,6 +82,9 @@ agent state.
 - Authentication is cached in Theia’s private runtime, normally `~/.theia`.
 - A valid private cache is reused; another Codex cache is imported atomically
   when needed, and the device-code flow is used only when no usable cache remains.
+- Runtime `.env` configuration is found from the working directory, compiled
+  executable directory, or source project root and is never bundled into the
+  executable.
 - Login reports `Already logged in`, `Cached authentication imported`,
   `Device code required`, and `Authentication completed` for those states.
 - A server administrator can authenticate the bot for server-wide use.

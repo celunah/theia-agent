@@ -90,6 +90,11 @@ home or state file. Theia reuses valid private authentication, imports another
 Codex cache atomically when needed, and starts device-code login only when no
 usable cache exists.
 
+The source launcher reads `.env` from the working directory or project root.
+The compiled one-file executable also searches for `.env` beside itself and in
+its parent directory. Keep the file beside the executable when launching it
+from another location; secrets are loaded at runtime and are never bundled.
+
 ## Configuration
 
 The most useful optional settings are:

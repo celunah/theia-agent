@@ -16,7 +16,31 @@ from dotenv import load_dotenv
 
 from .customization import CustomizationError
 
-load_dotenv()
+
+def _load_environment() -> None:
+    """Load the first available project ``.env`` without overriding the shell."""
+    roots = [Path.cwd()]
+    executable_values = (sys.argv[0], sys.executable)
+    for value in executable_values:
+        if not value:
+            continue
+        executable_root = Path(value).expanduser().resolve().parent
+        roots.extend((executable_root, executable_root.parent))
+    roots.append(Path(__file__).resolve().parent.parent)
+
+    seen: set[Path] = set()
+    for root in roots:
+        dotenv_path = root / ".env"
+        if dotenv_path in seen:
+            continue
+        seen.add(dotenv_path)
+        if dotenv_path.is_file():
+            load_dotenv(dotenv_path, override=False)
+            return
+    load_dotenv(override=False)
+
+
+_load_environment()
 
 AGENT_NAME = "Theia"
 AGENT_DISPLAY_NAME = "Theia Agent"
