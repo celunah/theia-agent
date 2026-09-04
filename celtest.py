@@ -33,7 +33,6 @@ import ast
 import re
 import sys
 import time
-import tomllib
 import warnings
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -41,6 +40,11 @@ from collections.abc import Callable, Generator, Mapping
 from typing import Optional, ParamSpec, Protocol, TypeVar, cast
 
 import pytest
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
+    import tomli as tomllib
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
