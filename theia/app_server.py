@@ -1414,9 +1414,9 @@ class CodexAppServer:
                 process.stdin.close()
             try:
                 await asyncio.wait_for(process.wait(), timeout=5)
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 process.terminate()
-                with contextlib.suppress(TimeoutError):
+                with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(process.wait(), timeout=5)
 
         for task in (reader_task, stderr_task):
@@ -2527,7 +2527,7 @@ class CodexAppServer:
                 (time.monotonic() - started_at) * 1000,
             )
             return result
-        except TimeoutError as exc:
+        except asyncio.TimeoutError as exc:
             logger.warning(
                 "Codex turn timed out; interrupting it (duration_ms=%.1f)",
                 (time.monotonic() - started_at) * 1000,
@@ -2968,7 +2968,7 @@ class CodexAppServer:
             response = (
                 await asyncio.wait_for(future, wait_for) if wait_for else await future
             )
-        except TimeoutError as exc:
+        except asyncio.TimeoutError as exc:
             self._pending.pop(request_id, None)
             logger.warning(
                 "Codex protocol request timed out (method=%s, duration_ms=%.1f)",
@@ -3276,7 +3276,7 @@ class CodexAppServer:
                 asyncio.shield(pending.future),
                 _env_float("CODEX_APPROVAL_TIMEOUT", 300),
             )
-        except (TimeoutError, discord.DiscordException):
+        except (asyncio.TimeoutError, discord.DiscordException):
             logger.warning(
                 "Codex approval request ended without approval (kind=%s)",
                 _safe_log_label(kind),
