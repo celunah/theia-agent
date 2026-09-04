@@ -4,7 +4,33 @@ from typing import Any
 
 import discord
 
-from .core import _truncate
+from .core import _command_embed, _safe_intermediate_text, _subtext, _truncate
+
+
+def _frontend_label(
+    customizer: Any | None,
+    guild_id: int | None,
+    target: str,
+    default: str,
+    *,
+    context: dict[str, Any] | None = None,
+) -> str:
+    if customizer is None:
+        return _truncate(default, 80)
+    try:
+        label = getattr(customizer, "label", None)
+        if callable(label):
+            value = label(guild_id, target, default, context=context)
+        else:
+            value = customizer.render(
+                guild_id, target, "label", default, context=context
+            )
+        return _truncate(
+            value,
+            80,
+        ) or _truncate(default, 80)
+    except Exception:  # noqa: BLE001 - frontend preferences must be fail-safe
+        return _truncate(default, 80)
 
 
 class _DecisionView(discord.ui.View):
@@ -155,14 +181,66 @@ class _UserInputView(discord.ui.View):
         user_id: int | None,
         questions: list[dict[str, Any]],
         *,
+        channel: discord.abc.Messageable | None = None,
+        customizer: Any | None = None,
         timeout: float = 300,
     ) -> None:
         super().__init__(timeout=timeout)
         self.user_id = user_id
         self.questions = questions
+        self.guild_id = getattr(getattr(channel, "guild", None), "id", None)
+        self.customizer = customizer
         self.value: dict[str, Any] | None = None
-        first = questions[0] if questions else {}
-        options = first.get("options") or []
+        self.question_index = 0
+        self._answers: dict[str, dict[str, list[str]]] = {}
+        self._build_question_items()
+
+    @property
+    def current_question(self) -> dict[str, Any]:
+        if not self.questions:
+            return {}
+        return self.questions[self.question_index]
+
+    def _question_prompt(self) -> str:
+        question = self.current_question
+        header = str(question.get("header") or question.get("id") or "Question")
+        prompt = str(question.get("question") or "Please provide an answer.")
+        return (
+            _safe_intermediate_text(f"**{header}:** {prompt}", 1800)
+            or "Codex needs your input."
+        )
+
+    def message_kwargs(self, *, for_edit: bool = False) -> dict[str, Any]:
+        """Render the current question for the initial send or next step."""
+        question = self.current_question
+        message: dict[str, Any] = {"view": self}
+        options = question.get("options") or []
+        if options:
+            if for_edit:
+                message["content"] = None
+            message["embed"] = _command_embed(
+                "Choose an option",
+                self._question_prompt(),
+                color=discord.Color.blurple(),
+                target="label:choose_option",
+                guild_id=self.guild_id,
+                customizer=self.customizer,
+                context={"question": self._question_prompt()},
+            )
+        else:
+            if for_edit:
+                message["embed"] = None
+            message["content"] = _subtext(self._question_prompt())
+        return message
+
+    def _build_question_items(self) -> None:
+        self.clear_items()
+        question = self.current_question
+        options = [
+            option
+            for option in (question.get("options") or [])
+            if isinstance(option, dict)
+        ]
         for option in options[:4]:
             label = _truncate(option.get("label") or "Choose", 80)
             button = discord.ui.Button(label=label, style=discord.ButtonStyle.primary)
@@ -173,55 +251,50 @@ class _UserInputView(discord.ui.View):
                 answer: str = str(option.get("label") or ""),
             ) -> None:
                 if await self.interaction_check(interaction):
-                    self._set_answer(answer)
-                    await interaction.response.edit_message(view=self)
-                    self.stop()
+                    complete = self._record_answer(answer)
+                    if complete:
+                        await interaction.response.edit_message(view=self)
+                        self.stop()
+                    else:
+                        await interaction.response.edit_message(
+                            **self.message_kwargs(for_edit=True)
+                        )
 
             button.callback = callback
             self.add_item(button)
 
-        if first.get("isOther") or not options:
+        if question.get("isOther") or not options:
             other = discord.ui.Button(
-                label="Other", style=discord.ButtonStyle.secondary
+                label=_frontend_label(
+                    self.customizer,
+                    self.guild_id,
+                    "label:other_button" if options else "label:answer_button",
+                    "Other" if options else "Answer",
+                ),
+                style=discord.ButtonStyle.secondary,
             )
 
             async def other_callback(interaction: discord.Interaction) -> None:
                 if await self.interaction_check(interaction):
                     await interaction.response.send_modal(
-                        _TextModal(self, self.user_id, first),
+                        _TextModal(self, self.user_id, question),
                     )
 
             other.callback = other_callback
             self.add_item(other)
 
-        if len(questions) > 1:
-            all_answers = discord.ui.Button(
-                label="Answer all (JSON)",
-                style=discord.ButtonStyle.secondary,
-            )
-
-            async def all_callback(interaction: discord.Interaction) -> None:
-                if await self.interaction_check(interaction):
-                    ids = ", ".join(str(question.get("id")) for question in questions)
-                    await interaction.response.send_modal(
-                        _JsonModal(
-                            _FormViewProxy(self),
-                            self.user_id,
-                            title="Codex questions",
-                            prompt=f"JSON object using these ids: {ids}",
-                        )
-                    )
-
-            all_answers.callback = all_callback
-            self.add_item(all_answers)
-
-    def _set_answer(self, answer: str) -> None:
-        answers: dict[str, dict[str, list[str]]] = {}
-        if self.questions:
-            answers[str(self.questions[0].get("id"))] = {"answers": [answer]}
-        for question in self.questions[1:]:
-            answers[str(question.get("id"))] = {"answers": []}
-        self.value = {"answers": answers}
+    def _record_answer(self, answer: str) -> bool:
+        question_id = str(self.current_question.get("id") or self.question_index)
+        self._answers[question_id] = {"answers": [str(answer)]}
+        if self.question_index + 1 < len(self.questions):
+            self.question_index += 1
+            self._build_question_items()
+            return False
+        self.value = {"answers": dict(self._answers)}
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        return True
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if self.user_id is not None and interaction.user.id != self.user_id:
@@ -263,34 +336,11 @@ class _TextModal(discord.ui.Modal):
                 ephemeral=True,
             )
             return
-        self.view._set_answer(str(self.answer))
-        await interaction.response.defer(ephemeral=True)
-        self.view.stop()
-
-
-class _FormViewProxy(_FormView):
-    """Adapts the JSON modal's result back into a request_user_input view."""
-
-    def __init__(self, target: _UserInputView) -> None:
-        self.target = target
-
-    @property
-    def value(self) -> Any:
-        return self.target.value
-
-    @value.setter
-    def value(self, value: Any) -> None:
-        if value is None:
-            self.target.value = None
-            return
-        answers: dict[str, dict[str, list[str]]] = {}
-        if isinstance(value, dict):
-            for question in self.target.questions:
-                question_id = str(question.get("id"))
-                raw = value.get(question_id, "")
-                values = raw if isinstance(raw, list) else [raw]
-                answers[question_id] = {"answers": [str(item) for item in values]}
-        self.target.value = {"answers": answers}
-
-    def stop(self) -> None:
-        self.target.stop()
+        complete = self.view._record_answer(str(self.answer))
+        if complete:
+            await interaction.response.edit_message(view=self.view)
+            self.view.stop()
+        else:
+            await interaction.response.edit_message(
+                **self.view.message_kwargs(for_edit=True)
+            )

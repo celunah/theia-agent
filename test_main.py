@@ -1290,6 +1290,50 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
             [item.label for item in channel.sent[0]["view"].children], ["Red", "Blue"]
         )
 
+    async def test_multiple_questions_are_asked_in_order_and_return_structured_answers(
+        self,
+    ) -> None:
+        view = main._UserInputView(
+            7,
+            [
+                {
+                    "id": "color",
+                    "header": "Color",
+                    "question": "Choose a color",
+                    "options": [{"label": "Red"}, {"label": "Blue"}],
+                },
+                {
+                    "id": "details",
+                    "header": "Details",
+                    "question": "Add details",
+                },
+            ],
+        )
+
+        first = view.message_kwargs()
+        self.assertEqual(first["embed"].title, "Choose an option")
+        self.assertEqual(
+            [item.label for item in view.children], ["Red", "Blue"]
+        )
+        self.assertFalse(view._record_answer("Red"))
+        self.assertEqual(view.question_index, 1)
+        self.assertEqual([item.label for item in view.children], ["Answer"])
+        next_question = view.message_kwargs(for_edit=True)
+        self.assertIsNone(next_question["embed"])
+        self.assertTrue(next_question["content"].startswith("-# "))
+
+        self.assertTrue(view._record_answer("A warm color"))
+        self.assertEqual(
+            view.value,
+            {
+                "answers": {
+                    "color": {"answers": ["Red"]},
+                    "details": {"answers": ["A warm color"]},
+                }
+            },
+        )
+        self.assertNotIn("Answer all (JSON)", [item.label for item in view.children])
+
     async def test_free_text_request_stays_plain_text(self) -> None:
         server = main.CodexAppServer()
         channel = _Channel()

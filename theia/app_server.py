@@ -2780,27 +2780,15 @@ class CodexAppServer:
             len(questions),
             bool(questions[0].get("options")),
         )
-        prompt = "\n".join(
-            f"**{question.get('header') or question.get('id')}:** {question.get('question', '')}"
-            for question in questions
+        view = _UserInputView(
+            user_id,
+            questions,
+            channel=channel,
+            customizer=self._frontend_customizer,
         )
-        view = _UserInputView(user_id, questions)
         try:
-            prompt_text = (
-                _safe_intermediate_text(prompt, 1800) or "Codex needs your input."
-            )
-            message: dict[str, Any] = {
-                "view": view,
-                "allowed_mentions": discord.AllowedMentions.none(),
-            }
-            if questions[0].get("options"):
-                message["embed"] = _command_embed(
-                    "Choose an option",
-                    prompt_text,
-                    color=discord.Color.blurple(),
-                )
-            else:
-                message["content"] = _subtext(prompt_text)
+            message = view.message_kwargs()
+            message["allowed_mentions"] = discord.AllowedMentions.none()
             await channel.send(**message)
             await view.wait()
         except discord.DiscordException:
