@@ -1,3 +1,5 @@
+"""Translate Codex progress and final responses into resilient Discord messages."""
+
 import asyncio
 import contextlib
 import io
@@ -12,6 +14,7 @@ from .core import (
     _codex_logger,
     _command_embed,
     _is_tool_item,
+    _render_frontend_label,
     _safe_error_reason,
     _safe_intermediate_text,
     _subtext,
@@ -62,17 +65,35 @@ class _PaginatorView(discord.ui.View):
         pages: list[str],
         *,
         owner_id: int | None,
+        customizer: Any | None = None,
+        guild_id: int | None = None,
         timeout: float = 900,
     ) -> None:
         super().__init__(timeout=timeout)
         self.pages = pages
         self.owner_id = owner_id
+        self.customizer = customizer
+        self.guild_id = guild_id
         self.index = 0
         self.message: discord.Message | discord.WebhookMessage | None = None
         previous = discord.ui.Button(
-            label="Previous", style=discord.ButtonStyle.secondary
+            label=_render_frontend_label(
+                customizer,
+                guild_id,
+                "label:previous_button",
+                "Previous",
+            ),
+            style=discord.ButtonStyle.secondary,
         )
-        following = discord.ui.Button(label="Next", style=discord.ButtonStyle.primary)
+        following = discord.ui.Button(
+            label=_render_frontend_label(
+                customizer,
+                guild_id,
+                "label:next_button",
+                "Next",
+            ),
+            style=discord.ButtonStyle.primary,
+        )
 
         async def previous_callback(interaction: discord.Interaction) -> None:
             if not await self.interaction_check(interaction):
@@ -109,9 +130,11 @@ class _PaginatorView(discord.ui.View):
             buttons[1].disabled = self.index == len(self.pages) - 1
 
     def content(self) -> str:
+        """Return the page currently selected by the paginator."""
         return self.pages[self.index]
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Allow pagination controls only for the response owner."""
         if self.owner_id is not None and interaction.user.id != self.owner_id:
             await interaction.response.send_message(
                 "Only the user who requested this response can navigate it.",
@@ -123,6 +146,7 @@ class _PaginatorView(discord.ui.View):
     async def handle_reaction(
         self, reaction: discord.Reaction, user: discord.abc.User
     ) -> None:
+        """Move the paginator and edit its message for an authorized reaction."""
         if self.owner_id is not None and user.id != self.owner_id:
             return
         if reaction.emoji == "◀️":
@@ -138,6 +162,7 @@ class _PaginatorView(discord.ui.View):
             await reaction.remove(user)
 
     async def on_timeout(self) -> None:
+        """Remove the expired paginator from the reaction dispatch table."""
         if self.message is not None:
             _reaction_paginators.pop(self.message.id, None)
 
@@ -153,12 +178,24 @@ async def send_paginated(
     color: discord.Color | None = None,
     owner_id: int | None = None,
     speech: Iterable[AudioOutput] = (),
+    customizer: Any | None = None,
+    guild_id: int | None = None,
     **kwargs: Any,
 ) -> Any:
+    """Send a response using components, reactions, or message splitting as fallback."""
     del title, color
     pages = _split_pages(response)
     speech_outputs = tuple(speech)
-    view = _PaginatorView(pages, owner_id=owner_id) if len(pages) > 1 else None
+    view = (
+        _PaginatorView(
+            pages,
+            owner_id=owner_id,
+            customizer=customizer,
+            guild_id=guild_id,
+        )
+        if len(pages) > 1
+        else None
+    )
 
     def send_kwargs(
         content: str,
@@ -230,9 +267,11 @@ class _ResponseDelivery:
         self.lock = asyncio.Lock()
 
     async def start(self) -> None:
+        """Reserve the delivery lifecycle hook for future initial-status behavior."""
         return
 
     async def on_event(self, event: str, payload: dict[str, Any]) -> None:
+        """Translate selected Codex events into compact Discord progress updates."""
         async with self.lock:
             if event == "thread_opening":
                 message = _safe_intermediate_text(
@@ -364,6 +403,7 @@ class _ResponseDelivery:
         error_reason: str | None = None,
         speech: Iterable[AudioOutput] = (),
     ) -> None:
+        """Replace progress status with a safe error or paginated final response."""
         async with self.lock:
             if self.status_message is not None and self.thought_started_at is not None:
                 thought = _format_thought_duration(
@@ -428,9 +468,12 @@ class _ResponseDelivery:
             title="Codex",
             owner_id=self.owner_id,
             speech=speech,
+            customizer=self.customizer,
+            guild_id=self.guild_id,
             **self.kwargs,
         )
 
 
 async def send_response(send: SendMessage, response: str, **kwargs: Any) -> None:
+    """Send a response through the standard Discord pagination path."""
     await send_paginated(send, response, **kwargs)

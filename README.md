@@ -1,275 +1,155 @@
 # Theia Agent
 
-Theia Agent runs the Codex App Server with a private runtime home by default:
+Theia Agent is a Discord bot that brings private, persistent Codex
+conversations to Discord. It runs the Codex App Server locally and keeps each
+user, channel, and thread in an isolated session.
+
+The current release is `1.0.0`.
+
+## Highlights
+
+- Text conversations in DMs and guild channels, with optional response threads
+  and bounded recent-channel context.
+- Session recovery, `/undo`, inactivity retention, approvals, and sequential
+  questions.
+- Dynamic Codex model selection, adaptive reasoning, native web search, skills,
+  memories, and Markdown personality profiles.
+- Attachments for images, audio, and text-like files.
+- Optional voice mode using OpenAI-compatible speech-to-text and text-to-speech
+  services.
+- Server-scoped Discord presentation customization and administrator controls.
+- Read-only/safe tool access for regular users; administrators receive the
+  configured full Codex policy.
+
+## Discord commands
 
 ```text
-~/.theia
+/login       /about       /usage       /credits
+/approve     /deny        /stop        /undo
+/btw         /skill       /personality /model
+/mode        /restart     /customize
 ```
+
+Prefix commands are disabled. `/restart` and `/customize` are
+administrator-only. `/mode voice` requires the voice dependencies and audio
+services described below.
+`/customize` also covers pagination controls, input modal labels, and embed
+field labels in the account, usage, credits, and About views.
+`/about` privately shows the running Theia version and revision, selected
+Codex CLI version, invoking Discord account, Codex plan, and current session
+mode and personality.
 
 ## Installation
 
-The Python application and Codex CLI are installed locally in the project. A
-system-wide Codex CLI is not required:
+Requirements:
+
+- Python 3.10 or newer
+- [uv](https://docs.astral.sh/uv/)
+- Node.js 16 or newer with npm
+- A Discord bot token
+
+From the project directory:
 
 ```bash
 python scripts/bootstrap.py
 ```
 
-The bootstrap command runs `uv sync` and then `npm ci` from the checked-in
-`package-lock.json`. Theia prefers the resulting project-local `codex`
-executable and only uses a system installation as a compatibility fallback.
-Use `THEIA_CODEX_CLI` to select a specific CLI executable explicitly.
-
-This keeps Theia-installed skills and Theia-specific Codex configuration out
-of the global `~/.codex` directory. Set `THEIA_HOME` to choose a different
-private home, or `THEIA_STATE` to choose a different session-state file. The
-legacy `CODEX_DISCORD_HOME` and `CODEX_DISCORD_STATE` overrides are still
-supported.
-Theia's Codex login is stored in its private home. If a global Codex login
-already exists, Theia bootstraps a private copy on first startup without
-modifying the global configuration; later restarts reuse the private copy.
-When a server administrator completes `/login` in a server, the persisted
-Codex authorization is granted to all members of that server. Other servers
-and direct messages remain separately gated until authorized.
-
-Global memory and skills remain discoverable as shared inputs. The standard
-installer uses Theia's `CODEX_HOME` and therefore installs into the private
-home:
-
-```text
-~/.theia/skills/<skill-name>/SKILL.md
-```
-
-Project-local skills are also discovered from:
-
-```text
-<project>/.agents/skills/
-<project>/.codex/skills/
-```
-
-Theia also discovers Hermes roots from `HERMES_HOME` (default `~/.hermes`),
-alongside the global Codex roots. Use `CODEX_MEMORY_ROOTS` and
-`CODEX_SKILL_ROOTS` for additional roots. Paths are separated using the
-platform path separator (`:` on Linux/macOS). Explicitly set
-`THEIA_INCLUDE_GLOBAL_MEMORY=true` if the global Codex memory snapshot should
-be injected into new threads; it remains available as a workspace root by
-default.
-
-Each text, `/btw`, `/skill`, and voice request receives a bounded snapshot of
-recent messages from its current Discord channel, ordered oldest to newest.
-Theia excludes its compact `-#` progress messages and continues without
-channel context when Discord history is unavailable. Configure the bounds with
-`THEIA_CONTEXT_MESSAGES` (default `12`, maximum `30`) and
-`THEIA_CONTEXT_MAX_CHARACTERS` (default `8000`, maximum `16000`).
-
-## Development checks
-
-Install the development dependencies and run the complete local CI contract:
+This installs the Python dependencies and the project-local Codex CLI from the
+checked-in `package-lock.json`. Run the setup wizard before the first launch:
 
 ```bash
-uv sync --dev
-python scripts/run_ci.py
+python scripts/configure.py
 ```
 
-The contract runs Ruff checks, formatting verification, Pylint, Pyrefly, and
-the complete pytest suite. Use `uv run poe test_basic` for serial test
-debugging or `uv run poe test_changed` for local incremental iteration.
+It asks for text or voice mode, then collects the Discord token and (for voice
+mode) the OpenAI-compatible STT/TTS URLs and optional service tokens. It writes
+the local ignored `.env` atomically. You can also create `.env` from
+`.env.example` and edit it manually.
 
-## Discord conversations
+Start the bot with:
 
-Direct messages are accepted without a mention. Guild channels require a
-mention by default, while threads in which the bot has participated can
-continue without repeated mentions. These controls can be configured with
-`THEIA_REQUIRE_MENTION`, `THEIA_THREAD_REQUIRE_MENTION`,
-`THEIA_FREE_RESPONSE_CHANNELS`, and `THEIA_AUTO_THREAD` (the corresponding
-`DISCORD_*` names are also accepted). When auto-threading is enabled, Theia
-creates a response thread only when the user's request explicitly asks for
-one; ordinary requests stay in the original channel. If Discord cannot create
-the requested thread, Theia continues in that original channel. The bot stores
-bounded channel checkpoints and request IDs in the private state file to
-recover missed messages after a gateway resume and suppress duplicate
-deliveries.
-
-Server administrators also expose a guarded `discord.create_thread` tool to
-Codex. Codex decides when a thread is needed, can assign its name to both
-Discord and the Codex session, and Theia routes the first response there. The
-tool is unavailable to normal users. Codex exposes dynamic tools when a new
-session is started; restored sessions use the protocol's resume path and retain
-the existing frontend auto-thread behavior.
-
-Server administrators have the configured full Codex tool policy. Other users
-may use read-only/safe tools, but cannot modify files, run state-changing
-commands, send Discord messages through Codex, or perform external side
-effects. This policy is applied when the Codex thread starts and a role-policy
-change starts a fresh thread.
-
-`/model` uses Codex model autocomplete to select the active model. Reasoning
-remains adaptive and is not manually overridden. Server administrators can use
-`/restart` to gracefully replace the running bot process in place; persisted
-Codex sessions and frontend settings are reused.
-
-Server administrators can customize the Discord-only presentation with:
-
-```text
-/customize target:<command-or-label> element:<title|content|color|label> value:<value>
+```bash
+uv run python main.py
 ```
 
-Targets may be commands such as `/usage` or frontend labels such as `Thinking`.
-Values support Markdown and these placeholders:
-`{balance}`, `{channel}`, `{channel_id}`, `{command}`, `{count}`, `{current_streak}`,
-`{duration}`, `{longest_running_turn}`, `{longest_streak}`, `{mode}`, `{model}`,
-`{option}`, `{page}`, `{pages}`, `{peak_daily_tokens}`, `{personality}`, `{prompt}`,
-`{question}`, `{reason}`, `{reset_at}`, `{server}`, `{server_id}`, `{skill}`,
-`{status}`, `{text}`, `{user}`, `{user_id}`, `{used_percent}`, and
-`{lifetime_tokens}`. Use `default` as the value to reset an override.
-These preferences are server-wide and stored separately in
-`~/.theia/discord-customizations.json`; they do not enter Codex prompts or
-session state. Set `THEIA_CUSTOMIZATIONS` to use a different customization
-file.
+An optional one-file executable can be built with Nuitka:
 
-`/undo` removes the most recent completed Codex turn for the current Discord
-session. Sessions inactive for 30 days are archived automatically; activity
-unarchives them and continues the conversation. Sessions inactive for 90 days
-are deleted automatically; later activity starts a new conversation.
+```bash
+uv run --with nuitka python scripts/build_nuitka.py
+```
 
-Messages and `/btw` requests may include an optional attachment. Theia caches
-attachments privately, sends images/audio through Codex local-input types, and
-includes bounded text content for text-like files. Generated files located in
-approved runtime/workspace roots can be sent through Codex's Discord tool.
+This removes the need for a loose Python `.venv`; the executable is `dist/theia`
+(`dist/theia.exe` on Windows). It still starts Codex as a child process and
+therefore needs Node.js plus the bootstrapped or explicitly configured Codex CLI.
+Nuitka and a supported platform compiler are build-time requirements.
 
-## Transcription and TTS
+Keep `.env` private. Theia stores its Codex login, session state, cached
+attachments, personalities, and installed skills in a private home at
+`~/.theia` by default. Use `THEIA_HOME` and `THEIA_STATE` to relocate that
+home or state file. Theia reuses valid private authentication, imports another
+Codex cache atomically when needed, and starts device-code login only when no
+usable cache exists.
 
-Theia can use separate OpenAI-compatible audio servers. Both integrations are
-disabled when their base URL is empty. Set each base URL to the server's API
-base (for example, `https://audio.example/v1`); Theia calls the standard
-`/audio/transcriptions` and `/audio/speech` endpoints without adding `/v1`
-automatically:
+## Configuration
 
-```text
-STT_BASE_URL=https://transcription.example/v1
-STT_TOKEN=                              # optional for local servers
+The most useful optional settings are:
+
+```dotenv
+# Codex and runtime
+THEIA_DEFAULT_MODE=text        # text or voice for new sessions
+THEIA_CODEX_CLI=
+THEIA_HOME=
+THEIA_STATE=
+THEIA_WEB_SEARCH=indexed       # disabled, indexed, or live
+THEIA_SAFE_WORKSPACE_ROOTS=     # optional extra read-only roots for regular users
+THEIA_ATTACHMENT_CACHE_LIMIT_BYTES=536870912
+CODEX_ADAPTIVE_REASONING=true
+
+# Discord behavior
+THEIA_REQUIRE_MENTION=true
+THEIA_THREAD_REQUIRE_MENTION=true
+THEIA_AUTO_THREAD=true
+THEIA_CONTEXT_MESSAGES=12
+THEIA_CONTEXT_MAX_CHARACTERS=8000
+
+# Optional OpenAI-compatible audio services
+STT_BASE_URL=
+STT_TOKEN=
 STT_MODEL=whisper-1
-
-TTS_BASE_URL=https://tts.example/v1
-TTS_TOKEN=                              # optional for local servers
+TTS_BASE_URL=
+TTS_TOKEN=
 TTS_MODEL=tts-1
 TTS_VOICE=alloy
 TTS_FORMAT=mp3
 ```
 
-The optional `STT_PROTOCOL`, `STT_MODEL`, `TTS_PROTOCOL`, `TTS_MODEL`,
-`TTS_VOICE`, and `TTS_FORMAT` settings select compatible server details. The
-older `THEIA_TRANSCRIPTION_*` and `THEIA_TTS_*` names remain accepted as
-aliases.
+Voice mode also needs a system Opus library and `ffmpeg` on `PATH`. The audio
+integrations remain disabled when their base URLs are empty.
 
-Audio attachments are transcribed and the transcript is provided to Codex in
-addition to the cached audio input. Completed responses are kept as normal
-Discord text and, when TTS is configured, also include generated audio
-attachments. Long responses are split into separate audio attachments to stay
-within the standard speech input limit. TTS failures do not discard a
-successful text response; transcription failures are reported as request
-failures.
+## Security and privacy
 
-Use `/mode voice` to enable voice mode for the current Discord session. The
-user must already be in a voice channel, and both `STT_BASE_URL` and
-`TTS_BASE_URL` must be configured. Voice mode listens through the optional
-`discord-ext-voice-recv` adapter, labels speech with the Discord speaker when
-available, sends transcripts through the same Codex session, and plays
-intermediate and final responses back into the voice channel. `/mode text`
-returns the session to the default text-only behavior.
+Theia does not send ChatGPT credentials, raw tool calls, paths, or sensitive
+payloads to Discord. Approvals are bound to the requesting Discord user,
+session, turn, and item. Runtime diagnostics are sanitized by default.
 
-Voice receive also requires a system Opus library supported by discord.py. TTS
-playback requires `ffmpeg` to be available on `PATH`; if either dependency is
-missing, `/mode voice` reports that voice mode cannot be started.
+Regular users are restricted to read-only/safe Codex tools and uploaded
+attachments by default. Add only explicitly shared, non-sensitive directories
+to `THEIA_SAFE_WORKSPACE_ROOTS`. Server administrators can use the configured
+full tool policy, including approvals and the guarded Discord thread-creation
+tool.
 
-## Personalities
+## Development
 
-The `/personality` command manages Markdown or UTF-8 text personality prompts:
+Install development dependencies and run the complete local CI contract:
 
-```text
-/personality file:<prompt.md> name:<profile-name>  upload and activate
-/personality name:<profile-name>                  switch profiles
-/personality name:none                            clear the active profile
+```bash
+uv sync --dev
+uv run python scripts/run_ci.py
 ```
 
-The `name` option uses Discord autocomplete for profiles already stored in the
-private Theia home. Providing only a file is rejected; providing no options
-shows the command usage. The selected profile is kept per Discord session and
-persisted across bot restarts.
-The `none`, `default`, and `neutral` names clear the active profile.
+The contract checks Ruff, formatting, Pylint, Pyrefly, and the complete pytest
+suite. For focused iteration, use `uv run poe test_basic` or
+`uv run poe test_changed`.
 
-Codex receives one consistent system instruction before the user request: the
-base priors first, followed by the bounded memory snapshot and selected
-personality. Changing or clearing
-the personality resets that Discord session so old and new instructions are
-never mixed in one Codex thread.
-
-## Adaptive reasoning
-
-Adaptive reasoning is enabled by default. Before each request, Codex runs a
-hidden, ephemeral pre-assessment to decide whether external tools are needed
-and how complex the task is. Requests that do not need a tool use the model's
-lowest supported reasoning level (`low`, `light`, or `minimal`). Tool-backed
-requests use `medium`, `high`, `xhigh`, or `max` when the active model supports
-them. If the assessment or model capability data is unavailable, the request
-uses `medium`.
-
-Set `CODEX_ADAPTIVE_REASONING=false` to disable the pre-assessment and use the
-`medium` default for every request. The assessment itself is not shown in
-Discord and does not modify the user's Codex thread.
-
-## Web search
-
-Theia uses Codex's native hosted web-search tool. On startup it adds
-`web_search = "indexed"` to the private `config.toml` when no search mode has
-been configured. Codex then uses its search index to decide when external live
-web access is appropriate. Set `THEIA_WEB_SEARCH=live` to always prefer live
-results, or `THEIA_WEB_SEARCH=disabled` to turn search off. Existing Codex
-settings are preserved when the environment override is not set.
-
-## Discord presence
-
-The bot presence is dynamic. It is `online` after a recent user interaction,
-changes to `idle` after 15 minutes without interaction, and changes to `Do Not
-Disturb` only when a real Codex tool-backed request has run for at least 60
-seconds. Basic conversation never becomes DND, and context compaction is not
-treated as a task. The thresholds can be customized:
-
-```text
-THEIA_PRESENCE_IDLE_AFTER=900
-THEIA_PRESENCE_LONG_TASK_AFTER=60
-THEIA_PRESENCE_UPDATE_INTERVAL=15
-```
-
-## Logging
-
-The Codex layer uses the `theia.codex` Python logger and defaults to concise,
-colored `INFO` output matching discord.py's timestamp, level, and logger
-format. It reports the basic app-server lifecycle, request and turn progress,
-tool activity, approvals, and failures without logging raw payloads. Set
-`THEIA_CODEX_LOG_LEVEL=DEBUG` for protocol-level diagnostics, or `WARNING` to
-show only warnings and errors. Set `THEIA_CODEX_LOG_COLORS=false` when plain
-output is needed. For more detail in an embedding application:
-
-```python
-import logging
-
-logging.getLogger("theia.codex").setLevel(logging.DEBUG)
-```
-
-Diagnostics intentionally omit prompts, credentials, user or session ids,
-commands, paths, raw protocol payloads, and tool output. Exception traces are
-represented by their type rather than their potentially sensitive message.
-
-## Source layout
-
-```text
-main.py                    Compatibility launcher and re-exports
-theia/core.py              Shared types, configuration, and safe formatting
-theia/customization.py     Server-scoped Discord UI customization
-theia/ui.py                Approval, input, and modal components
-theia/app_server.py        Codex App Server protocol and session lifecycle
-theia/delivery.py          Progress delivery and response pagination
-theia/bot.py               Discord commands and gateway events
-theia/personality.py       Personality profile validation and storage
-```
+For the fuller capability inventory and current app-server coverage, see
+[`THEIA_FEATURES.md`](THEIA_FEATURES.md).

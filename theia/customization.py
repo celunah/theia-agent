@@ -7,9 +7,12 @@ administrator can change the bot's UI without changing agent state.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +36,7 @@ COMMAND_TARGETS = (
     "model",
     "mode",
     "customize",
+    "about",
 )
 
 LABEL_TARGETS = (
@@ -48,6 +52,7 @@ LABEL_TARGETS = (
     "administrator_access_required",
     "approval_needed",
     "choose_option",
+    "choose_button",
     "approve_button",
     "deny_button",
     "previous_button",
@@ -55,11 +60,33 @@ LABEL_TARGETS = (
     "other_button",
     "answer_button",
     "decline_button",
+    "input_modal_title",
+    "json_response",
+    "text_input_label",
+    "login_verification_link",
+    "login_code",
+    "login_visibility_footer",
+    "usage_lifetime_tokens",
+    "usage_peak_daily_tokens",
+    "usage_current_streak",
+    "usage_longest_streak",
+    "usage_longest_running_turn",
+    "credits_balance",
+    "credits_status",
+    "credits_five_hour_limit",
+    "credits_weekly_limit",
+    "about_theia_agent",
+    "about_codex_cli",
+    "about_account",
+    "about_plan",
+    "about_mode",
+    "about_personality",
 )
 
 ELEMENTS = ("title", "content", "color", "label")
 _PLACEHOLDER_RE = re.compile(r"\{([A-Za-z][A-Za-z0-9_]*)\}")
 _TARGET_RE = re.compile(r"^(?:(command|label):)?(.+)$", re.IGNORECASE)
+logger = logging.getLogger(__name__)
 
 PLACEHOLDERS = {
     "command",
@@ -128,6 +155,7 @@ def canonical_target(value: str) -> str:
 
 
 def display_target(target: str) -> str:
+    """Convert a canonical command or label target into Discord-facing text."""
     kind, name = target.split(":", 1)
     if kind == "command":
         return f"/{name}"
@@ -224,15 +252,35 @@ class FrontendCustomizationStore:
             / "discord-customizations.json"
         )
         self._values: dict[str, dict[str, dict[str, str]]] = {}
+        self._recovery_blocked = False
         self._load()
 
     def _load(self) -> None:
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            raw = self.path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return
+        except UnicodeDecodeError as exc:
+            self._quarantine(type(exc).__name__)
+            return
+        except OSError as exc:
+            self._recovery_blocked = True
+            logger.warning(
+                "Could not read Discord customization state (error=%s)",
+                type(exc).__name__,
+            )
+            return
+        try:
+            data = json.loads(raw)
+        except ValueError as exc:
+            self._quarantine(type(exc).__name__)
+            return
+        if not isinstance(data, dict):
+            self._quarantine("invalid top-level JSON value")
             return
         guilds = data.get("guilds") if isinstance(data, dict) else None
         if not isinstance(guilds, dict):
+            self._quarantine("missing guilds mapping")
             return
         for guild_id, targets in guilds.items():
             if not str(guild_id).isdigit() or not isinstance(targets, dict):
@@ -260,11 +308,39 @@ class FrontendCustomizationStore:
             if valid_targets:
                 self._values[str(guild_id)] = valid_targets
 
+    def _quarantine(self, reason: str) -> None:
+        """Preserve malformed customization data before recovery writes."""
+        quarantine = self.path.with_name(f"{self.path.name}.corrupt-{time.time_ns()}")
+        try:
+            self.path.replace(quarantine)
+        except OSError as exc:
+            self._recovery_blocked = True
+            logger.error(
+                "Could not quarantine Discord customization state "
+                "(reason=%s, error=%s)",
+                reason,
+                type(exc).__name__,
+            )
+            return
+        with contextlib.suppress(OSError):
+            quarantine.chmod(0o600)
+        self._recovery_blocked = False
+        logger.warning(
+            "Preserved corrupt Discord customization state as %s (reason=%s)",
+            quarantine.name,
+            reason,
+        )
+
     def _persist(self) -> None:
+        if self._recovery_blocked:
+            raise CustomizationError(
+                "The existing Discord customization file is unreadable and was "
+                "preserved. Repair or remove it before saving new customizations."
+            )
         data = {"guilds": self._values}
+        temporary = self.path.with_suffix(".tmp")
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.path.with_suffix(".tmp")
             temporary.write_text(json.dumps(data, indent=2), encoding="utf-8")
             temporary.chmod(0o600)
             temporary.replace(self.path)
@@ -272,8 +348,12 @@ class FrontendCustomizationStore:
             raise CustomizationError(
                 "The Discord customization could not be saved."
             ) from exc
+        finally:
+            with contextlib.suppress(OSError):
+                temporary.unlink()
 
     def get(self, guild_id: int | None, target: str, element: str) -> str | None:
+        """Return a stored override, or ``None`` when the guild has no override."""
         if guild_id is None:
             return None
         return self._values.get(str(guild_id), {}).get(target, {}).get(element)
@@ -285,6 +365,7 @@ class FrontendCustomizationStore:
         element_value: str,
         value: str,
     ) -> tuple[str, str, bool]:
+        """Validate and persist one guild override, returning its canonical target."""
         if not isinstance(guild_id, int) or guild_id <= 0:
             raise CustomizationError("Customizations can only be saved for a server.")
         target = canonical_target(target_value)
@@ -293,6 +374,7 @@ class FrontendCustomizationStore:
         if element == "color":
             _parse_color(template)
 
+        previous = json.loads(json.dumps(self._values))
         guild = self._values.setdefault(str(guild_id), {})
         target_values = guild.setdefault(target, {})
         reset = template.strip().casefold() in {"default", "reset"}
@@ -304,7 +386,11 @@ class FrontendCustomizationStore:
                 self._values.pop(str(guild_id), None)
         else:
             target_values[element] = template
-        self._persist()
+        try:
+            self._persist()
+        except CustomizationError:
+            self._values = previous
+            raise
         return target, element, reset
 
     def render(
@@ -316,6 +402,7 @@ class FrontendCustomizationStore:
         *,
         context: dict[str, Any] | None = None,
     ) -> str:
+        """Render a stored or default text value with safe placeholder substitution."""
         target = canonical_target(target_value)
         element = _validate_element(element_value)
         template = self.get(guild_id, target, element) or default
@@ -329,6 +416,7 @@ class FrontendCustomizationStore:
         *,
         context: dict[str, Any] | None = None,
     ) -> int:
+        """Return a stored Discord color after rendering and validating its template."""
         target = canonical_target(target_value)
         template = self.get(guild_id, target, "color")
         if template is None:
@@ -353,6 +441,7 @@ class FrontendCustomizationStore:
         return render_template(template or default, default=default, context=context)
 
     def targets(self, current: str = "") -> list[tuple[str, str]]:
+        """Return command and label targets matching an autocomplete query."""
         query = (current or "").casefold().strip()
         choices: list[tuple[str, str]] = []
         for name in COMMAND_TARGETS:
@@ -367,6 +456,7 @@ class FrontendCustomizationStore:
 
     @staticmethod
     def elements(current: str = "") -> list[tuple[str, str]]:
+        """Return valid customization elements matching an autocomplete query."""
         query = (current or "").casefold().strip()
         return [
             (element.title(), element)
@@ -376,6 +466,7 @@ class FrontendCustomizationStore:
 
     @staticmethod
     def placeholder_help() -> str:
+        """Return the supported placeholder names in a compact help string."""
         return ", ".join(f"{{{name}}}" for name in sorted(PLACEHOLDERS))
 
 

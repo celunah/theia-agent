@@ -78,6 +78,7 @@ class PresenceManager:
         self._lock = asyncio.Lock()
 
     async def start(self) -> None:
+        """Start the background loop that refreshes Discord presence state."""
         if self._loop_task is None or self._loop_task.done():
             self._closed = False
             self._loop_task = asyncio.create_task(self._run())
@@ -89,6 +90,7 @@ class PresenceManager:
         await self.refresh()
 
     async def close(self) -> None:
+        """Stop presence updates and mark the manager closed."""
         self._closed = True
         if self._loop_task is not None:
             self._loop_task.cancel()
@@ -102,6 +104,7 @@ class PresenceManager:
         await self.refresh()
 
     async def begin_request(self, request_id: str) -> None:
+        """Track a request so long-running tool work can drive DND presence."""
         self._active_requests[request_id] = _ActiveRequest(self._clock())
         await self.refresh()
 
@@ -121,10 +124,12 @@ class PresenceManager:
             await self.refresh()
 
     async def finish_request(self, request_id: str) -> None:
+        """Remove a request from activity tracking and refresh the status."""
         self._active_requests.pop(request_id, None)
         await self.refresh()
 
     async def refresh(self) -> None:
+        """Recalculate and publish presence from recent and active requests."""
         async with self._lock:
             now = self._clock()
             long_task = any(

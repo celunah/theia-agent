@@ -14,8 +14,12 @@ permissions:
 
 jobs:
   python-checks:
-    name: Python checks
+    name: Python checks (${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - name: Checkout repository
@@ -24,8 +28,22 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
       - name: Sync dependencies
-        run: python3 scripts/ci_warnings.py -- uv sync --dev
+        run: python3 scripts/ci_warnings.py -- uv sync --dev --python "${{ matrix.python-version }}"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Node dependencies
+        run: npm ci --no-audit --no-fund
 
       - name: Run Ruff checks
         run: python3 scripts/ci_warnings.py -- uv run poe ruff
@@ -39,9 +57,12 @@ jobs:
       - name: Type check
         run: python3 scripts/ci_warnings.py -- uv run poe types
 
+      - name: Check TypeScript test harness
+        run: python3 scripts/ci_warnings.py -- npm run check:test-harness
+
       - name: Check docstring coverage
         run: |
-          python3 scripts/ci_warnings.py -- uv run docstr-coverage -i -P --fail-under 80 theia scripts main.py celtest.py conftest.py test_main.py test_ci.py || {
+          python3 scripts/ci_warnings.py -- uv run docstr-coverage -i -P --fail-under 80 theia scripts main.py || {
             echo "::warning::Docstring coverage is below 80%. Try adding more missing docstrings."
           }
 

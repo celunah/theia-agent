@@ -13,9 +13,10 @@ from pathlib import Path
 from unittest import mock
 
 from scripts import run_ci
+from tests import celtest as celtest_reporter
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = ROOT / "scripts" / "ci_warnings.py"
 SPEC = importlib.util.spec_from_file_location("ci_warnings_script", SCRIPT_PATH)
 assert SPEC is not None and SPEC.loader is not None
@@ -123,6 +124,28 @@ class TestCIWarnings:
             "50%25%0D%0Awarning"
         )
 
+    def test_interrupt_cleanup_kills_the_wrapped_process_group(self) -> None:
+        """Stop descendants instead of leaving a CI subprocess tree behind."""
+        process = mock.Mock()
+        process.pid = 1234
+
+        with (
+            mock.patch.object(CI_WARNINGS.os, "name", "posix"),
+            mock.patch.object(
+                CI_WARNINGS.os, "getpgid", return_value=5678, create=True
+            ) as getpgid,
+            mock.patch.object(CI_WARNINGS.os, "killpg", create=True) as killpg,
+        ):
+            CI_WARNINGS._stop_process_tree(process)
+
+        getpgid.assert_called_once_with(1234)
+        killpg.assert_called_once_with(
+            5678,
+            getattr(CI_WARNINGS.signal, "SIGKILL", CI_WARNINGS.signal.SIGTERM),
+        )
+        process.kill.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=2)
+
     def test_main_preserves_failure_status_while_annotating_output(self) -> None:
         """Preserve wrapped command failures instead of masking them as warnings."""
         output = io.StringIO()
@@ -161,3 +184,31 @@ class TestCIWarnings:
         assert status == 0
         assert "⚙️ verify warning-only results" in output.getvalue()
         assert "::warning::" not in output.getvalue()
+
+
+class TestCeltestNaming:
+    """Verify Celtest renders test descriptions consistently."""
+
+    def test_docstring_descriptions_start_with_a_capital(self) -> None:
+        """Capitalize docstring-derived descriptions like fallback names."""
+        assert celtest_reporter._docstring_description("create a thread") == (
+            "Create a thread"
+        )
+        assert celtest_reporter._docstring_description("CI checks pass") == (
+            "CI checks pass"
+        )
+
+    def test_display_names_preserve_project_and_protocol_casing(self) -> None:
+        """Preserve terms such as Codex, CLI, Discord, and JSONL in names."""
+        assert (
+            celtest_reporter._friendly_name(
+                "test_commands_refer_to_codex_cli_and_discord"
+            )
+            == "Commands refer to Codex CLI and Discord"
+        )
+        assert (
+            celtest_reporter._docstring_description(
+                "use the codex CLI through Discord JSONL"
+            )
+            == "Use the Codex CLI through Discord JSONL"
+        )

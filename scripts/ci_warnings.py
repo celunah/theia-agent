@@ -3,11 +3,15 @@
 
 from __future__ import annotations
 
+import contextlib
 import io
+import os
 import re
+import signal
 import subprocess
 import sys
-from typing import Optional
+from collections.abc import Callable
+from typing import Any, Optional, cast
 
 
 if isinstance(sys.stdout, io.TextIOWrapper):
@@ -37,6 +41,43 @@ def _annotation_message(line: str) -> str:
     return line.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
 
+def _stop_process_tree(process: subprocess.Popen[str]) -> None:
+    """Stop the wrapped command and descendants after Ctrl+C."""
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    else:
+        getpgid = cast(
+            Callable[[int], int] | None,
+            getattr(os, "getpgid", None),
+        )
+        killpg = cast(
+            Callable[[int, int], None] | None,
+            getattr(os, "killpg", None),
+        )
+        if callable(getpgid) and callable(killpg):
+            getpgid_func = getpgid
+            killpg_func = killpg
+            with contextlib.suppress(OSError):
+                # These APIs are POSIX-only and are looked up dynamically so
+                # this helper remains importable on Windows.
+                # pylint: disable=not-callable
+                killpg_func(
+                    getpgid_func(process.pid),
+                    getattr(signal, "SIGKILL", signal.SIGTERM),
+                )
+                # pylint: enable=not-callable
+    with contextlib.suppress(OSError):
+        process.kill()
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=2)
+
+
 def main(arguments: Optional[list[str]] = None) -> int:
     """Run the requested command and preserve its exit status.
 
@@ -53,6 +94,9 @@ def main(arguments: Optional[list[str]] = None) -> int:
         print("Usage: ci_warnings.py -- command [args ...]", file=sys.stderr)
         return 2
 
+    popen_kwargs: dict[str, Any] = {}
+    if os.name != "nt":
+        popen_kwargs["start_new_session"] = True
     process = subprocess.Popen(  # pylint: disable=R1732
         command,
         stdout=subprocess.PIPE,
@@ -61,6 +105,7 @@ def main(arguments: Optional[list[str]] = None) -> int:
         encoding="utf-8",
         errors="replace",
         bufsize=1,
+        **popen_kwargs,
     )
     assert process.stdout is not None
 
@@ -71,8 +116,7 @@ def main(arguments: Optional[list[str]] = None) -> int:
             if _is_warning_line(line) and not line.startswith("::warning::"):
                 print(f"::warning::{_annotation_message(line)}", flush=True)
     except KeyboardInterrupt:
-        process.terminate()
-        process.wait()
+        _stop_process_tree(process)
         return 130
     finally:
         process.stdout.close()

@@ -17,6 +17,7 @@ def _run(command: list[str]) -> None:
 
 
 def main() -> int:
+    """Install the locked Python and project-local Codex CLI dependencies."""
     uv = shutil.which("uv")
     if uv is None:
         print("uv is required to install the Python dependencies.", file=sys.stderr)

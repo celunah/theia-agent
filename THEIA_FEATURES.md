@@ -9,6 +9,7 @@ The Codex app-server is based around threads, turns, items, streamed notificatio
 The current commands are:
 
 - `/login`
+- `/about`
 - `/usage`
 - `/credits`
 - `/approve`
@@ -24,6 +25,10 @@ The current commands are:
 - `/customize [target] [element] [value]`
 
 Prefix commands are disabled.
+
+`/about` privately displays the running Theia version and short source
+revision, selected Codex CLI version, invoking Discord account, Codex plan,
+and current session mode and personality.
 
 Theia also:
 
@@ -61,6 +66,7 @@ Typing indicators are shown while Theia is responding.
 
 Server administrators can use `/customize` to change Discord-only embed
 titles, embed content, embed colors, status labels, and interaction button
+labels, including pagination controls, input modal labels, and embed field
 labels. Targets can be commands such as `/usage` or frontend labels such as
 `Thinking`. Values support Markdown and placeholders including `{user}`,
 `{server}`, `{channel}`, `{model}`, `{mode}`, `{skill}`, `{personality}`,
@@ -74,6 +80,10 @@ agent state.
 
 - `/login` uses Codex’s ChatGPT device-code login flow.
 - Authentication is cached in Theia’s private runtime, normally `~/.theia`.
+- A valid private cache is reused; another Codex cache is imported atomically
+  when needed, and the device-code flow is used only when no usable cache remains.
+- Login reports `Already logged in`, `Cached authentication imported`,
+  `Device code required`, and `Authentication completed` for those states.
 - A server administrator can authenticate the bot for server-wide use.
 - Sessions are isolated by Discord user, channel, and thread.
 - Approvals are bound to the Discord user, thread, turn, and approval item.

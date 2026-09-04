@@ -1,3 +1,5 @@
+"""Discord approval and structured-input views used by Codex interactions."""
+
 import json
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
@@ -16,6 +18,7 @@ from .core import (
 async def _check_interaction_owner(
     interaction: discord.Interaction, user_id: int | None
 ) -> bool:
+    """Allow only the Discord user who owns an outstanding interaction."""
     if user_id is not None and interaction.user.id != user_id:
         await interaction.response.send_message(
             "Only the user who started this request can answer it.",
@@ -61,9 +64,11 @@ class _DecisionView(discord.ui.View):
             self.add_item(button)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Allow a decision only from the user who owns the pending request."""
         return await _check_interaction_owner(interaction, self.user_id)
 
     async def on_timeout(self) -> None:
+        """Disable decision controls when the approval window expires."""
         self.value = None
         for child in self.children:
             if isinstance(child, discord.ui.Button):
@@ -80,11 +85,22 @@ class _JsonModal(discord.ui.Modal):
         title: str,
         prompt: str,
     ) -> None:
-        super().__init__(title=_truncate(title, 45))
+        modal_title = _render_frontend_label(
+            view.customizer,
+            view.guild_id,
+            "label:input_modal_title",
+            title,
+        )
+        super().__init__(title=_truncate(modal_title, 45))
         self.view = view
         self.user_id = user_id
         self.value = discord.ui.TextInput(
-            label="JSON response",
+            label=_render_frontend_label(
+                view.customizer,
+                view.guild_id,
+                "label:json_response",
+                "JSON response",
+            ),
             placeholder=prompt[:100],
             style=discord.TextStyle.paragraph,
             required=True,
@@ -93,6 +109,7 @@ class _JsonModal(discord.ui.Modal):
         self.add_item(self.value)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        """Parse the owner's JSON answer and resolve or decline the form."""
         if not await _check_interaction_owner(interaction, self.user_id):
             return
         try:
@@ -167,9 +184,11 @@ class _FormView(discord.ui.View):
         self.add_item(decline)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Allow form actions only from the user who owns the pending request."""
         return await _check_interaction_owner(interaction, self.user_id)
 
     async def on_timeout(self) -> None:
+        """Stop the form when its Discord interaction window expires."""
         self.stop()
 
 
@@ -195,6 +214,7 @@ class _UserInputView(discord.ui.View):
 
     @property
     def current_question(self) -> dict[str, Any]:
+        """Return the unanswered question currently shown by the input view."""
         if not self.questions:
             return {}
         return self.questions[self.question_index]
@@ -240,7 +260,18 @@ class _UserInputView(discord.ui.View):
             if isinstance(option, dict)
         ]
         for option in options[:4]:
-            label = _truncate(option.get("label") or "Choose", 80)
+            option_label = option.get("label")
+            label = (
+                str(option_label)
+                if option_label
+                else _render_frontend_label(
+                    self.customizer,
+                    self.guild_id,
+                    "label:choose_button",
+                    "Choose",
+                )
+            )
+            label = _truncate(label, 80)
             button = discord.ui.Button(label=label, style=discord.ButtonStyle.primary)
 
             async def callback(
@@ -295,9 +326,11 @@ class _UserInputView(discord.ui.View):
         return True
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Allow answers only from the user who owns the pending request."""
         return await _check_interaction_owner(interaction, self.user_id)
 
     async def on_timeout(self) -> None:
+        """Stop the question sequence when its Discord interaction window expires."""
         self.stop()
 
 
@@ -308,12 +341,25 @@ class _TextModal(discord.ui.Modal):
         user_id: int | None,
         question: dict[str, Any],
     ) -> None:
-        super().__init__(title=_truncate(question.get("header") or "Codex input", 45))
+        title = str(question.get("header") or "Codex input")
+        modal_title = _render_frontend_label(
+            view.customizer,
+            view.guild_id,
+            "label:input_modal_title",
+            title,
+        )
+        super().__init__(title=_truncate(modal_title, 45))
         self.view = view
         self.user_id = user_id
         self.question = question
+        input_label = str(question.get("header") or "Answer")
         self.answer = discord.ui.TextInput(
-            label=_truncate(question.get("header") or "Answer", 45),
+            label=_render_frontend_label(
+                view.customizer,
+                view.guild_id,
+                "label:text_input_label",
+                input_label,
+            ),
             placeholder=_truncate(question.get("question") or "Answer", 100),
             style=discord.TextStyle.paragraph,
             required=True,
@@ -322,6 +368,7 @@ class _TextModal(discord.ui.Modal):
         self.add_item(self.answer)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        """Record the owner's text answer and advance or complete the sequence."""
         if not await _check_interaction_owner(interaction, self.user_id):
             return
         complete = self.view._record_answer(str(self.answer))

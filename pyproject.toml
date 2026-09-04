@@ -1,6 +1,7 @@
 [project]
 name = "theia-agent"
-version = "0.1.0"
+version = "1.0.0"
+license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = [
     "discord.py",
@@ -26,6 +27,9 @@ dev = [
 
 [tool.celtest]
 display_name = "Theia Agent"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.ruff.lint]
 ignore = [
@@ -78,11 +82,8 @@ min-similarity-lines = 20
 project-includes = [
     "theia",
     "scripts",
-    "celtest.py",
-    "conftest.py",
     "main.py",
-    "test_main.py",
-    "test_ci.py",
+    "tests",
 ]
 search-path = ["."]
 python-version = "3.10"
@@ -90,19 +91,22 @@ min-severity = "warn"
 
 [tool.poe.tasks]
 start = "python main.py"
-test = "pytest -v . -n 2 --dist loadfile"
-test_basic = "pytest -v ."
-test_changed = "pytest -v . --testmon"
+configure = "python scripts/configure.py"
+build_nuitka = "python scripts/build_nuitka.py"
+test = "pytest -v tests -n 2 --dist loadfile"
+test_basic = "pytest -v tests"
+test_changed = "pytest -v tests --testmon"
+node_check = "python scripts/check_node_harness.py"
 types = "pyrefly check"
 ruff = "ruff check"
 format = "ruff format --check"
-lint = "pylint -j 4 theia scripts main.py celtest.py conftest.py test_main.py test_ci.py"
-lint_basic = "pylint theia scripts main.py celtest.py conftest.py test_main.py test_ci.py"
+lint = "pylint -j 4 theia scripts main.py tests"
+lint_basic = "pylint theia scripts main.py tests"
 
 [tool.poe.tasks.ci]
-sequence = ["ruff", "format", "lint", "types", "test"]
+sequence = ["ruff", "format", "lint", "types", "node_check", "test"]
 ignore_fail = "return_non_zero"
 
 [tool.poe.tasks.ci_basic]
-sequence = ["ruff", "format", "lint_basic", "types", "test_basic"]
+sequence = ["ruff", "format", "lint_basic", "types", "node_check", "test_basic"]
 ignore_fail = "return_non_zero"

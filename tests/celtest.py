@@ -58,14 +58,18 @@ _SKIP_SYMBOL = "S"
 _WARNING_SYMBOL = "W"
 _ACRONYMS = {
     "ansi": "ANSI",
+    "celtest": "Celtest",
     "api": "API",
     "asr": "ASR",
     "cedts": "CEDTS",
     "cechar": "CECHAR",
     "cevoice": "CEVOICE",
     "ci": "CI",
+    "cli": "CLI",
+    "codex": "Codex",
     "cpu": "CPU",
     "cuda": "CUDA",
+    "discord": "Discord",
     "dsp": "DSP",
     "eof": "EOF",
     "flac": "FLAC",
@@ -73,9 +77,16 @@ _ACRONYMS = {
     "hf": "HF",
     "http": "HTTP",
     "json": "JSON",
+    "jsonl": "JSONL",
+    "jsonrpc": "JSON-RPC",
+    "node": "Node",
+    "openai": "OpenAI",
     "pcm": "PCM",
     "ram": "RAM",
+    "rpc": "RPC",
     "rms": "RMS",
+    "stt": "STT",
+    "theia": "Theia",
     "tts": "TTS",
     "tui": "TUI",
     "ui": "UI",
@@ -252,16 +263,25 @@ def _friendly_name(value: str) -> str:
     return " ".join(formatted_words)
 
 
+def _normalize_display_terms(value: str) -> str:
+    """Preserve project and protocol term casing in a display description."""
+    return re.sub(
+        r"[A-Za-z][A-Za-z0-9]*",
+        lambda match: _ACRONYMS.get(match.group().lower(), match.group()),
+        value,
+    )
+
+
 def _docstring_description(value: str) -> str:
-    """Normalize a legacy docstring description without changing its terms."""
-    description = value.strip().removesuffix(".")
+    """Normalize a docstring description to sentence case without changing its terms."""
+    description = _normalize_display_terms(value.strip().removesuffix("."))
     if not description:
         return description
 
     first_word, separator, remainder = description.partition(" ")
     normalized_first_word = _ACRONYMS.get(
         first_word.lower(),
-        first_word[:1].lower() + first_word[1:],
+        first_word[:1].upper() + first_word[1:],
     )
     return normalized_first_word + (separator + remainder if separator else "")
 
@@ -859,6 +879,7 @@ def pytest_runtest_protocol(
     return result
 
 
+@pytest.hookimpl(tryfirst=True)
 def pytest_report_teststatus(
     report: pytest.TestReport,
     config: pytest.Config,

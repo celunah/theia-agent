@@ -8,6 +8,12 @@
 .vscode/
 *.iml
 
+# Theia runtime state and temporary files
+.theia/
+sessions.json
+auth.json
+*.tmp
+
 # Python bytecode and environments
 __pycache__/
 *.py[cod]
@@ -21,6 +27,9 @@ ENV/
 # Python packaging and build artifacts
 build/
 dist/
+*.build/
+*.dist/
+*.onefile-build/
 *.egg-info/
 .eggs/
 *.egg

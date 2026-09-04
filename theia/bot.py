@@ -1,7 +1,10 @@
+"""Discord gateway, command, and message-routing integration for Theia."""
+
 import asyncio
 import contextlib
 import os
 import re
+import subprocess
 import sys
 import time
 from collections.abc import Awaitable, Callable, Iterable
@@ -15,12 +18,15 @@ from discord.ext import commands
 from .app_server import CodexAppServer, CodexAppServerError
 from .core import (
     DEFAULT_MODE,
+    THEIA_VERSION,
     TEXT_MODE,
     VOICE_MODE,
     _codex_logger,
     _command_embed,
     _env_bool,
+    _render_frontend_label,
     _safe_error_reason,
+    _theia_revision,
     _subtext,
     _truncate,
 )
@@ -75,6 +81,27 @@ def _frontend_embed(
     )
 
 
+def _frontend_label(
+    target: str,
+    default: str,
+    *,
+    channel: Any | None = None,
+    user: discord.abc.User | None = None,
+    context: dict[str, Any] | None = None,
+) -> str:
+    """Render a server-scoped label for a Discord embed or control."""
+    values = customization_context(channel, user)
+    if context:
+        values.update(context)
+    return _render_frontend_label(
+        getattr(globals().get("bot"), "customizations", None),
+        _guild_id(channel),
+        target,
+        default,
+        context=values,
+    )
+
+
 def _env_bool_any(names: Iterable[str], default: bool = False) -> bool:
     for name in names:
         if os.getenv(name) is not None:
@@ -96,6 +123,19 @@ def _is_server_admin(user: discord.abc.User, channel: Any | None) -> bool:
         return False
     permissions = getattr(user, "guild_permissions", None)
     return bool(permissions and getattr(permissions, "administrator", False))
+
+
+def _voice_session_allows_tools(session: VoiceSession) -> bool:
+    """Re-check the voice session owner's current guild permissions."""
+    guild = getattr(session.text_channel, "guild", None)
+    if guild is None:
+        get_guild = getattr(bot, "get_guild", None)
+        guild = get_guild(session.guild_id) if callable(get_guild) else None
+    get_member = getattr(guild, "get_member", None)
+    member = get_member(session.user_id) if callable(get_member) else None
+    return member is not None and _is_server_admin(
+        cast(discord.abc.User, member), session.text_channel
+    )
 
 
 def _channel_id(channel: Any | None) -> int | None:
@@ -321,6 +361,7 @@ async def _message_context(message: Any) -> str | None:
 
 
 def session_key(channel: Any | None, user_id: int) -> str:
+    """Build the persisted session key for one Discord user and channel."""
     channel_id = getattr(channel, "id", 0)
     guild = getattr(channel, "guild", None)
     guild_id = getattr(guild, "id", 0)
@@ -355,6 +396,7 @@ async def handle_login(
     grant_server: bool = False,
     ephemeral: bool = False,
 ) -> None:
+    """Run the Codex login flow and deliver a safe Discord status embed."""
     await bot.presence.touch()
     try:
         result = await bot.codex.begin_login(
@@ -393,7 +435,7 @@ async def handle_login(
             ephemeral=ephemeral,
         )
         return
-    if result.get("login_cached"):
+    if result.get("login_imported") or result.get("login_cached"):
         # Keep the Discord-user grant in sync even when Codex authenticated
         # before this bot process started.
         bot.codex.mark_authenticated(
@@ -402,7 +444,11 @@ async def handle_login(
         )
         embed = _frontend_embed(
             "command:login",
-            "Login ready",
+            (
+                "Cached authentication imported"
+                if result.get("login_imported")
+                else "Already logged in"
+            ),
             (
                 "Your cached Codex login is active. Everyone in this server can "
                 "now use `/btw` or `/skill`."
@@ -425,7 +471,7 @@ async def handle_login(
     else:
         embed = _frontend_embed(
             "command:login",
-            "Log in to Codex",
+            "Device code required",
             "Open the verification link and enter the displayed code.",
             channel=channel,
             context={"user_id": user_id},
@@ -434,10 +480,28 @@ async def handle_login(
         url = result.get("verificationUrl") or result.get("verification_url")
         code = result.get("userCode") or result.get("user_code")
         if url:
-            embed.add_field(name="Verification link", value=str(url), inline=False)
+            embed.add_field(
+                name=_frontend_label(
+                    "label:login_verification_link",
+                    "Verification link",
+                    channel=channel,
+                ),
+                value=str(url),
+                inline=False,
+            )
         if code:
-            embed.add_field(name="Code", value=str(code), inline=True)
-        embed.set_footer(text="This authentication message is visible only to you.")
+            embed.add_field(
+                name=_frontend_label("label:login_code", "Code", channel=channel),
+                value=str(code),
+                inline=True,
+            )
+        embed.set_footer(
+            text=_frontend_label(
+                "label:login_visibility_footer",
+                "This authentication message is visible only to you.",
+                channel=channel,
+            )
+        )
     await send(embed=embed, ephemeral=ephemeral)
 
 
@@ -456,6 +520,7 @@ async def handle_request(
     thread_source: discord.Message | None = None,
     **kwargs: Any,
 ) -> None:
+    """Route one Discord request through Codex and stream its user-facing result."""
     if request_id is not None and not bot.codex.claim_message(request_id):
         logger.info("Ignored duplicate Discord request")
         return
@@ -613,19 +678,40 @@ def _usage_embed(
         },
     )
     fields = (
-        ("Lifetime tokens", _format_count(summary.get("lifetimeTokens"))),
-        ("Peak daily tokens", _format_count(summary.get("peakDailyTokens"))),
-        ("Current streak", _format_count(summary.get("currentStreakDays"))),
-        ("Longest streak", _format_count(summary.get("longestStreakDays"))),
         (
+            "label:usage_lifetime_tokens",
+            "Lifetime tokens",
+            _format_count(summary.get("lifetimeTokens")),
+        ),
+        (
+            "label:usage_peak_daily_tokens",
+            "Peak daily tokens",
+            _format_count(summary.get("peakDailyTokens")),
+        ),
+        (
+            "label:usage_current_streak",
+            "Current streak",
+            _format_count(summary.get("currentStreakDays")),
+        ),
+        (
+            "label:usage_longest_streak",
+            "Longest streak",
+            _format_count(summary.get("longestStreakDays")),
+        ),
+        (
+            "label:usage_longest_running_turn",
             "Longest running turn",
             f"{_format_count(summary.get('longestRunningTurnSec'))} seconds"
             if isinstance(summary.get("longestRunningTurnSec"), (int, float))
             else "Unavailable",
         ),
     )
-    for name, value in fields:
-        embed.add_field(name=name, value=value, inline=True)
+    for target, name, value in fields:
+        embed.add_field(
+            name=_frontend_label(target, name, channel=channel, user=user),
+            value=value,
+            inline=True,
+        )
     return embed
 
 
@@ -671,9 +757,23 @@ def _credits_embed(
         context={"balance": balance_text},
         color=discord.Color.blurple() if balance_available else discord.Color.orange(),
     )
-    embed.add_field(name="Balance", value=balance_text, inline=True)
     embed.add_field(
-        name="Status",
+        name=_frontend_label(
+            "label:credits_balance",
+            "Balance",
+            channel=channel,
+            user=user,
+        ),
+        value=balance_text,
+        inline=True,
+    )
+    embed.add_field(
+        name=_frontend_label(
+            "label:credits_status",
+            "Status",
+            channel=channel,
+            user=user,
+        ),
         value=(
             "Unlimited"
             if credit_details.get("unlimited")
@@ -686,7 +786,12 @@ def _credits_embed(
     primary = snapshot.get("primary") or {}
     secondary = snapshot.get("secondary") or {}
     embed.add_field(
-        name="5-hour limit",
+        name=_frontend_label(
+            "label:credits_five_hour_limit",
+            "5-hour limit",
+            channel=channel,
+            user=user,
+        ),
         value=(
             f"{_format_percent(primary.get('usedPercent'))}\n"
             f"Resets {_format_reset(primary.get('resetsAt'))}"
@@ -694,12 +799,142 @@ def _credits_embed(
         inline=False,
     )
     embed.add_field(
-        name="Weekly limit",
+        name=_frontend_label(
+            "label:credits_weekly_limit",
+            "Weekly limit",
+            channel=channel,
+            user=user,
+        ),
         value=(
             f"{_format_percent(secondary.get('usedPercent'))}\n"
             f"Resets {_format_reset(secondary.get('resetsAt'))}"
         ),
         inline=False,
+    )
+    return embed
+
+
+_PLAN_LABELS = {
+    "free": "Free",
+    "go": "Go",
+    "plus": "Plus",
+    "pro": "Pro",
+    "team": "Team",
+    "business": "Business",
+    "enterprise": "Enterprise",
+    "edu": "Edu",
+}
+_PLAN_PRICES = {
+    "plus": "$20/mo",
+    "pro": "$200/mo",
+    "team": "$25/user/mo",
+    "business": "$25/user/mo",
+}
+
+
+def _about_account(user: discord.abc.User | None) -> str:
+    if user is None:
+        return "Unavailable"
+    mention = getattr(user, "mention", None)
+    if isinstance(mention, str) and mention:
+        return mention
+    name = getattr(user, "name", None) or getattr(user, "display_name", None)
+    if not name:
+        return "Unavailable"
+    return f"@{str(name).lstrip('@')}"
+
+
+def _about_plan(account: dict[str, Any] | None) -> str:
+    if not isinstance(account, dict):
+        return "Unavailable"
+    raw_plan = account.get("planType") or account.get("plan_type")
+    if not isinstance(raw_plan, str) or not raw_plan.strip():
+        return "Unavailable"
+    normalized = raw_plan.strip().casefold().replace("_", "-")
+    name = _PLAN_LABELS.get(normalized, raw_plan.strip().replace("_", " ").title())
+    price = account.get("monthlyPrice") or account.get("monthly_price")
+    if isinstance(price, str) and price.strip():
+        return f"{name} ({price.strip()})"
+    mapped_price = _PLAN_PRICES.get(normalized)
+    return f"{name} ({mapped_price})" if mapped_price else name
+
+
+def _about_embed(
+    *,
+    account: dict[str, Any] | None,
+    cli_version: str | None,
+    mode: str,
+    personality: str | None,
+    channel: Any | None = None,
+    user: discord.abc.User | None = None,
+) -> discord.Embed:
+    """Build the private, structured runtime-information embed."""
+    embed = _frontend_embed(
+        "command:about",
+        "About Theia",
+        "Current Theia and Codex account information.",
+        channel=channel,
+        user=user,
+    )
+    embed.add_field(
+        name=_frontend_label(
+            "label:about_theia_agent",
+            "Theia Agent",
+            channel=channel,
+            user=user,
+        ),
+        value=f"{THEIA_VERSION} ({_theia_revision()})",
+        inline=False,
+    )
+    embed.add_field(
+        name=_frontend_label(
+            "label:about_codex_cli",
+            "Codex CLI",
+            channel=channel,
+            user=user,
+        ),
+        value=cli_version or "Unavailable",
+        inline=False,
+    )
+    embed.add_field(
+        name=_frontend_label(
+            "label:about_account",
+            "Account",
+            channel=channel,
+            user=user,
+        ),
+        value=_about_account(user),
+        inline=True,
+    )
+    embed.add_field(
+        name=_frontend_label(
+            "label:about_plan",
+            "Plan",
+            channel=channel,
+            user=user,
+        ),
+        value=_about_plan(account),
+        inline=True,
+    )
+    embed.add_field(
+        name=_frontend_label(
+            "label:about_mode",
+            "Mode",
+            channel=channel,
+            user=user,
+        ),
+        value=(mode or "unknown").title(),
+        inline=True,
+    )
+    embed.add_field(
+        name=_frontend_label(
+            "label:about_personality",
+            "Personality",
+            channel=channel,
+            user=user,
+        ),
+        value=personality or "None",
+        inline=True,
     )
     return embed
 
@@ -797,6 +1032,8 @@ intents.message_content = True
 
 
 class TheiaBot(commands.Bot):
+    """Discord bot lifecycle owner for Theia's Codex, voice, and presence services."""
+
     def __init__(self) -> None:
         super().__init__(command_prefix=(), intents=intents, help_command=None)
         self.customizations = FrontendCustomizationStore()
@@ -819,6 +1056,7 @@ class TheiaBot(commands.Bot):
         await self.change_presence(**kwargs)
 
     async def setup_hook(self) -> None:
+        """Start Codex, synchronize slash commands, and begin background services."""
         await super().setup_hook()
         await self.codex.start()
         await self.tree.sync()
@@ -826,6 +1064,7 @@ class TheiaBot(commands.Bot):
         self._retention_task = asyncio.create_task(self._retention_loop())
 
     async def close(self) -> None:
+        """Stop background services and close Discord and Codex resources in order."""
         if self._retention_task is not None:
             self._retention_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -837,6 +1076,7 @@ class TheiaBot(commands.Bot):
         await super().close()
 
     async def on_ready(self) -> None:
+        """Refresh the presence after Discord establishes or restores the gateway."""
         await self.presence.on_ready()
 
     async def _retention_loop(self) -> None:
@@ -851,6 +1091,7 @@ class TheiaBot(commands.Bot):
             await asyncio.sleep(60 * 60)
 
     async def backfill_after_resume(self) -> None:
+        """Replay bounded messages missed while the Discord gateway was disconnected."""
         limit_text = os.getenv("THEIA_BACKFILL_LIMIT") or os.getenv(
             "DISCORD_BACKFILL_LIMIT", "20"
         )
@@ -937,7 +1178,12 @@ async def _handle_voice_transcript(
         )
     await bot.presence.touch()
     prompt = f"[Voice input from {speaker}]\n{transcript}"
+    allow_tools = _voice_session_allows_tools(session)
     active_turn = bot.codex.status(session.session_key).get("turn_id")
+    if active_turn and session.allow_tools and not allow_tools:
+        with contextlib.suppress(CodexAppServerError):
+            await bot.codex.interrupt(session.session_key)
+        active_turn = None
     if active_turn:
         try:
             await bot.codex.steer(session.session_key, prompt)
@@ -959,7 +1205,7 @@ async def _handle_voice_transcript(
         prompt,
         channel=session.text_channel,
         user_id=session.user_id,
-        allow_tools=session.allow_tools,
+        allow_tools=allow_tools,
         context=context,
         speak_text=_voice_speak_callback(session.session_key),
     )
@@ -967,6 +1213,7 @@ async def _handle_voice_transcript(
 
 @bot.tree.command(name="login", description="Authenticate this Discord user with Codex")
 async def codex_login(interaction: discord.Interaction) -> None:
+    """Authenticate the invoking Discord user, optionally authorizing their server."""
     await interaction.response.defer(ephemeral=True)
     channel = interaction.channel or interaction.user
     guild_id = getattr(interaction.guild, "id", None)
@@ -985,6 +1232,7 @@ async def codex_login(interaction: discord.Interaction) -> None:
 
 @bot.tree.command(name="restart", description="Restart the Discord bot in place")
 async def codex_restart(interaction: discord.Interaction) -> None:
+    """Schedule an administrator-only in-place bot restart."""
     if not await _require_server_admin(
         interaction,
         message="Only server administrators can restart the Discord bot.",
@@ -1023,6 +1271,7 @@ async def codex_restart(interaction: discord.Interaction) -> None:
 
 @bot.tree.command(name="usage", description="Show Codex account usage")
 async def codex_usage(interaction: discord.Interaction) -> None:
+    """Display the authenticated Codex account's current usage privately."""
     if not await _require_login(interaction):
         return
     await interaction.response.defer(ephemeral=True)
@@ -1040,6 +1289,7 @@ async def codex_usage(interaction: discord.Interaction) -> None:
 
 @bot.tree.command(name="credits", description="Show Codex credits and limits")
 async def codex_credits(interaction: discord.Interaction) -> None:
+    """Display the authenticated Codex account's rate limits privately."""
     if not await _require_login(interaction):
         return
     await interaction.response.defer(ephemeral=True)
@@ -1055,6 +1305,35 @@ async def codex_credits(interaction: discord.Interaction) -> None:
         await _send_command_failure(interaction, "Credits unavailable", exc)
 
 
+@bot.tree.command(name="about", description="Show Codex and session details")
+async def codex_about(interaction: discord.Interaction) -> None:
+    """Display the current Theia, Codex, account, and session details privately."""
+    await bot.presence.touch()
+    await interaction.response.defer(ephemeral=True)
+    account_result: dict[str, Any] = {}
+    try:
+        account_result = await bot.codex.account_details()
+    except (CodexAppServerError, OSError):
+        logger.debug("Could not fetch Codex account details for About")
+    try:
+        cli_version = bot.codex.codex_cli_version()
+    except (OSError, subprocess.SubprocessError):
+        cli_version = None
+    key = session_key(interaction.channel, interaction.user.id)
+    account = account_result.get("account")
+    await interaction.followup.send(
+        embed=_about_embed(
+            account=account if isinstance(account, dict) else None,
+            cli_version=cli_version,
+            mode=bot.codex.mode(key),
+            personality=bot.codex.active_personality(key),
+            channel=interaction.channel,
+            user=interaction.user,
+        ),
+        ephemeral=True,
+    )
+
+
 @bot.tree.command(name="mode", description="Choose text or voice interaction mode")
 @app_commands.describe(mode="The interaction mode to use")
 @app_commands.choices(
@@ -1066,6 +1345,7 @@ async def codex_credits(interaction: discord.Interaction) -> None:
 async def codex_mode(
     interaction: discord.Interaction, mode: app_commands.Choice[str]
 ) -> None:
+    """Switch the current Discord session between text and optional voice mode."""
     if not await _require_login(interaction):
         return
     await interaction.response.defer(ephemeral=True)
@@ -1157,6 +1437,7 @@ async def model_autocomplete(
     interaction: Any,  # pylint: disable=unused-argument
     current: str,
 ) -> list[app_commands.Choice[str]]:
+    """Offer account-backed Codex model choices for the slash command."""
     try:
         models = await bot.codex.available_models()
     except (CodexAppServerError, OSError) as exc:
@@ -1187,6 +1468,7 @@ async def model_autocomplete(
 @app_commands.describe(model="The Codex model to use")
 @app_commands.autocomplete(model=model_autocomplete)
 async def codex_model(interaction: discord.Interaction, model: str) -> None:
+    """Select the Codex model used for new requests in this installation."""
     if not await _require_login(interaction):
         return
     await interaction.response.defer(ephemeral=True)
@@ -1213,6 +1495,7 @@ async def personality_autocomplete(
     interaction: Any,  # pylint: disable=unused-argument
     current: str,
 ) -> list[app_commands.Choice[str]]:
+    """Offer stored personality profiles and the option to clear one."""
     query = current.casefold().strip()
     choices: list[app_commands.Choice[str]] = []
     if not query or "none".startswith(query):
@@ -1237,6 +1520,7 @@ async def codex_personality(
     file: discord.Attachment | None = None,
     name: str | None = None,
 ) -> None:
+    """Upload, select, or clear the personality for the current Discord session."""
     await bot.presence.touch()
     await interaction.response.defer(ephemeral=True)
     if file is None and name is None:
@@ -1298,6 +1582,7 @@ async def codex_personality(
 
 @bot.tree.command(name="approve", description="Approve the active Codex request")
 async def codex_approve(interaction: discord.Interaction) -> None:
+    """Approve the invoking administrator's pending Codex request."""
     if not await _require_login(interaction):
         return
     if not await _require_server_admin(interaction):
@@ -1321,6 +1606,7 @@ async def codex_approve(interaction: discord.Interaction) -> None:
 
 @bot.tree.command(name="deny", description="Deny the active Codex request")
 async def codex_deny(interaction: discord.Interaction) -> None:
+    """Deny the invoking administrator's pending Codex request."""
     if not await _require_login(interaction):
         return
     if not await _require_server_admin(interaction):
@@ -1344,6 +1630,7 @@ async def codex_deny(interaction: discord.Interaction) -> None:
 
 @bot.tree.command(name="stop", description="Stop your active Codex request")
 async def codex_stop(interaction: discord.Interaction) -> None:
+    """Interrupt the invoking user's active Codex request."""
     if not await _require_login(interaction):
         return
     await interaction.response.defer()
@@ -1369,6 +1656,7 @@ async def codex_stop(interaction: discord.Interaction) -> None:
 
 @bot.tree.command(name="undo", description="Undo your last Codex response")
 async def codex_undo(interaction: discord.Interaction) -> None:
+    """Roll back the most recent completed Codex turn for this session."""
     if not await _require_login(interaction):
         return
     await interaction.response.defer(ephemeral=True)
@@ -1400,6 +1688,7 @@ async def codex_btw(
     prompt: str,
     file: discord.Attachment | None = None,
 ) -> None:
+    """Send a prompt and optional attachment through the current Discord session."""
     if not await _require_login(interaction):
         return
     await interaction.response.defer()
@@ -1437,6 +1726,7 @@ async def skill_autocomplete(
     interaction: discord.Interaction,  # pylint: disable=unused-argument
     current: str,
 ) -> list[app_commands.Choice[str]]:
+    """Offer enabled Codex skills matching the user's autocomplete query."""
     try:
         if not bot.codex.skill_names():
             await bot.codex.refresh_skills(force=True)
@@ -1455,6 +1745,7 @@ async def skill_autocomplete(
 @app_commands.describe(skill_name="The skill to invoke")
 @app_commands.autocomplete(skill_name=skill_autocomplete)
 async def codex_skill(interaction: discord.Interaction, skill_name: str) -> None:
+    """Invoke one enabled Codex skill as a normal session request."""
     if not await _require_login(interaction):
         return
     try:
@@ -1507,6 +1798,7 @@ async def customization_target_autocomplete(
     interaction: Any,  # pylint: disable=unused-argument
     current: str,
 ) -> list[app_commands.Choice[str]]:
+    """Offer command and frontend-label targets for administrator customization."""
     return [
         app_commands.Choice(name=display[:100], value=value)
         for display, value in bot.customizations.targets(current)[:25]
@@ -1517,6 +1809,7 @@ async def customization_element_autocomplete(
     interaction: Any,  # pylint: disable=unused-argument
     current: str,
 ) -> list[app_commands.Choice[str]]:
+    """Offer valid presentation elements for administrator customization."""
     return [
         app_commands.Choice(name=display, value=value)
         for display, value in bot.customizations.elements(current)
@@ -1539,6 +1832,7 @@ async def codex_customize(
     element: str | None = None,
     value: str | None = None,
 ) -> None:
+    """Read or update server-scoped Discord presentation preferences."""
     await bot.presence.touch()
     if getattr(interaction.guild, "id", None) is None:
         await interaction.response.send_message(
@@ -1721,7 +2015,7 @@ async def _maybe_create_response_thread(
     if not (
         getattr(original_channel, "guild", None) is not None
         and not _is_thread(original_channel)
-        and _env_bool_any(("THEIA_AUTO_THREAD", "DISCORD_AUTO_THREAD"), False)
+        and _env_bool_any(("THEIA_AUTO_THREAD", "DISCORD_AUTO_THREAD"), True)
         and _user_requested_thread(prompt)
     ):
         return original_channel
@@ -1779,6 +2073,7 @@ async def _name_new_response_thread(channel: Any, prompt: str) -> None:
 
 @bot.event
 async def on_message(message: discord.Message) -> None:
+    """Filter Discord messages, recover access, and route eligible requests."""
     if bot.user is None:
         return
     if message.author.id == bot.user.id:
@@ -1858,11 +2153,13 @@ async def on_message(message: discord.Message) -> None:
 
 @bot.event
 async def on_resumed() -> None:
+    """Backfill bounded channel history after a Discord gateway resume."""
     await bot.backfill_after_resume()
 
 
 @bot.event
 async def on_reaction_add(reaction: discord.Reaction, user: discord.abc.User) -> None:
+    """Route pagination reactions to the response view that owns the message."""
     if user.bot:
         return
     paginator = _reaction_paginators.get(reaction.message.id)

@@ -1,3 +1,5 @@
+"""Codex App Server transport, session state, and Discord-facing orchestration."""
+
 import asyncio
 import contextlib
 import hashlib
@@ -5,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import time
 from collections.abc import Awaitable, Callable, Coroutine, Iterable
 from pathlib import Path
@@ -44,6 +47,7 @@ from .core import (
     _truncate,
     _render_frontend_label,
     _TurnState,
+    THEIA_VERSION,
     _verified_change_status,
     TEXT_MODE,
     VOICE_MODE,
@@ -57,6 +61,8 @@ logger = _codex_logger()
 _ASSESSMENT_COMPLEXITIES = {"simple", "moderate", "complex", "very_complex"}
 MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024
 MAX_ATTACHMENT_TEXT_BYTES = 100 * 1024
+MAX_ATTACHMENTS_PER_REQUEST = 10
+MAX_ATTACHMENT_BATCH_BYTES = 64 * 1024 * 1024
 MESSAGE_LEDGER_LIMIT = 2000
 MESSAGE_LEDGER_RETRY_AFTER = 15 * 60
 CHANNEL_CHECKPOINT_LIMIT = 200
@@ -72,8 +78,23 @@ MAX_CODEX_STDIO_LIMIT = 64 * 1024 * 1024
 CODEX_STDIO_LIMIT_ENV = "THEIA_CODEX_STDIO_LIMIT"
 SESSION_ARCHIVE_AFTER = 30 * 24 * 60 * 60
 SESSION_DELETE_AFTER = 90 * 24 * 60 * 60
+DEFAULT_ATTACHMENT_CACHE_LIMIT_BYTES = 512 * 1024 * 1024
+DEFAULT_ATTACHMENT_CACHE_MAX_AGE = SESSION_DELETE_AFTER
 WEB_SEARCH_ENV = "THEIA_WEB_SEARCH"
 WEB_SEARCH_MODES = frozenset({"disabled", "indexed", "live"})
+_CODEX_CHILD_SECRET_ENV_NAMES = frozenset(
+    {
+        "TOKEN",
+        "DISCORD_TOKEN",
+        "THEIA_DISCORD_TOKEN",
+        "STT_TOKEN",
+        "THEIA_TRANSCRIPTION_API_KEY",
+        "TTS_TOKEN",
+        "THEIA_TTS_API_KEY",
+        "OPENAI_API_KEY",
+        "CODEX_API_KEY",
+    }
+)
 TEXT_ATTACHMENT_SUFFIXES = frozenset(
     {
         ".c",
@@ -203,6 +224,25 @@ _DISCORD_DYNAMIC_TOOLS = [
 
 
 class CodexAppServer:
+    """Own the local Codex process and map Discord sessions to Codex threads.
+
+    The server keeps Discord-specific authorization, session metadata, memory
+    roots, and personality selection beside the JSON-RPC transport. Persisted
+    state is intentionally private to Theia so a Discord deployment does not
+    alter a user's global Codex runtime.
+    """
+
+    @staticmethod
+    def _build_codex_environment() -> dict[str, str]:
+        """Build a child environment without Theia or provider credentials."""
+        excluded = _CODEX_CHILD_SECRET_ENV_NAMES
+        environment = {
+            name: value
+            for name, value in os.environ.items()
+            if name.upper() not in excluded
+        }
+        return environment
+
     def __init__(self) -> None:
         self._process: asyncio.subprocess.Process | None = None  # pylint: disable=no-member
         self._reader_task: asyncio.Task[None] | None = None
@@ -239,6 +279,23 @@ class CodexAppServer:
             MIN_CODEX_STDIO_LIMIT,
             min(MAX_CODEX_STDIO_LIMIT, configured_stdio_limit),
         )
+        try:
+            attachment_cache_limit = int(
+                os.getenv(
+                    "THEIA_ATTACHMENT_CACHE_LIMIT_BYTES",
+                    str(DEFAULT_ATTACHMENT_CACHE_LIMIT_BYTES),
+                )
+            )
+        except ValueError:
+            attachment_cache_limit = DEFAULT_ATTACHMENT_CACHE_LIMIT_BYTES
+        self._attachment_cache_limit = max(0, attachment_cache_limit)
+        self._attachment_cache_max_age = max(
+            3600.0,
+            _env_float(
+                "THEIA_ATTACHMENT_CACHE_MAX_AGE",
+                DEFAULT_ATTACHMENT_CACHE_MAX_AGE,
+            ),
+        )
         self._cwd = str(Path(os.getenv("CODEX_CWD") or os.getcwd()).resolve())
         self._global_codex_home = (
             Path(os.getenv("CODEX_HOME") or (Path.home() / ".codex"))
@@ -270,7 +327,7 @@ class CodexAppServer:
         self._legacy_codex_home = (
             legacy_home if legacy_home != self._codex_home else None
         )
-        self._codex_environment = os.environ.copy()
+        self._codex_environment = self._build_codex_environment()
         self._codex_environment["CODEX_HOME"] = str(self._codex_home)
         self._personalities = PersonalityStore(self._codex_home)
         self._audio = OpenAICompatibleAudio.from_environment()
@@ -311,6 +368,14 @@ class CodexAppServer:
                 )
             )
         )
+        self._safe_workspace_roots = tuple(
+            dict.fromkeys(
+                (
+                    self._attachment_root,
+                    *_configured_paths("THEIA_SAFE_WORKSPACE_ROOTS", ()),
+                )
+            )
+        )
         self._state_path = Path(
             os.getenv("THEIA_STATE")
             or os.getenv("CODEX_DISCORD_STATE")
@@ -335,6 +400,8 @@ class CodexAppServer:
         self._message_ledger: dict[str, dict[str, Any]] = {}
         self._discord_threads: set[int] = set()
         self._channel_checkpoints: dict[int, int] = {}
+        self._state_dirty = False
+        self._state_recovery_blocked = False
         self._skills_cache: tuple[dict[str, Any], ...] = ()
         self._skills_loaded_at = 0.0
         self._skills_lock = asyncio.Lock()
@@ -342,6 +409,7 @@ class CodexAppServer:
         self._rate_limits: dict[str, Any] | None = None
         self.account: dict[str, Any] | None = None
         self.requires_openai_auth = True
+        self._auth_imported = False
         self._migrate_legacy_state()
         self._load_state()
         logger.debug(
@@ -511,8 +579,26 @@ class CodexAppServer:
 
     def _load_state(self) -> None:
         try:
-            data = json.loads(self._state_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            raw = self._state_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return
+        except UnicodeDecodeError as exc:
+            self._quarantine_state(type(exc).__name__)
+            return
+        except OSError as exc:
+            self._state_recovery_blocked = True
+            logger.error(
+                "Could not read Theia state; refusing to overwrite it (error=%s)",
+                type(exc).__name__,
+            )
+            return
+        try:
+            data = json.loads(raw)
+        except ValueError as exc:
+            self._quarantine_state(type(exc).__name__)
+            return
+        if not isinstance(data, dict):
+            self._quarantine_state("invalid top-level JSON value")
             return
         if isinstance(data, dict):
             model = data.get("model")
@@ -624,7 +710,39 @@ class CodexAppServer:
                     if str(channel_id).isdigit() and isinstance(message_id, int):
                         self._channel_checkpoints[int(channel_id)] = message_id
 
+    def _quarantine_state(self, reason: str) -> None:
+        """Preserve an unreadable state file before allowing recovery writes."""
+        quarantine = self._state_path.with_name(
+            f"{self._state_path.name}.corrupt-{time.time_ns()}"
+        )
+        try:
+            self._state_path.replace(quarantine)
+        except OSError as exc:
+            self._state_recovery_blocked = True
+            logger.error(
+                "Could not quarantine corrupt Theia state (reason=%s, error=%s); "
+                "the original file will not be overwritten",
+                reason,
+                type(exc).__name__,
+            )
+            return
+        with contextlib.suppress(OSError):
+            quarantine.chmod(0o600)
+        self._state_recovery_blocked = False
+        logger.warning(
+            "Preserved corrupt Theia state as %s (reason=%s)",
+            quarantine.name,
+            reason,
+        )
+
     def _persist_state(self) -> None:
+        if self._state_recovery_blocked:
+            self._state_dirty = True
+            logger.error(
+                "Theia state remains dirty because its unreadable file is being "
+                "preserved"
+            )
+            return
         data = {
             "model": self._model,
             "authenticated_users": sorted(self._authenticated_users),
@@ -662,13 +780,23 @@ class CodexAppServer:
                 )[:CHANNEL_CHECKPOINT_LIMIT]
             ),
         }
+        temporary = self._state_path.with_suffix(".tmp")
         try:
             self._state_path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self._state_path.with_suffix(".tmp")
             temporary.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            temporary.chmod(0o600)
             temporary.replace(self._state_path)
-        except OSError:
-            pass
+        except OSError as exc:
+            self._state_dirty = True
+            logger.error(
+                "Could not persist Theia state; the previous file was retained "
+                "(error=%s)",
+                type(exc).__name__,
+            )
+            with contextlib.suppress(OSError):
+                temporary.unlink()
+        else:
+            self._state_dirty = False
 
     def _canonical_session_key(self, key: str) -> str:
         current = key
@@ -779,24 +907,30 @@ class CodexAppServer:
         self._persist_state()
 
     def has_session(self, key: str) -> bool:
+        """Return whether ``key`` has an associated Codex thread."""
         session = self._sessions.get(key)
         return bool(session and session.thread_id)
 
     def is_participating_thread(self, thread_id: int) -> bool:
+        """Return whether Theia has previously participated in a Discord thread."""
         return thread_id in self._discord_threads
 
     def mark_thread_participating(self, thread_id: int) -> None:
+        """Persist a Discord thread as eligible for mention-free follow-ups."""
         if thread_id not in self._discord_threads:
             self._discord_threads.add(thread_id)
             self._persist_state()
 
     def channel_checkpoint(self, channel_id: int) -> int | None:
+        """Return the newest Discord message checkpoint for a channel."""
         return self._channel_checkpoints.get(channel_id)
 
     def channel_checkpoints(self) -> tuple[int, ...]:
+        """Return channel ids with persisted gateway backfill checkpoints."""
         return tuple(self._channel_checkpoints)
 
     def checkpoint_channel(self, channel_id: int, message_id: int) -> None:
+        """Advance and persist a channel checkpoint without moving it backwards."""
         previous = self._channel_checkpoints.get(channel_id)
         if previous is not None and previous >= message_id:
             return
@@ -826,6 +960,7 @@ class CodexAppServer:
         return True
 
     def complete_message(self, message_id: str | int) -> None:
+        """Mark a claimed Discord message as delivered successfully."""
         key = str(message_id)
         if key not in self._message_ledger:
             return
@@ -833,16 +968,20 @@ class CodexAppServer:
         self._persist_state()
 
     def personality_names(self) -> tuple[str, ...]:
+        """Return the available personality profile names."""
         return self._personalities.names()
 
     @property
     def voice_mode_available(self) -> bool:
+        """Whether both configured audio services can support voice mode."""
         return self._audio.transcription.enabled and self._audio.tts.enabled
 
     def mode(self, session_key: str) -> str:
+        """Return the text or voice mode selected for a Discord session."""
         return self._session(session_key).mode
 
     async def set_mode(self, session_key: str, mode: str) -> str:
+        """Validate and persist a session's text or voice mode selection."""
         selected = mode.casefold().strip()
         if selected not in {TEXT_MODE, VOICE_MODE}:
             raise CodexAppServerError("Mode must be `voice` or `text`.")
@@ -861,6 +1000,7 @@ class CodexAppServer:
     async def transcribe_audio(
         self, filename: str, raw: bytes, content_type: str = ""
     ) -> str:
+        """Transcribe one Discord audio attachment through the configured STT service."""
         if not self._audio.transcription.enabled:
             raise CodexAppServerError("Voice transcription is not configured.")
         try:
@@ -872,6 +1012,7 @@ class CodexAppServer:
         return value
 
     def active_personality(self, session_key: str) -> str | None:
+        """Return the active personality name for a Discord session, if any."""
         return self._session(session_key).personality_name
 
     async def configure_personality(
@@ -881,6 +1022,11 @@ class CodexAppServer:
         name: str | None,
         attachment: Any | None = None,
     ) -> str | None:
+        """Select, clear, or upload the personality used by a session.
+
+        Changing the personality resets the Codex thread so its system
+        instructions cannot mix profiles from different points in a session.
+        """
         session = self._session(session_key)
         assert session.lock is not None
         async with session.lock:
@@ -940,8 +1086,10 @@ class CodexAppServer:
             raise CodexAppServerError(str(exc)) from exc
         return prompt
 
-    def _memory_instructions(self) -> str | None:
-        """Load the bounded shared memory snapshot used at thread start."""
+    def _memory_instructions(self, *, allow_tools: bool = True) -> str | None:
+        """Load private memory only for administrator-authorized sessions."""
+        if not allow_tools:
+            return None
         sections: list[str] = []
         total = 0
         seen: set[Path] = set()
@@ -993,10 +1141,12 @@ class CodexAppServer:
     def _tool_instructions(allow_tools: bool) -> str:
         return _ADMIN_TOOL_INSTRUCTIONS if allow_tools else _SAFE_TOOL_INSTRUCTIONS
 
-    def _system_instructions(self, session: _Session) -> str:
+    def _system_instructions(
+        self, session: _Session, *, allow_tools: bool = True
+    ) -> str:
         personality = self._personality_instructions(session)
         parts = [BASE_PRIORS]
-        memory = self._memory_instructions()
+        memory = self._memory_instructions(allow_tools=allow_tools)
         if memory:
             parts.append(memory)
         if personality:
@@ -1015,11 +1165,30 @@ class CodexAppServer:
     ) -> str:
         return hashlib.sha256(
             (
-                self._system_instructions(session)
+                self._system_instructions(session, allow_tools=allow_tools)
                 + "\n\n"
                 + self._tool_instructions(allow_tools)
             ).encode("utf-8")
         ).hexdigest()
+
+    def _workspace_roots(self, allow_tools: bool) -> tuple[Path, ...]:
+        """Return the roots exposed to a thread for its authorization level."""
+        return (
+            self._shared_workspace_roots if allow_tools else self._safe_workspace_roots
+        )
+
+    def _thread_cwd(self, allow_tools: bool) -> str:
+        """Return a working directory that matches the thread's trust boundary."""
+        if allow_tools:
+            return self._cwd
+        try:
+            self._attachment_root.mkdir(parents=True, exist_ok=True)
+            self._attachment_root.chmod(0o700)
+        except OSError as exc:
+            raise CodexAppServerError(
+                "The safe Codex workspace could not be prepared."
+            ) from exc
+        return str(self._attachment_root)
 
     def _thread_instruction_params(
         self,
@@ -1029,7 +1198,9 @@ class CodexAppServer:
         include_dynamic_tools: bool = True,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {
-            "baseInstructions": self._system_instructions(session),
+            "baseInstructions": self._system_instructions(
+                session, allow_tools=allow_tools
+            ),
             "developerInstructions": self._tool_instructions(allow_tools),
         }
         if allow_tools and include_dynamic_tools:
@@ -1037,6 +1208,7 @@ class CodexAppServer:
         return params
 
     async def start(self) -> None:
+        """Launch and initialize the project-local Codex App Server process."""
         if self._process is not None and self._process.returncode is None:
             if self._reader_task is not None and not self._reader_task.done():
                 logger.debug("Codex App Server is already running")
@@ -1063,9 +1235,10 @@ class CodexAppServer:
             raise CodexAppServerError(
                 "The private Codex home could not be initialized."
             ) from exc
+        self._auth_imported = False
         self._migrate_legacy_home()
         self._ensure_web_search_config()
-        self._import_global_auth()
+        self._auth_imported = self._import_global_auth()
 
         try:
             self._process = await asyncio.create_subprocess_exec(
@@ -1095,7 +1268,7 @@ class CodexAppServer:
                     "clientInfo": {
                         "name": AGENT_NAME.casefold(),
                         "title": AGENT_DISPLAY_NAME,
-                        "version": "0.1.0",
+                        "version": THEIA_VERSION,
                     },
                     "capabilities": {"experimentalApi": True},
                 },
@@ -1103,6 +1276,14 @@ class CodexAppServer:
             await self._send({"method": "initialized", "params": {}})
             await self._configure_shared_roots()
             await self.refresh_account()
+            if (
+                self.account is None
+                and self.requires_openai_auth
+                and not self._auth_imported
+                and self._import_global_auth(force=True)
+            ):
+                self._auth_imported = True
+                await self.refresh_account()
             await self.refresh_skills(force=True)
             try:
                 await self.loaded_threads()
@@ -1153,17 +1334,40 @@ class CodexAppServer:
             logger.debug("Using Codex CLI from PATH")
         return executable
 
-    def _import_global_auth(self) -> None:
+    def codex_cli_version(self) -> str | None:
+        """Read the version of the Codex CLI selected for this runtime."""
+        executable = self._codex_executable()
+        if executable is None:
+            return None
+        try:
+            result = subprocess.run(
+                [executable, "--version"],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                env=self._codex_environment,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        output = f"{result.stdout}\n{result.stderr}"
+        match = re.search(r"(?<![0-9])([0-9]+\.[0-9]+\.[0-9]+)(?![0-9])", output)
+        return match.group(1) if match else None
+
+    def _import_global_auth(self, *, force: bool = False) -> bool:
         """Bootstrap the private home from existing global Codex auth once."""
         if self._codex_home == self._global_codex_home:
-            return
+            return False
         source = self._global_codex_home / "auth.json"
         target = self._codex_home / "auth.json"
         try:
-            if target.exists() or target.is_symlink() or not source.is_file():
-                return
+            if target.is_symlink() or (target.exists() and not force):
+                return False
+            if not source.is_file():
+                return False
         except OSError:
-            return
+            return False
 
         temporary = target.with_name(f".{target.name}.tmp")
         try:
@@ -1171,9 +1375,11 @@ class CodexAppServer:
             temporary.chmod(0o600)
             temporary.replace(target)
             logger.info("Copied existing Codex login into the private runtime")
+            return True
         except OSError:
             with contextlib.suppress(OSError):
                 temporary.unlink()
+            return False
 
     async def _ensure_running(self) -> None:
         process = self._process
@@ -1185,6 +1391,7 @@ class CodexAppServer:
             await self.start()
 
     async def close(self) -> None:
+        """Stop the Codex process and resolve pending interaction state safely."""
         was_running = self._process is not None
         if self._skills_refresh_task is not None:
             self._skills_refresh_task.cancel()
@@ -1221,6 +1428,7 @@ class CodexAppServer:
             logger.info("Codex App Server stopped")
 
     async def refresh_account(self) -> dict[str, Any]:
+        """Refresh and cache the Codex account authentication state."""
         result = await self._request("account/read", {"refreshToken": False})
         self.account = result.get("account")
         self.requires_openai_auth = bool(result.get("requiresOpenaiAuth", False))
@@ -1231,12 +1439,19 @@ class CodexAppServer:
         )
         return result
 
+    async def account_details(self) -> dict[str, Any]:
+        """Fetch the current Codex account details for frontend status views."""
+        await self._ensure_running()
+        return await self.refresh_account()
+
     def is_authenticated(self, user_id: int, guild_id: int | None = None) -> bool:
+        """Return whether a user or their server has completed Theia login."""
         return user_id in self._authenticated_users or (
             guild_id is not None and guild_id in self._authenticated_guilds
         )
 
     def mark_authenticated(self, user_id: int, *, guild_id: int | None = None) -> None:
+        """Persist user access and optionally grant access across one server."""
         changed = user_id not in self._authenticated_users
         self._authenticated_users.add(user_id)
         if guild_id is not None:
@@ -1246,12 +1461,14 @@ class CodexAppServer:
             self._persist_state()
 
     def mark_server_authenticated(self, guild_id: int) -> None:
+        """Persist server-wide authorization for subsequent Discord requests."""
         if guild_id in self._authenticated_guilds:
             return
         self._authenticated_guilds.add(guild_id)
         self._persist_state()
 
     def clear_authenticated_users(self) -> None:
+        """Clear all persisted user and server login grants."""
         if self._authenticated_users or self._authenticated_guilds:
             self._authenticated_users.clear()
             self._authenticated_guilds.clear()
@@ -1277,6 +1494,7 @@ class CodexAppServer:
     async def available_models(
         self, *, force: bool = False
     ) -> tuple[dict[str, Any], ...]:
+        """Return the cached model catalog, refreshing it when requested or stale."""
         await self._ensure_running()
         if (
             not force
@@ -1306,6 +1524,7 @@ class CodexAppServer:
             return self._models
 
     async def set_model(self, model: str) -> None:
+        """Validate and persist the model used for newly started Codex threads."""
         models = await self.available_models(force=True)
         if not any(item.get("id") == model for item in models):
             raise CodexAppServerError(
@@ -1316,6 +1535,7 @@ class CodexAppServer:
         logger.info("Codex model selection updated")
 
     def model_name(self) -> str | None:
+        """Return the explicitly selected model, or ``None`` for Codex default."""
         return self._model
 
     async def begin_login(
@@ -1326,9 +1546,12 @@ class CodexAppServer:
         guild_id: int | None = None,
         grant_server: bool = False,
     ) -> dict[str, Any]:
+        """Start or reuse device-code login and record the requested access scope."""
         await self._ensure_running()
         await self.refresh_account()
         if self.account is not None or not self.requires_openai_auth:
+            imported = self._auth_imported
+            self._auth_imported = False
             self.mark_authenticated(
                 user_id,
                 guild_id=guild_id if grant_server else None,
@@ -1337,10 +1560,11 @@ class CodexAppServer:
                 "Codex login reused (server_access_granted=%s)",
                 grant_server and guild_id is not None,
             )
-            return {"login_cached": True}
+            return {"login_imported": True} if imported else {"login_cached": True}
         if self._login_id is not None:
             logger.info("Codex login is already in progress")
             return {"login_in_progress": True}
+        self._auth_imported = False
         result = await self._request(
             "account/login/start",
             {"type": "chatgptDeviceCode"},
@@ -1353,6 +1577,7 @@ class CodexAppServer:
         return result
 
     async def usage(self) -> dict[str, Any]:
+        """Return account usage, or an empty result when login is required."""
         await self._ensure_running()
         await self.refresh_account()
         if self.account is None and self.requires_openai_auth:
@@ -1362,6 +1587,7 @@ class CodexAppServer:
         return await self._request("account/usage/read", {"threadId": None})
 
     async def credits(self) -> dict[str, Any]:
+        """Return account rate limits, or an empty result when login is required."""
         await self._ensure_running()
         await self.refresh_account()
         if self.account is None and self.requires_openai_auth:
@@ -1623,7 +1849,65 @@ class CodexAppServer:
                 archived,
                 deleted,
             )
+        self._prune_attachment_cache()
         return {"archived": archived, "deleted": deleted}
+
+    def _prune_attachment_cache(self, *, required_bytes: int = 0) -> int:
+        """Remove expired cache entries before the private cache exceeds its quota."""
+        try:
+            entries = tuple(self._attachment_root.iterdir())
+        except FileNotFoundError:
+            return 0
+        except OSError as exc:
+            logger.warning(
+                "Could not inspect the attachment cache (error=%s)",
+                type(exc).__name__,
+            )
+            return 0
+
+        files: list[tuple[float, int, Path]] = []
+        total = 0
+        for path in entries:
+            if path.is_symlink() or not path.is_file():
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            total += stat.st_size
+            files.append((stat.st_mtime, stat.st_size, path))
+        if total + required_bytes <= self._attachment_cache_limit:
+            return 0
+
+        cutoff = time.time() - self._attachment_cache_max_age
+        removed = 0
+        for modified_at, size, path in sorted(files):
+            if modified_at > cutoff:
+                continue
+            try:
+                path.unlink()
+            except OSError as exc:
+                logger.warning(
+                    "Could not remove an expired attachment cache entry (error=%s)",
+                    type(exc).__name__,
+                )
+                continue
+            total -= size
+            removed += 1
+            if total + required_bytes <= self._attachment_cache_limit:
+                break
+        if total + required_bytes > self._attachment_cache_limit:
+            logger.warning(
+                "Attachment cache quota reached; refusing additional cache data "
+                "(bytes=%d, limit=%d)",
+                total,
+                self._attachment_cache_limit,
+            )
+            if required_bytes:
+                raise CodexAppServerError(
+                    "The private attachment cache is full; try again later."
+                )
+        return removed
 
     async def ask(
         self,
@@ -1639,6 +1923,7 @@ class CodexAppServer:
         on_channel_change: Callable[[discord.abc.Messageable], None] | None = None,
         on_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
     ) -> str:
+        """Run a user request in a session and return its completed response text."""
         await self._ensure_running()
         await self.refresh_account()
         if self.account is None and self.requires_openai_auth:
@@ -1946,13 +2231,26 @@ class CodexAppServer:
         self, attachments: Iterable[Any]
     ) -> list[dict[str, Any]]:
         prepared: list[dict[str, Any]] = []
-        for attachment in attachments:
+        total_bytes = 0
+        for index, attachment in enumerate(attachments, start=1):
+            if index > MAX_ATTACHMENTS_PER_REQUEST:
+                raise CodexAppServerError(
+                    f"A request may include at most {MAX_ATTACHMENTS_PER_REQUEST} attachments."
+                )
             filename = str(
                 getattr(attachment, "filename", "attachment") or "attachment"
             )
             size = getattr(attachment, "size", None)
             if isinstance(size, int) and size > MAX_ATTACHMENT_BYTES:
                 raise CodexAppServerError("An attachment is too large to process.")
+            if (
+                isinstance(size, int)
+                and size >= 0
+                and total_bytes + size > MAX_ATTACHMENT_BATCH_BYTES
+            ):
+                raise CodexAppServerError(
+                    "The attachments are too large to process together."
+                )
             read = getattr(attachment, "read", None)
             if not callable(read):
                 prepared.append(
@@ -1971,6 +2269,11 @@ class CodexAppServer:
                 ) from exc
             if not isinstance(raw, bytes) or len(raw) > MAX_ATTACHMENT_BYTES:
                 raise CodexAppServerError("An attachment is too large or invalid.")
+            total_bytes += len(raw)
+            if total_bytes > MAX_ATTACHMENT_BATCH_BYTES:
+                raise CodexAppServerError(
+                    "The attachments are too large to process together."
+                )
             path = self._store_attachment(filename, raw)
             content_type = str(getattr(attachment, "content_type", "") or "")
             suffix = Path(filename).suffix.casefold()
@@ -2031,16 +2334,28 @@ class CodexAppServer:
             suffix = ".bin"
         digest = hashlib.sha256(filename.encode("utf-8") + b"\0" + raw).hexdigest()
         path = self._attachment_root / f"{digest}{suffix}"
+        temporary = path.with_name(f".{path.name}.{time.time_ns()}.tmp")
         try:
             self._attachment_root.mkdir(parents=True, exist_ok=True)
             self._attachment_root.chmod(0o700)
-            if not path.exists():
-                path.write_bytes(raw)
-                path.chmod(0o600)
+            if path.is_symlink():
+                path.unlink()
+            elif path.exists():
+                if not path.is_file() or path.read_bytes() != raw:
+                    path.unlink()
+                else:
+                    return path
+            self._prune_attachment_cache(required_bytes=len(raw))
+            temporary.write_bytes(raw)
+            temporary.chmod(0o600)
+            temporary.replace(path)
         except OSError as exc:
             raise CodexAppServerError(
                 "The attachment could not be cached in the private runtime."
             ) from exc
+        finally:
+            with contextlib.suppress(OSError):
+                temporary.unlink()
         return path
 
     def _user_input(
@@ -2084,7 +2399,7 @@ class CodexAppServer:
             params: dict[str, Any] = {
                 "threadId": session.thread_id,
                 "runtimeWorkspaceRoots": [
-                    str(path) for path in self._shared_workspace_roots
+                    str(path) for path in self._workspace_roots(allow_tools)
                 ],
                 "approvalPolicy": self._approval_policy(allow_tools),
                 "sandbox": self._sandbox(allow_tools),
@@ -2119,12 +2434,12 @@ class CodexAppServer:
 
         if session.thread_id is None:
             params: dict[str, Any] = {
-                "cwd": self._cwd,
+                "cwd": self._thread_cwd(allow_tools),
                 "approvalPolicy": self._approval_policy(allow_tools),
                 "sandbox": self._sandbox(allow_tools),
                 "threadSource": AGENT_NAME.casefold(),
                 "runtimeWorkspaceRoots": [
-                    str(path) for path in self._shared_workspace_roots
+                    str(path) for path in self._workspace_roots(allow_tools)
                 ],
             }
             params.update(self._thread_instruction_params(session, allow_tools))
@@ -2143,7 +2458,7 @@ class CodexAppServer:
             logger.info(
                 "Created Codex thread (tools_allowed=%s, workspace_roots=%d)",
                 allow_tools,
-                len(self._shared_workspace_roots),
+                len(self._workspace_roots(allow_tools)),
             )
         else:
             session.loaded = True
@@ -2231,6 +2546,7 @@ class CodexAppServer:
             self._turns.pop(turn_id, None)
 
     async def interrupt(self, session_key: str) -> bool:
+        """Interrupt the active turn for a session, if one is running."""
         session = self._session(session_key)
         if not session.thread_id or not session.turn_id:
             logger.debug("Ignored Codex interrupt because no turn is active")
@@ -2269,7 +2585,23 @@ class CodexAppServer:
         approved: bool,
         channel: Any | None = None,
     ) -> bool:
+        """Resolve the newest matching approval for the requesting user and channel."""
         channel_id = getattr(channel, "id", None)
+        if not self._has_current_server_admin_access(channel, user_id):
+            logger.info("Ignored approval response after administrator access changed")
+            for key, pending in tuple(self._pending_approvals.items()):
+                if (
+                    pending.user_id == user_id
+                    and pending.channel_id == channel_id
+                    and not pending.future.done()
+                ):
+                    self._pending_approvals.pop(key, None)
+                    pending.future.set_result(
+                        self._approval_result(
+                            pending.kind, pending.params, approved=False
+                        )
+                    )
+            return False
         candidates = [
             pending
             for pending in self._pending_approvals.values()
@@ -2292,6 +2624,19 @@ class CodexAppServer:
         pending.future.set_result(result)
         logger.info("Codex approval request resolved (approved=%s)", approved)
         return True
+
+    @staticmethod
+    def _has_current_server_admin_access(
+        channel: Any | None, user_id: int | None
+    ) -> bool:
+        """Return whether the current guild member still has administrator access."""
+        guild = getattr(channel, "guild", None)
+        get_member = getattr(guild, "get_member", None)
+        if guild is None or user_id is None or not callable(get_member):
+            return False
+        member = get_member(user_id)
+        permissions = getattr(member, "guild_permissions", None)
+        return bool(permissions and getattr(permissions, "administrator", False))
 
     def _clear_pending_for_turn(
         self, thread_id: str, turn_id: str, *, approved: bool = False
@@ -2321,6 +2666,7 @@ class CodexAppServer:
         self._pending_approvals.clear()
 
     async def steer(self, session_key: str, prompt: str) -> None:
+        """Send a follow-up instruction to the active Codex turn."""
         session = self._session(session_key)
         if not session.thread_id or not session.turn_id:
             raise CodexAppServerError("There is no active Codex turn to steer.")
@@ -2334,6 +2680,7 @@ class CodexAppServer:
         )
 
     async def new_session(self, session_key: str) -> None:
+        """Discard the current Codex thread while retaining session preferences."""
         session = self._session(session_key)
         if session.turn_id:
             raise CodexAppServerError(
@@ -2348,6 +2695,7 @@ class CodexAppServer:
         self._persist_state()
 
     async def resume_session(self, session_key: str, thread_id: str) -> None:
+        """Resume a persisted Codex thread and bind it to a Discord session."""
         params: dict[str, Any] = {
             "threadId": thread_id,
             "runtimeWorkspaceRoots": [
@@ -2364,6 +2712,7 @@ class CodexAppServer:
         self._persist_state()
 
     async def fork_session(self, session_key: str) -> str:
+        """Fork the session's current Codex thread and return the new thread id."""
         session = self._session(session_key)
         await self._ensure_thread(session)
         params: dict[str, Any] = {"threadId": session.thread_id}
@@ -2380,11 +2729,13 @@ class CodexAppServer:
         return thread_id
 
     async def compact(self, session_key: str) -> None:
+        """Request context compaction for the session's current Codex thread."""
         session = self._session(session_key)
         await self._ensure_thread(session)
         await self._request("thread/compact/start", {"threadId": session.thread_id})
 
     async def archive(self, session_key: str) -> None:
+        """Archive the session's Codex thread and update local retention state."""
         session = self._session(session_key)
         await self._ensure_thread(session)
         thread_id = session.thread_id
@@ -2401,6 +2752,7 @@ class CodexAppServer:
             self._persist_state()
 
     async def read_thread(self, session_key: str) -> dict[str, Any]:
+        """Read the session's thread without unnecessarily resuming it."""
         session = self._session(session_key)
         await self._ensure_thread(session)
         params: dict[str, Any] = {
@@ -2430,6 +2782,7 @@ class CodexAppServer:
             return await self._request("thread/resume", resume_params)
 
     async def list_threads(self) -> dict[str, Any]:
+        """List recent Codex threads visible to the configured runtime."""
         await self._ensure_running()
         return await self._request(
             "thread/list",
@@ -2444,6 +2797,7 @@ class CodexAppServer:
     async def goal(
         self, session_key: str, action: str, objective: str | None = None
     ) -> dict[str, Any]:
+        """Get, set, or clear the Codex goal associated with a session thread."""
         session = self._session(session_key)
         await self._ensure_thread(session)
         if action == "get":
@@ -2462,6 +2816,7 @@ class CodexAppServer:
         )
 
     async def skills(self, *, force_reload: bool = False) -> dict[str, Any]:
+        """Return the cached skill catalog, optionally forcing a protocol refresh."""
         await self._ensure_running()
         async with self._skills_lock:
             if (
@@ -2479,9 +2834,11 @@ class CodexAppServer:
             return result
 
     async def refresh_skills(self, *, force: bool = False) -> dict[str, Any]:
+        """Refresh the skill catalog using the public convenience API."""
         return await self.skills(force_reload=force)
 
     def skill_names(self) -> tuple[tuple[str, str], ...]:
+        """Return enabled skill names and their user-facing display labels."""
         values: list[tuple[str, str]] = []
         for skill in self._skills_cache:
             if skill.get("enabled") is False:
@@ -2499,6 +2856,7 @@ class CodexAppServer:
             await self.refresh_skills(force=True)
 
     async def apps(self, session_key: str) -> dict[str, Any]:
+        """List apps available to the session's current Codex thread."""
         session = self._session(session_key)
         await self._ensure_thread(session)
         return await self._request(
@@ -2515,6 +2873,7 @@ class CodexAppServer:
         user_id: int | None = None,
         on_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
+        """Run a Codex review against the session's current workspace or instructions."""
         session = self._session(session_key)
         assert session.lock is not None
         async with session.lock:
@@ -2574,6 +2933,7 @@ class CodexAppServer:
         return result
 
     def status(self, session_key: str) -> dict[str, Any]:
+        """Return the compact runtime status used by Discord command responses."""
         session = self._session(session_key)
         return {
             "thread_id": session.thread_id,
@@ -2820,6 +3180,12 @@ class CodexAppServer:
         if state is None or not state.allow_tools:
             logger.info("Rejected Codex approval request (tools are unavailable)")
             return self._approval_result(kind, params, approved=False)
+        if not self._has_current_server_admin_access(channel, user_id):
+            state.allow_tools = False
+            logger.info(
+                "Rejected Codex approval request after administrator access changed"
+            )
+            return self._approval_result(kind, params, approved=False)
         thread_id = str(params.get("threadId") or (state.thread_id if state else ""))
         turn_id = str(params.get("turnId") or "")
         item_id = str(params.get("itemId") or "")
@@ -2856,7 +3222,14 @@ class CodexAppServer:
         async def resolve_from_button(decision: str) -> None:
             if pending.future.done():
                 return
-            approved = decision == "accept"
+            if not self._has_current_server_admin_access(channel, user_id):
+                state.allow_tools = False
+                logger.info(
+                    "Rejected approval button after administrator access changed"
+                )
+                approved = False
+            else:
+                approved = decision == "accept"
             pending.future.set_result(
                 self._approval_result(kind, params, approved=approved)
             )
@@ -3265,7 +3638,10 @@ class CodexAppServer:
                 ],
                 "success": False,
             }
-        if not state.allow_tools:
+        if not state.allow_tools or not self._has_current_server_admin_access(
+            state.channel, state.user_id
+        ):
+            state.allow_tools = False
             logger.info("Rejected Codex Discord tool request for a restricted user")
             return {
                 "contentItems": [
@@ -3316,9 +3692,17 @@ class CodexAppServer:
                 ):
                     continue
                 try:
-                    if not path.is_file() or path.stat().st_size > MAX_ATTACHMENT_BYTES:
+                    if path.is_symlink():
                         continue
-                    files.append(discord.File(str(path), filename=path.name))
+                    resolved = path.resolve(strict=True)
+                    if (
+                        not _path_is_under(resolved, self._shared_workspace_roots)
+                        or not resolved.is_file()
+                    ):
+                        continue
+                    if resolved.stat().st_size > MAX_ATTACHMENT_BYTES:
+                        continue
+                    files.append(discord.File(str(resolved), filename=resolved.name))
                 except OSError:
                     continue
         logger.debug("Codex Discord tool prepared (files=%d)", len(files))
@@ -3328,6 +3712,20 @@ class CodexAppServer:
                 files=files or None,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+        except (discord.DiscordException, OSError) as exc:
+            logger.warning(
+                "Codex Discord tool could not send a message (error=%s)",
+                type(exc).__name__,
+            )
+            return {
+                "contentItems": [
+                    {
+                        "type": "inputText",
+                        "text": "Discord could not send the message.",
+                    }
+                ],
+                "success": False,
+            }
         finally:
             for file in files:
                 file.close()
@@ -3403,7 +3801,7 @@ class CodexAppServer:
                         self._frontend_embed(
                             channel,
                             "command:login",
-                            "Login complete",
+                            "Authentication completed",
                             access_message,
                             color=discord.Color.green(),
                         ),

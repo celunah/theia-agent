@@ -1,6 +1,6 @@
 {
   "name": "theia-agent-runtime",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Local runtime dependency for Theia Agent",
   "engines": {
@@ -8,5 +8,13 @@
   },
   "dependencies": {
     "@openai/codex": "0.153.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.30",
+    "prettier": "3.5.3",
+    "typescript": "5.8.3"
+  },
+  "scripts": {
+    "check:test-harness": "prettier --check tests/fixtures/fake_app_server.ts && tsc --noEmit --project tsconfig.json"
   }
 }

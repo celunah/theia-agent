@@ -14,6 +14,16 @@ import discord
 from typing_extensions import Self
 
 import main
+from scripts.configure import (
+    VOICE_MODE,
+    TEXT_MODE,
+    ConfigurationError,
+    collect_configuration,
+    save_configuration,
+    validate_configuration,
+)
+from theia.bot import _handle_voice_transcript
+from theia.core import _path_is_under
 
 
 class _Channel:
@@ -27,6 +37,22 @@ class _Channel:
     async def send(self, **kwargs):
         self.sent.append(kwargs)
         return SimpleNamespace(id=len(self.sent))
+
+
+class _FailingSendChannel(_Channel):
+    async def send(self, *_args, **_kwargs):
+        raise discord.DiscordException("permission revoked")
+
+
+def _admin_guild(user_id: int = 7, administrator: bool = True) -> Any:
+    member = SimpleNamespace(
+        id=user_id,
+        guild_permissions=SimpleNamespace(administrator=administrator),
+    )
+    return SimpleNamespace(
+        id=1,
+        get_member=lambda candidate: member if candidate == user_id else None,
+    )
 
 
 class _TypingContext:
@@ -93,6 +119,7 @@ class CommandSurfaceTests(unittest.TestCase):
             names,
             {
                 "login",
+                "about",
                 "usage",
                 "credits",
                 "approve",
@@ -158,6 +185,31 @@ class CommandSurfaceTests(unittest.TestCase):
             server = main.CodexAppServer()
 
         self.assertEqual(server._stdio_limit, main.MAX_CODEX_STDIO_LIMIT)
+
+    def test_codex_child_environment_excludes_theia_and_provider_secrets(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "TOKEN": "discord-secret",
+                "STT_TOKEN": "stt-secret",
+                "TTS_TOKEN": "tts-secret",
+                "OPENAI_API_KEY": "openai-secret",
+                "CODEX_API_KEY": "codex-secret",
+            },
+        ):
+            server = main.CodexAppServer()
+
+        for name in (
+            "TOKEN",
+            "STT_TOKEN",
+            "TTS_TOKEN",
+            "OPENAI_API_KEY",
+            "CODEX_API_KEY",
+        ):
+            self.assertNotIn(name, server._codex_environment)
+        self.assertEqual(
+            server._codex_environment["CODEX_HOME"], str(server._codex_home)
+        )
 
     def test_thread_name_is_compact_and_single_line(self) -> None:
         name = main._thread_name("  Review the\nnew   gateway behavior  ")
@@ -252,13 +304,37 @@ class CommandSurfaceTests(unittest.TestCase):
             ):
                 server = main.CodexAppServer()
                 private_home.mkdir(exist_ok=True)
-                server._import_global_auth()
+                self.assertTrue(server._import_global_auth())
 
             self.assertEqual(
                 (private_home / "auth.json").read_text(encoding="utf-8"), auth
             )
             self.assertEqual(
                 (global_home / "auth.json").read_text(encoding="utf-8"), auth
+            )
+
+    def test_invalid_private_auth_can_be_replaced_by_global_auth(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            private_home = root / "private"
+            global_home = root / "global"
+            private_home.mkdir()
+            global_home.mkdir()
+            (private_home / "auth.json").write_text("invalid", encoding="utf-8")
+            auth = '{"auth_mode":"chatgpt","tokens":{"access_token":"global"}}'
+            (global_home / "auth.json").write_text(auth, encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                {
+                    "CODEX_DISCORD_HOME": str(private_home),
+                    "CODEX_HOME": str(global_home),
+                },
+            ):
+                server = main.CodexAppServer()
+                self.assertTrue(server._import_global_auth(force=True))
+
+            self.assertEqual(
+                (private_home / "auth.json").read_text(encoding="utf-8"), auth
             )
 
     @unittest.skipIf(
@@ -441,6 +517,57 @@ class CommandSurfaceTests(unittest.TestCase):
             {"Balance", "Status", "5-hour limit", "Weekly limit"},
         )
 
+    def test_usage_and_credit_field_labels_are_customizable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = main.FrontendCustomizationStore(Path(directory) / "frontend.json")
+            for target, value in (
+                ("usage_lifetime_tokens", "Lifetime"),
+                ("usage_peak_daily_tokens", "Daily peak"),
+                ("usage_current_streak", "Current"),
+                ("usage_longest_streak", "Longest"),
+                ("usage_longest_running_turn", "Slowest"),
+                ("credits_balance", "Credits"),
+                ("credits_status", "State"),
+                ("credits_five_hour_limit", "Five hour"),
+                ("credits_weekly_limit", "Seven day"),
+            ):
+                store.set(42, target, "label", value)
+            channel = SimpleNamespace(
+                id=7, guild=SimpleNamespace(id=42, name="Example")
+            )
+            with patch.object(main.bot, "customizations", store):
+                usage = main._usage_embed(
+                    {
+                        "summary": {
+                            "lifetimeTokens": 1,
+                            "peakDailyTokens": 2,
+                            "currentStreakDays": 3,
+                            "longestStreakDays": 4,
+                            "longestRunningTurnSec": 5,
+                        }
+                    },
+                    channel=channel,
+                )
+                credit_embed = main._credits_embed(
+                    {
+                        "rateLimits": {
+                            "credits": {"balance": 12},
+                            "primary": {"usedPercent": 10, "resetsAt": 0},
+                            "secondary": {"usedPercent": 20, "resetsAt": 0},
+                        }
+                    },
+                    channel=channel,
+                )
+
+        self.assertEqual(
+            [field.name for field in usage.fields],
+            ["Lifetime", "Daily peak", "Current", "Longest", "Slowest"],
+        )
+        self.assertEqual(
+            [field.name for field in credit_embed.fields],
+            ["Credits", "State", "Five hour", "Seven day"],
+        )
+
     def test_personality_autocomplete_uses_available_profiles(self) -> None:
         with patch.object(
             main.bot.codex, "personality_names", return_value=("calm", "formal")
@@ -534,6 +661,28 @@ class CommandSurfaceTests(unittest.TestCase):
             store.set(42, "usage", "color", "#000000")
             self.assertEqual(store.color(42, "usage", 0xFFFFFF), 0)
 
+    def test_corrupt_frontend_customization_is_quarantined_before_recovery(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "frontend.json"
+            path.write_text("{broken", encoding="utf-8")
+
+            store = main.FrontendCustomizationStore(path)
+
+            backups = tuple(path.parent.glob("frontend.json.corrupt-*"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].read_text(encoding="utf-8"), "{broken")
+            self.assertFalse(path.exists())
+
+            store.set(42, "usage", "title", "Recovered")
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8"))["guilds"]["42"][
+                    "command:usage"
+                ]["title"],
+                "Recovered",
+            )
+
     def test_customization_autocomplete_includes_commands_and_labels(self) -> None:
         choices = asyncio.run(
             main.customization_target_autocomplete(SimpleNamespace(), "think")
@@ -542,6 +691,52 @@ class CommandSurfaceTests(unittest.TestCase):
             [(choice.name, choice.value) for choice in choices],
             [("Label: Thinking", "label:thinking")],
         )
+
+    def test_customization_lists_all_frontend_elements(self) -> None:
+        expected = {
+            name
+            for group in (
+                (
+                    "choose_button",
+                    "approve_button",
+                    "deny_button",
+                    "previous_button",
+                    "next_button",
+                    "other_button",
+                    "answer_button",
+                    "decline_button",
+                ),
+                ("input_modal_title", "json_response", "text_input_label"),
+                (
+                    "login_verification_link",
+                    "login_code",
+                    "login_visibility_footer",
+                ),
+                (
+                    "usage_lifetime_tokens",
+                    "usage_peak_daily_tokens",
+                    "usage_current_streak",
+                    "usage_longest_streak",
+                    "usage_longest_running_turn",
+                ),
+                (
+                    "credits_balance",
+                    "credits_status",
+                    "credits_five_hour_limit",
+                    "credits_weekly_limit",
+                ),
+                (
+                    "about_theia_agent",
+                    "about_codex_cli",
+                    "about_account",
+                    "about_plan",
+                    "about_mode",
+                    "about_personality",
+                ),
+            )
+            for name in group
+        }
+        self.assertTrue(expected.issubset(set(main.LABEL_TARGETS)))
 
     def test_frontend_embed_customization_does_not_change_default_without_server(
         self,
@@ -563,12 +758,381 @@ class CommandSurfaceTests(unittest.TestCase):
                 guild_id=42,
                 customizer=store,
             )
+            store.set(42, "request_failed", "label", "Failure")
+            label_customized = main._command_embed(
+                "Request failed",
+                "The request failed.",
+                target="label:request_failed",
+                guild_id=42,
+                customizer=store,
+            )
 
         self.assertEqual(default.title, "Usage")
         self.assertEqual(customized.title, "Custom usage")
+        self.assertEqual(label_customized.title, "Failure")
+
+    def test_about_embed_contains_only_the_requested_runtime_details(self) -> None:
+        user = SimpleNamespace(name="username", mention="@username")
+        with patch("theia.bot._theia_revision", return_value="a1b2c3d"):
+            embed = main._about_embed(
+                account={"planType": "plus"},
+                cli_version="0.153.0",
+                mode="text",
+                personality="Cel",
+                user=cast(Any, user),
+            )
+
+        self.assertEqual(embed.title, "About Theia")
+        self.assertEqual(
+            [(field.name, field.value) for field in embed.fields],
+            [
+                ("Theia Agent", "1.0.0 (a1b2c3d)"),
+                ("Codex CLI", "0.153.0"),
+                ("Account", "@username"),
+                ("Plan", "Plus ($20/mo)"),
+                ("Mode", "Text"),
+                ("Personality", "Cel"),
+            ],
+        )
+
+    def test_about_embed_customizes_field_labels(self) -> None:
+        user = SimpleNamespace(name="username", mention="@username")
+        with tempfile.TemporaryDirectory() as directory:
+            store = main.FrontendCustomizationStore(Path(directory) / "frontend.json")
+            for target, value in (
+                ("about_theia_agent", "Agent"),
+                ("about_codex_cli", "CLI"),
+                ("about_account", "User"),
+                ("about_plan", "Subscription"),
+                ("about_mode", "Interaction"),
+                ("about_personality", "Style"),
+            ):
+                store.set(42, target, "label", value)
+            with patch.object(main.bot, "customizations", store):
+                embed = main._about_embed(
+                    account={"planType": "plus"},
+                    cli_version="0.153.0",
+                    mode="text",
+                    personality="Cel",
+                    channel=SimpleNamespace(
+                        id=7, guild=SimpleNamespace(id=42, name="Example")
+                    ),
+                    user=cast(Any, user),
+                )
+
+        self.assertEqual(
+            [field.name for field in embed.fields],
+            ["Agent", "CLI", "User", "Subscription", "Interaction", "Style"],
+        )
+
+    def test_pagination_buttons_use_frontend_customization(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = main.FrontendCustomizationStore(Path(directory) / "frontend.json")
+            store.set(42, "previous_button", "label", "Back")
+            store.set(42, "next_button", "label", "Forward")
+            view = main._PaginatorView(
+                ["first", "second"],
+                owner_id=7,
+                customizer=store,
+                guild_id=42,
+            )
+
+        self.assertEqual(
+            [getattr(item, "label", None) for item in view.children],
+            ["Back", "Forward"],
+        )
+
+    def test_input_modals_use_frontend_customization(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = main.FrontendCustomizationStore(Path(directory) / "frontend.json")
+            store.set(42, "input_modal_title", "label", "Your input")
+            store.set(42, "json_response", "label", "Payload")
+            store.set(42, "text_input_label", "label", "Response")
+            store.set(42, "choose_button", "label", "Select")
+            channel = SimpleNamespace(guild=SimpleNamespace(id=42))
+            form = main._FormView(
+                7,
+                prompt="Provide JSON",
+                channel=cast(Any, channel),
+                customizer=store,
+            )
+            json_modal = main._JsonModal(
+                form,
+                7,
+                title="Codex input",
+                prompt="Provide JSON",
+            )
+            user_input = main._UserInputView(
+                7,
+                [
+                    {
+                        "id": "details",
+                        "header": "Details",
+                        "question": "Explain",
+                        "options": [{}],
+                    }
+                ],
+                channel=cast(Any, channel),
+                customizer=store,
+            )
+            text_modal = main._TextModal(
+                user_input,
+                7,
+                user_input.current_question,
+            )
+
+        self.assertEqual(json_modal.title, "Your input")
+        self.assertEqual(json_modal.value.to_component_dict()["label"], "Payload")
+        self.assertEqual(text_modal.title, "Your input")
+        self.assertEqual(text_modal.answer.to_component_dict()["label"], "Response")
+        self.assertEqual(getattr(user_input.children[0], "label", None), "Select")
+
+    def test_codex_cli_version_is_read_from_the_selected_executable(self) -> None:
+        server = main.CodexAppServer()
+        with (
+            patch.object(server, "_codex_executable", return_value="/tmp/codex"),
+            patch(
+                "theia.app_server.subprocess.run",
+                return_value=SimpleNamespace(stdout="codex-cli 0.153.0\n", stderr=""),
+            ) as run,
+        ):
+            self.assertEqual(server.codex_cli_version(), "0.153.0")
+
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0], ["/tmp/codex", "--version"])
+
+
+class ConfigurationScriptTests(unittest.TestCase):
+    def test_text_setup_only_requests_the_discord_token(self) -> None:
+        prompts: list[str] = []
+        output: list[str] = []
+        values = collect_configuration(
+            input_fn=lambda prompt: prompts.append(prompt) or "",
+            secret_input_fn=lambda _prompt: "discord-token",
+            output_fn=output.append,
+        )
+
+        self.assertEqual(values.mode, TEXT_MODE)
+        self.assertEqual(
+            values.as_environment(),
+            {"TOKEN": "discord-token", "THEIA_DEFAULT_MODE": TEXT_MODE},
+        )
+        self.assertEqual(prompts, ["Mode [1/text]: "])
+        self.assertNotIn("discord-token", "\n".join(output))
+
+    def test_voice_setup_requests_both_audio_services(self) -> None:
+        prompts: list[str] = []
+        inputs = iter(["2", "https://stt.example/v1", "https://tts.example/v1"])
+        secrets = iter(["discord-token", "stt-token", "tts-token"])
+        values = collect_configuration(
+            input_fn=lambda prompt: prompts.append(prompt) or next(inputs),
+            secret_input_fn=lambda _prompt: next(secrets),
+            output_fn=lambda _message: None,
+        )
+
+        self.assertEqual(values.mode, VOICE_MODE)
+        self.assertEqual(
+            values.as_environment(),
+            {
+                "TOKEN": "discord-token",
+                "THEIA_DEFAULT_MODE": VOICE_MODE,
+                "STT_BASE_URL": "https://stt.example/v1",
+                "STT_TOKEN": "stt-token",
+                "TTS_BASE_URL": "https://tts.example/v1",
+                "TTS_TOKEN": "tts-token",
+            },
+        )
+        self.assertEqual(
+            prompts,
+            ["Mode [1/text]: ", "STT URL: ", "TTS URL: "],
+        )
+
+    def test_setup_preserves_unrelated_dotenv_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / ".env"
+            path.write_text(
+                "# Keep this setting\nCUSTOM_SETTING=preserve-me\n"
+                "TOKEN=old-token\nSTT_BASE_URL=https://old.example\n",
+                encoding="utf-8",
+            )
+            values = validate_configuration(
+                discord_token="new-token",
+                mode=TEXT_MODE,
+            )
+            save_configuration(values, path=path)
+            contents = path.read_text(encoding="utf-8")
+
+        self.assertIn("CUSTOM_SETTING=preserve-me", contents)
+        self.assertIn('TOKEN="new-token"', contents)
+        self.assertIn('THEIA_DEFAULT_MODE="text"', contents)
+        self.assertIn("STT_BASE_URL=https://old.example", contents)
+        self.assertNotIn("old-token", contents)
+
+    def test_setup_rejects_invalid_or_credential_bearing_audio_urls(self) -> None:
+        with self.assertRaisesRegex(ConfigurationError, "HTTP or HTTPS"):
+            validate_configuration(
+                discord_token="discord-token",
+                mode=VOICE_MODE,
+                stt_base_url="file:///tmp/stt",
+                tts_base_url="https://tts.example/v1",
+            )
+        with self.assertRaisesRegex(ConfigurationError, "embedded credentials"):
+            validate_configuration(
+                discord_token="discord-token",
+                mode=VOICE_MODE,
+                stt_base_url="https://user:password@stt.example/v1",
+                tts_base_url="https://tts.example/v1",
+            )
 
 
 class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_about_command_fetches_data_and_sends_a_private_embed(self) -> None:
+        guild = SimpleNamespace(id=42)
+        channel = SimpleNamespace(id=7, guild=guild)
+        interaction = SimpleNamespace(
+            id=1,
+            channel=channel,
+            user=SimpleNamespace(
+                id=9,
+                name="username",
+                mention="@username",
+            ),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        with (
+            patch.object(main.bot.presence, "touch", new=AsyncMock()),
+            patch.object(
+                main.bot.codex,
+                "account_details",
+                new=AsyncMock(return_value={"account": {"planType": "plus"}}),
+            ) as account_details,
+            patch.object(
+                main.bot.codex,
+                "codex_cli_version",
+                return_value="0.153.0",
+            ),
+            patch.object(main.bot.codex, "mode", return_value="text"),
+            patch.object(main.bot.codex, "active_personality", return_value="Cel"),
+            patch("theia.bot._theia_revision", return_value="a1b2c3d"),
+        ):
+            await cast(Any, main.codex_about.callback)(interaction)
+
+        account_details.assert_awaited_once_with()
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        kwargs = interaction.followup.send.await_args.kwargs
+        self.assertTrue(kwargs["ephemeral"])
+        self.assertEqual(
+            [(field.name, field.value) for field in kwargs["embed"].fields],
+            [
+                ("Theia Agent", "1.0.0 (a1b2c3d)"),
+                ("Codex CLI", "0.153.0"),
+                ("Account", "@username"),
+                ("Plan", "Plus ($20/mo)"),
+                ("Mode", "Text"),
+                ("Personality", "Cel"),
+            ],
+        )
+
+    async def test_login_messages_cover_each_authentication_path(self) -> None:
+        """Expose distinct status messages for cached, imported, and device auth."""
+        cases = (
+            ({"login_cached": True}, "Already logged in"),
+            ({"login_imported": True}, "Cached authentication imported"),
+            (
+                {"verificationUrl": "https://example.test/device", "userCode": "ABC"},
+                "Device code required",
+            ),
+        )
+        for result, expected_title in cases:
+            send = AsyncMock()
+            with (
+                patch.object(main.bot.presence, "touch", new=AsyncMock()),
+                patch.object(
+                    main.bot.codex, "begin_login", new=AsyncMock(return_value=result)
+                ),
+                patch.object(main.bot.codex, "mark_authenticated"),
+            ):
+                await main.handle_login(_Channel(), send, user_id=7)
+
+            embed = cast(Any, send.await_args).kwargs["embed"]
+            self.assertEqual(embed.title, expected_title)
+
+    async def test_login_field_labels_and_footer_are_customizable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = main.FrontendCustomizationStore(Path(directory) / "frontend.json")
+            store.set(42, "login_verification_link", "label", "Open link")
+            store.set(42, "login_code", "label", "Device code")
+            store.set(42, "login_visibility_footer", "label", "Private")
+            channel = _Channel()
+            channel.guild = SimpleNamespace(id=42, name="Example")
+            send = AsyncMock()
+            with (
+                patch.object(main.bot, "customizations", store),
+                patch.object(main.bot.presence, "touch", new=AsyncMock()),
+                patch.object(
+                    main.bot.codex,
+                    "begin_login",
+                    new=AsyncMock(
+                        return_value={
+                            "verificationUrl": "https://example.test/device",
+                            "userCode": "ABC",
+                        }
+                    ),
+                ),
+            ):
+                await main.handle_login(channel, send, user_id=7)
+
+        embed = cast(Any, send.await_args).kwargs["embed"]
+        self.assertEqual(
+            [field.name for field in embed.fields], ["Open link", "Device code"]
+        )
+        self.assertEqual(embed.footer.text, "Private")
+
+    async def test_login_without_a_usable_cache_starts_device_code_flow(self) -> None:
+        """Start device-code authentication when neither cache is usable."""
+        server = main.CodexAppServer()
+        server._ensure_running = AsyncMock()
+        server.refresh_account = AsyncMock()
+        server._request = AsyncMock(
+            return_value={
+                "loginId": "login-1",
+                "verificationUrl": "https://example.test/device",
+                "userCode": "ABC",
+            }
+        )
+        server.account = None
+        server.requires_openai_auth = True
+
+        result = await server.begin_login(_Channel(), 7)
+
+        self.assertEqual(result["loginId"], "login-1")
+        server._request.assert_awaited_once_with(
+            "account/login/start",
+            {"type": "chatgptDeviceCode"},
+        )
+
+    async def test_login_completion_reports_authentication_completed(self) -> None:
+        """Report the final user-visible status after device authentication succeeds."""
+        server = main.CodexAppServer()
+        server._login_id = "login-1"
+        server._login_channel = cast(Any, _Channel())
+        server._login_user_id = 7
+
+        with (
+            patch.object(server, "mark_authenticated"),
+            patch.object(server, "_background_send") as background_send,
+        ):
+            server._handle_notification(
+                {
+                    "method": "account/login/completed",
+                    "params": {"loginId": "login-1", "success": True},
+                }
+            )
+
+        embed = background_send.call_args.args[1]
+        self.assertEqual(embed.title, "Authentication completed")
+
     async def test_customization_command_is_admin_only_and_server_scoped(self) -> None:
         guild = SimpleNamespace(id=42, name="Example")
         channel = SimpleNamespace(id=7, name="general", guild=guild)
@@ -793,6 +1357,24 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(thread.sent, [])
 
+    async def test_auto_thread_is_enabled_by_default(self) -> None:
+        """Create requested response threads when no environment override exists."""
+        source = _Channel()
+        source.guild = SimpleNamespace(id=42)
+        thread = _Channel()
+        message = SimpleNamespace(
+            channel=source,
+            create_thread=AsyncMock(return_value=thread),
+        )
+        with patch.dict(os.environ, {}, clear=True):
+            response_channel = await main._maybe_create_response_thread(
+                message,
+                "Please create a thread for this request.",
+            )
+
+        self.assertIs(response_channel, thread)
+        message.create_thread.assert_awaited_once()
+
     async def test_requested_thread_can_be_created_from_a_slash_command_channel(
         self,
     ) -> None:
@@ -946,6 +1528,20 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, {"login_cached": True})
         self.assertTrue(server.is_authenticated(7))
 
+    async def test_login_reports_an_imported_auth_cache(self) -> None:
+        server = main.CodexAppServer()
+        server._ensure_running = AsyncMock()
+        server.refresh_account = AsyncMock()
+        server.account = {"type": "chatgpt"}
+        server.requires_openai_auth = True
+        server._auth_imported = True
+        server._persist_state = lambda: None
+
+        result = await server.begin_login(_Channel(), 7)
+
+        self.assertEqual(result, {"login_imported": True})
+        self.assertFalse(server._auth_imported)
+
     async def test_admin_cached_login_authorizes_the_server(self) -> None:
         server = main.CodexAppServer()
         server._ensure_running = AsyncMock()
@@ -976,6 +1572,25 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(restarted.is_authenticated(99, 42))
         self.assertFalse(restarted.is_authenticated(99, 43))
+
+    def test_corrupt_session_state_is_quarantined_before_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "state.json"
+            state_path.write_text("{broken", encoding="utf-8")
+            with patch.dict(os.environ, {"THEIA_STATE": str(state_path)}):
+                server = main.CodexAppServer()
+                backups = tuple(state_path.parent.glob("state.json.corrupt-*"))
+                self.assertEqual(len(backups), 1)
+                self.assertEqual(backups[0].read_text(encoding="utf-8"), "{broken")
+                self.assertFalse(state_path.exists())
+
+                server.mark_authenticated(41)
+                self.assertEqual(
+                    json.loads(state_path.read_text(encoding="utf-8"))[
+                        "authenticated_users"
+                    ],
+                    [41],
+                )
 
     async def test_adaptive_reasoning_maps_assessment_to_supported_effort(self) -> None:
         server = main.CodexAppServer()
@@ -1335,6 +1950,56 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(params["approvalPolicy"], "never")
         self.assertEqual(params["sandbox"], "read-only")
         self.assertIn("non-administrator", params["developerInstructions"])
+        self.assertEqual(
+            params["runtimeWorkspaceRoots"],
+            [str(Path(directory) / "theia" / "attachments")],
+        )
+        self.assertEqual(
+            params["cwd"],
+            str(Path(directory) / "theia" / "attachments"),
+        )
+        self.assertNotIn(
+            server._cwd,
+            params["runtimeWorkspaceRoots"],
+        )
+        self.assertNotIn(
+            "persistent memory",
+            server._thread_instruction_params(
+                server._session("session"), allow_tools=False
+            )["baseInstructions"],
+        )
+
+    async def test_voice_transcript_rechecks_current_administrator_access(self) -> None:
+        member = SimpleNamespace(
+            guild_permissions=SimpleNamespace(administrator=False),
+        )
+        guild = SimpleNamespace(id=42, get_member=lambda _user_id: member)
+        channel = SimpleNamespace(
+            id=7,
+            guild=guild,
+            send=AsyncMock(),
+        )
+        session = main.VoiceSession(
+            session_key="voice",
+            user_id=9,
+            guild_id=42,
+            voice_channel_id=8,
+            text_channel=cast(Any, channel),
+            allow_tools=True,
+            on_transcript=AsyncMock(),
+        )
+        with (
+            patch.object(main.bot.presence, "touch", new=AsyncMock()),
+            patch.object(main.bot.codex, "status", return_value={"turn_id": None}),
+            patch(
+                "theia.bot._channel_context",
+                new=AsyncMock(return_value=None),
+            ),
+            patch("theia.bot.handle_request", new=AsyncMock()) as handle,
+        ):
+            await _handle_voice_transcript(session, "speaker", "hello")
+
+        self.assertFalse(cast(Any, handle.await_args).kwargs["allow_tools"])
 
     async def test_attachments_are_cached_as_codex_local_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1365,6 +2030,60 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("hello", prepared[1]["text"])
                 cached = list((root / "theia" / "attachments").iterdir())
                 self.assertEqual(len(cached), 2)
+
+    async def test_attachment_cache_repairs_a_partial_or_corrupt_existing_file(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(
+                os.environ,
+                {
+                    "THEIA_HOME": str(root / "theia"),
+                    "THEIA_STATE": str(root / "state.json"),
+                },
+            ):
+                server = main.CodexAppServer()
+                cached = server._store_attachment("notes.txt", b"complete")
+                cached.write_bytes(b"partial")
+
+                repaired = server._store_attachment("notes.txt", b"complete")
+                repaired_bytes = repaired.read_bytes()
+
+        self.assertEqual(repaired, cached)
+        self.assertEqual(repaired_bytes, b"complete")
+
+    async def test_attachment_cache_rejects_a_request_that_exceeds_its_quota(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(
+                os.environ,
+                {
+                    "THEIA_HOME": str(root / "theia"),
+                    "THEIA_STATE": str(root / "state.json"),
+                    "THEIA_ATTACHMENT_CACHE_LIMIT_BYTES": "3",
+                },
+            ):
+                server = main.CodexAppServer()
+                with self.assertRaisesRegex(main.CodexAppServerError, "cache is full"):
+                    server._store_attachment("notes.txt", b"data")
+
+    def test_symlinked_outbound_paths_do_not_escape_the_configured_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outside = root / "outside.txt"
+            inside = root / "inside"
+            inside.mkdir()
+            link = inside / "link.txt"
+            outside.write_text("secret", encoding="utf-8")
+            try:
+                link.symlink_to(outside)
+            except OSError as exc:
+                self.skipTest(f"symlink creation unavailable: {exc}")
+
+            self.assertFalse(_path_is_under(link, (inside,)))
 
     async def test_memory_snapshot_is_injected_and_hermes_roots_are_shared(
         self,
@@ -1397,6 +2116,7 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
     async def test_approval_request_includes_owner_checked_buttons(self) -> None:
         server = main.CodexAppServer()
         channel = _Channel()
+        channel.guild = _admin_guild()
         state = main._TurnState(thread_id="thread", channel=channel, user_id=7)
         server._turns["turn"] = state
         request = asyncio.create_task(
@@ -1423,6 +2143,7 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         server = main.CodexAppServer()
         channel = _Channel()
+        channel.guild = _admin_guild()
         state = main._TurnState(thread_id="thread", channel=channel, user_id=7)
         server._turns["turn"] = state
         request = asyncio.create_task(
@@ -1447,6 +2168,102 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(server.resolve_approval(7, False, channel))
         self.assertEqual(await request, {"decision": "decline"})
 
+    async def test_approval_button_declines_after_administrator_access_is_revoked(
+        self,
+    ) -> None:
+        server = main.CodexAppServer()
+        channel = _Channel()
+        member = SimpleNamespace(
+            id=7,
+            guild_permissions=SimpleNamespace(administrator=True),
+        )
+        channel.guild = SimpleNamespace(id=1, get_member=lambda _user_id: member)
+        state = main._TurnState(thread_id="thread", channel=channel, user_id=7)
+        server._turns["turn"] = state
+        request = asyncio.create_task(
+            server._server_request_result(
+                "item/commandExecution/requestApproval",
+                {"threadId": "thread", "turnId": "turn", "itemId": "item"},
+            )
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        member.guild_permissions.administrator = False
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=7),
+            response=SimpleNamespace(edit_message=AsyncMock()),
+        )
+        await cast(Any, channel.sent[0]["view"].children[0]).callback(interaction)
+
+        self.assertEqual(await request, {"decision": "decline"})
+        self.assertFalse(state.allow_tools)
+
+    async def test_dynamic_discord_tool_rechecks_current_administrator_access(
+        self,
+    ) -> None:
+        server = main.CodexAppServer()
+        channel = _Channel()
+        channel.guild = _admin_guild()
+        state = main._TurnState(
+            thread_id="thread", channel=channel, user_id=7, allow_tools=True
+        )
+        channel.guild.get_member(7).guild_permissions.administrator = False
+
+        result = await server._dynamic_tool_call(
+            state,
+            {
+                "tool": "send_message",
+                "namespace": "discord",
+                "arguments": {"content": "should not send"},
+            },
+        )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(channel.sent, [])
+        self.assertFalse(state.allow_tools)
+
+    async def test_dynamic_discord_send_failure_returns_unsuccessful_result(
+        self,
+    ) -> None:
+        server = main.CodexAppServer()
+        channel = _FailingSendChannel()
+        channel.guild = _admin_guild()
+        state = main._TurnState(
+            thread_id="thread", channel=channel, user_id=7, allow_tools=True
+        )
+
+        result = await server._dynamic_tool_call(
+            state,
+            {
+                "tool": "send_message",
+                "namespace": "discord",
+                "arguments": {"content": "message"},
+            },
+        )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(
+            result["contentItems"][0]["text"],
+            "Discord could not send the message.",
+        )
+
+    def test_safe_text_redacts_windows_and_unc_paths(self) -> None:
+        windows = r"failed at C:\Users\user\PrivateProject\secret.db"
+        unc = r"failed at \\server\share\PrivateProject\secret.db"
+
+        for sanitizer in (
+            main._safe_intermediate_text,
+            main._safe_approval_reason,
+            main._safe_error_reason,
+        ):
+            rendered_windows = sanitizer(windows)
+            rendered_unc = sanitizer(unc)
+            self.assertNotIn("PrivateProject", rendered_windows)
+            self.assertNotIn("secret.db", rendered_windows)
+            self.assertNotIn("PrivateProject", rendered_unc)
+            self.assertNotIn("secret.db", rendered_unc)
+
     async def test_non_admin_dynamic_discord_tool_is_rejected(self) -> None:
         server = main.CodexAppServer()
         state = main._TurnState(
@@ -1466,7 +2283,7 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
     async def test_thread_tool_is_available_without_explicit_user_intent(self) -> None:
         server = main.CodexAppServer()
         channel = _Channel()
-        channel.guild = SimpleNamespace(id=1)
+        channel.guild = _admin_guild()
         thread = _Channel()
         thread.guild = channel.guild
         channel.create_thread = AsyncMock(return_value=thread)
@@ -1498,7 +2315,7 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
     async def test_thread_tool_creates_and_routes_the_active_session(self) -> None:
         server = main.CodexAppServer()
         channel = _Channel()
-        channel.guild = SimpleNamespace(id=1)
+        channel.guild = _admin_guild()
         thread = _Channel()
         thread.guild = channel.guild
         thread.edit = AsyncMock()
@@ -1814,6 +2631,7 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
     async def test_approval_is_bound_to_user_and_cleared(self) -> None:
         server = main.CodexAppServer()
         channel = _Channel()
+        channel.guild = _admin_guild()
         state = main._TurnState(thread_id="thread", channel=channel, user_id=7)
         server._turns["turn"] = state
         request = asyncio.create_task(
@@ -1832,10 +2650,10 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(channel.sent[0]["embed"].title, "Approval needed")
         self.assertNotIn("hidden command", channel.sent[0]["embed"].description)
         self.assertNotIn("content", channel.sent[0])
-        self.assertFalse(server.resolve_approval(8, True))
-        self.assertTrue(server.resolve_approval(7, True))
+        self.assertFalse(server.resolve_approval(8, True, channel))
+        self.assertTrue(server.resolve_approval(7, True, channel))
         self.assertEqual(await request, {"decision": "accept"})
-        self.assertFalse(server.resolve_approval(7, False))
+        self.assertFalse(server.resolve_approval(7, False, channel))
         self.assertFalse(server._pending_approvals)
 
     async def test_multiple_choice_request_uses_embed_and_buttons(self) -> None:

@@ -33,6 +33,8 @@ class AudioProtocolError(RuntimeError):
 
 @dataclass(frozen=True)
 class AudioServiceConfig:
+    """Configuration for one OpenAI-compatible audio endpoint."""
+
     protocol: str
     base_url: str
     api_key: str
@@ -41,11 +43,14 @@ class AudioServiceConfig:
 
     @property
     def enabled(self) -> bool:
+        """Return whether the endpoint has a supported protocol and base URL."""
         return bool(self.base_url) and self.protocol in _SUPPORTED_PROTOCOLS
 
 
 @dataclass(frozen=True)
 class TTSConfig(AudioServiceConfig):
+    """Configuration for an OpenAI-compatible text-to-speech endpoint."""
+
     voice: str
     response_format: str
 
@@ -172,6 +177,7 @@ class OpenAICompatibleAudio:
 
     @classmethod
     def from_environment(cls) -> OpenAICompatibleAudio:
+        """Build independent transcription and TTS clients from environment settings."""
         transcription = AudioServiceConfig(
             protocol=_protocol(
                 _env_text(
@@ -279,6 +285,7 @@ class OpenAICompatibleAudio:
     async def transcribe(
         self, filename: str, raw: bytes, content_type: str = ""
     ) -> str | None:
+        """Transcribe audio asynchronously, returning ``None`` when STT is disabled."""
         if not self.transcription.enabled:
             return None
         logger.info("Sending audio attachment to configured transcription service")
@@ -328,10 +335,12 @@ class OpenAICompatibleAudio:
         return response
 
     async def synthesize(self, text: str) -> AudioOutput | None:
+        """Synthesize one response attachment, if TTS is enabled and succeeds."""
         outputs = await self.synthesize_many(text)
         return outputs[0] if outputs else None
 
     async def synthesize_many(self, text: str) -> tuple[AudioOutput, ...]:
+        """Synthesize a bounded response into Discord-sized audio attachments."""
         if not self.tts.enabled or not (text or "").strip():
             return ()
         value = text.strip()

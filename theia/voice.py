@@ -49,6 +49,8 @@ class VoiceModeError(RuntimeError):
 
 @dataclass(frozen=True)
 class VoiceSegment:
+    """A completed speaker utterance converted to a WAV payload for STT."""
+
     guild_id: int
     channel_id: int
     speaker_id: int | None
@@ -132,9 +134,11 @@ if voice_recv is not None:
             self._closed = False
 
         def wants_opus(self) -> bool:
+            """Request decoded PCM because the sink performs its own VAD."""
             return False
 
         def write(self, user: Any, data: Any) -> None:
+            """Accumulate one decoded packet and finish utterances on silence or length."""
             if self._closed:
                 return
             pcm = getattr(data, "pcm", b"")
@@ -184,6 +188,7 @@ if voice_recv is not None:
                 self._finish(key)
 
         def cleanup(self) -> None:
+            """Flush active speaker buffers and stop accepting new audio packets."""
             if self._closed:
                 return
             self._closed = True
@@ -233,6 +238,8 @@ if voice_recv is not None:
 else:
 
     class VoiceConversationSink:  # pragma: no cover - dependency-gated fallback
+        """Placeholder that reports the missing optional Discord voice dependency."""
+
         def __init__(self, **_kwargs: Any) -> None:
             raise VoiceModeError(
                 "Voice receive support is unavailable; install the voice extras."
@@ -240,6 +247,8 @@ else:
 
 
 class VoiceSession:
+    """Bind one Discord session to a guild voice channel and transcript callback."""
+
     def __init__(
         self,
         *,
@@ -280,6 +289,7 @@ class VoiceModeManager:
 
     @property
     def available(self) -> bool:
+        """Return whether the optional Discord voice-receive package is installed."""
         return voice_recv is not None
 
     async def start(
@@ -292,6 +302,7 @@ class VoiceModeManager:
         allow_tools: bool,
         on_transcript: VoiceTranscriptCallback,
     ) -> VoiceSession:
+        """Join a voice channel or reuse its connection for another session."""
         if voice_recv is None:
             raise VoiceModeError(
                 "Voice receive support is unavailable; install the voice extras."
@@ -369,6 +380,7 @@ class VoiceModeManager:
         return session
 
     async def stop(self, session_key: str) -> bool:
+        """Stop one voice session and disconnect a guild when it has no listeners."""
         session = self._sessions.pop(session_key, None)
         if session is None:
             return False
@@ -392,6 +404,7 @@ class VoiceModeManager:
         return True
 
     async def close(self) -> None:
+        """Stop all voice sessions and disconnect every managed guild client."""
         for session_key in tuple(self._sessions):
             await self.stop(session_key)
         for guild_id, client in tuple(self._clients.items()):
@@ -400,15 +413,18 @@ class VoiceModeManager:
                 await client.disconnect()
 
     def has_session(self, session_key: str) -> bool:
+        """Return whether a Discord session currently has voice mode enabled."""
         return session_key in self._sessions
 
     async def speak_text(self, session_key: str, text: str) -> None:
+        """Synthesize and play one text response for a voice session."""
         outputs = await self._synthesize(text)
         await self.speak_outputs(session_key, outputs)
 
     async def speak_outputs(
         self, session_key: str, outputs: tuple[AudioOutput, ...]
     ) -> None:
+        """Play synthesized outputs serially while honoring playback cancellation."""
         session = self._sessions.get(session_key)
         if session is None or not outputs:
             return
@@ -424,6 +440,7 @@ class VoiceModeManager:
                 await self._play_output(client, output)
 
     async def stop_playback(self, guild_id: int) -> None:
+        """Cancel queued playback for a guild and stop its current audio source."""
         self._playback_generation[guild_id] = (
             self._playback_generation.get(guild_id, 0) + 1
         )
