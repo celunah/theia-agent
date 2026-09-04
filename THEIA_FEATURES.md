@@ -20,6 +20,7 @@ The current commands are:
 - `/personality [file] [name]`
 - `/model <model>`
 - `/mode text|voice`
+- `/restart`
 - `/customize [target] [element] [value]`
 
 Prefix commands are disabled.
@@ -28,9 +29,18 @@ Theia also:
 
 - Responds to DMs and configured guild messages.
 - Supports Discord threads as separate Codex sessions.
+- Optionally creates a response thread only when the user explicitly requests
+  one, with fallback to the original channel when thread creation fails.
+- Thread intent accepts common semantic wording such as keeping a discussion
+  separate or giving it its own space, while rejecting informational questions
+  and negated requests.
+- Server administrators expose a guarded `discord.create_thread` Codex tool;
+  Codex decides when a thread is needed, can assign the same name to Discord
+  and the Codex session, and route the first response into it.
 - Names threads from the initial request.
 - Includes bounded recent Discord history when asked about channel context.
 - Restores sessions after restart.
+- Lets server administrators restart the bot process in place.
 - Archives sessions after 30 days of inactivity and deletes them after 90 days.
 - Unarchives an archived session when the user returns.
 - Creates a new session if the old one was deleted.
@@ -169,6 +179,7 @@ It handles Codex approval and interaction requests for:
 - Sequential multiple-choice and user-input questions.
 - MCP elicitation forms, URLs, and choices.
 - Theia’s restricted Discord messaging tool.
+- Theia’s administrator-only Discord thread-creation tool.
 
 Multiple-choice questions are asked one at a time, with the final structured payload returned only after all answers are collected.
 

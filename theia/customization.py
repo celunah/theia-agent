@@ -13,8 +13,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .core import _truncate
-
 CUSTOMIZATION_FILE_ENV = "THEIA_CUSTOMIZATIONS"
 DEFAULT_HOME = "~/.theia"
 MAX_CUSTOMIZATION_VALUE = 4000
@@ -22,6 +20,7 @@ MAX_CUSTOMIZATION_COLOR = 20
 
 COMMAND_TARGETS = (
     "login",
+    "restart",
     "usage",
     "credits",
     "approve",
@@ -100,9 +99,8 @@ class CustomizationError(ValueError):
 
 
 def _canonical_name(value: str, *, kind: str) -> str:
-    normalized = re.sub(r"[\s-]+", "_", str(value or "").strip().casefold())
-    if normalized.startswith("/"):
-        normalized = normalized[1:]
+    normalized = re.sub(r"[\s-]+", "_", (value or "").strip().casefold())
+    normalized = normalized.removeprefix("/")
     if kind == "command" and normalized.startswith("command:"):
         normalized = normalized.removeprefix("command:")
     if kind == "label" and normalized.startswith("label:"):
@@ -115,7 +113,7 @@ def _canonical_name(value: str, *, kind: str) -> str:
 
 def canonical_target(value: str) -> str:
     """Return a stable ``command:name`` or ``label:name`` target key."""
-    match = _TARGET_RE.match(str(value or "").strip())
+    match = _TARGET_RE.match((value or "").strip())
     if match is None:
         raise CustomizationError("A command or label target is required.")
     prefix, name = match.groups()
@@ -137,7 +135,7 @@ def display_target(target: str) -> str:
 
 
 def _validate_element(value: str) -> str:
-    element = str(value or "").strip().casefold()
+    element = (value or "").strip().casefold()
     if element not in ELEMENTS:
         raise CustomizationError(
             f"Unknown element `{value}`. Choose title, content, color, or label."
@@ -146,7 +144,7 @@ def _validate_element(value: str) -> str:
 
 
 def _validate_template(value: str) -> str:
-    text = str(value or "")
+    text = value or ""
     if not text.strip():
         raise CustomizationError("The customization value cannot be empty.")
     if len(text) > MAX_CUSTOMIZATION_VALUE:
@@ -194,11 +192,9 @@ def _parse_color(value: str) -> int | None:
     return int(candidate, 16)
 
 
-def _safe_context(context: dict[str, Any] | None) -> dict[str, str]:
+def _safe_context(context: dict[str, object] | None) -> dict[str, str]:
     return {
-        str(key): str(value)
-        for key, value in (context or {}).items()
-        if value is not None
+        key: str(value) for key, value in (context or {}).items() if value is not None
     }
 
 
@@ -220,7 +216,9 @@ class FrontendCustomizationStore:
     def __init__(self, path: Path | None = None) -> None:
         configured = os.getenv(CUSTOMIZATION_FILE_ENV)
         self.path = (
-            Path(configured).expanduser()
+            Path(path).expanduser()
+            if path is not None
+            else Path(configured).expanduser()
             if configured
             else Path(os.getenv("THEIA_HOME", DEFAULT_HOME)).expanduser()
             / "discord-customizations.json"
@@ -271,7 +269,9 @@ class FrontendCustomizationStore:
             temporary.chmod(0o600)
             temporary.replace(self.path)
         except OSError as exc:
-            raise CustomizationError("The Discord customization could not be saved.") from exc
+            raise CustomizationError(
+                "The Discord customization could not be saved."
+            ) from exc
 
     def get(self, guild_id: int | None, target: str, element: str) -> str | None:
         if guild_id is None:
@@ -353,7 +353,7 @@ class FrontendCustomizationStore:
         return render_template(template or default, default=default, context=context)
 
     def targets(self, current: str = "") -> list[tuple[str, str]]:
-        query = str(current or "").casefold().strip()
+        query = (current or "").casefold().strip()
         choices: list[tuple[str, str]] = []
         for name in COMMAND_TARGETS:
             display = f"/{name}"
@@ -367,7 +367,7 @@ class FrontendCustomizationStore:
 
     @staticmethod
     def elements(current: str = "") -> list[tuple[str, str]]:
-        query = str(current or "").casefold().strip()
+        query = (current or "").casefold().strip()
         return [
             (element.title(), element)
             for element in ELEMENTS
@@ -396,4 +396,3 @@ def customization_context(
     }
     context.update(values)
     return {key: value for key, value in context.items() if value is not None}
-

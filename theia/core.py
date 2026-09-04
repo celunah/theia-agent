@@ -6,10 +6,12 @@ import sys
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import discord
 from dotenv import load_dotenv
+
+from .customization import CustomizationError
 
 load_dotenv()
 
@@ -29,6 +31,17 @@ ADAPTIVE_REASONING_ENV = "CODEX_ADAPTIVE_REASONING"
 CODEX_LOGGER_NAME = "theia.codex"
 CODEX_LOG_LEVEL_ENV = "THEIA_CODEX_LOG_LEVEL"
 CODEX_LOG_COLORS_ENV = "THEIA_CODEX_LOG_COLORS"
+_TOOL_ITEM_TYPES = frozenset(
+    {
+        "commandexecution",
+        "filechange",
+        "mcptoolcall",
+        "websearch",
+        "imagegeneration",
+        "computertoolcall",
+        "local_shell",
+    }
+)
 
 
 class CodexAppServerError(RuntimeError):
@@ -45,7 +58,7 @@ class _CodexColorFormatter(logging.Formatter):
         (logging.ERROR, "\x1b[31m"),
         (logging.CRITICAL, "\x1b[41m"),
     )
-    _FORMATS = {
+    _FORMATS: ClassVar[dict[int, logging.Formatter]] = {
         level: logging.Formatter(
             f"\x1b[30;1m%(asctime)s\x1b[0m {color}%(levelname)-8s\x1b[0m "
             f"\x1b[35m%(name)s\x1b[0m %(message)s",
@@ -285,6 +298,34 @@ def _truncate(value: Any, limit: int = 1600) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _render_frontend_label(
+    customizer: Any | None,
+    guild_id: int | None,
+    target: str,
+    default: str,
+    *,
+    context: dict[str, Any] | None = None,
+) -> str:
+    if customizer is None:
+        return _truncate(default, 80)
+    try:
+        label = getattr(customizer, "label", None)
+        if callable(label):
+            value = label(guild_id, target, default, context=context)
+        else:
+            value = customizer.render(
+                guild_id, target, "label", default, context=context
+            )
+        return _truncate(value, 80) or _truncate(default, 80)
+    except CustomizationError:
+        return _truncate(default, 80)
+
+
+def _is_tool_item(payload: dict[str, Any]) -> bool:
+    item_type = str(payload.get("type") or "").casefold()
+    return item_type in _TOOL_ITEM_TYPES or item_type.endswith("toolcall")
+
+
 def _configured_paths(name: str, defaults: Iterable[Path]) -> tuple[Path, ...]:
     raw = os.getenv(name) or ""
     values = [Path(item).expanduser() for item in raw.split(os.pathsep) if item]
@@ -304,7 +345,11 @@ def _path_from_value(value: Any) -> Path | None:
         return None
     value = value.removeprefix("file://")
     path = Path(value).expanduser()
-    return path if path.is_absolute() else None
+    # App-server file events may use POSIX-rooted paths even when the bot is
+    # running on Windows.  ``Path.is_absolute()`` rejects those as drive-less
+    # paths, although they are still absolute within the protocol's path
+    # namespace and can be compared safely with the configured roots.
+    return path if path.is_absolute() or path.anchor else None
 
 
 def _safe_intermediate_text(value: Any, limit: int = 700) -> str:
@@ -426,9 +471,12 @@ class _TurnState:
         *,
         thread_id: str | None = None,
         session: _Session | None = None,
-        channel: discord.abc.Messageable | None = None,
+        channel: Any = None,
         user_id: int | None = None,
         allow_tools: bool = True,
+        thread_source: Any | None = None,
+        user_prompt: str | None = None,
+        on_channel_change: Callable[[Any], None] | None = None,
         on_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
     ) -> None:
         self.thread_id = thread_id
@@ -436,8 +484,16 @@ class _TurnState:
         self.channel = channel
         self.user_id = user_id
         self.allow_tools = allow_tools
+        self.thread_source = thread_source
+        self.user_prompt = user_prompt
+        self.on_channel_change = on_channel_change
         self.on_event = on_event
-        self.deltas: list[str] = []
+        # The dynamic Discord thread tool can be called more than once by a
+        # model in the same turn. Keep the created channel here so a repeated
+        # call is idempotent and cannot replace the real opening response with
+        # an "already in a thread" message.
+        self.discord_thread: discord.abc.Messageable | None = None
+        self.discord_thread_opening_sent = False
         self.final_text: str | None = None
         self.completed: dict[str, Any] | None = None
         self.items: list[dict[str, Any]] = []
@@ -460,9 +516,7 @@ def _command_embed(
     base_color = color or discord.Color.blurple()
     if customizer is not None and target is not None:
         try:
-            title = customizer.render(
-                guild_id, target, "title", title, context=context
-            )
+            title = customizer.render(guild_id, target, "title", title, context=context)
             description = customizer.render(
                 guild_id, target, "content", description, context=context
             )
@@ -473,8 +527,11 @@ def _command_embed(
                 context=context,
             )
             base_color = discord.Color(color_value)
-        except Exception:  # noqa: BLE001 - frontend preferences must be fail-safe
-            pass
+        except CustomizationError as exc:
+            _codex_logger().debug(
+                "Could not apply frontend preferences (error=%s)",
+                type(exc).__name__,
+            )
     return discord.Embed(
         title=_truncate(title, 256),
         description=_truncate(description, 4096),

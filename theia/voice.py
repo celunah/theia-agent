@@ -6,14 +6,13 @@ import asyncio
 import contextlib
 import io
 import math
-import os
 import sys
 import time
 import wave
 from array import array
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import discord
 
@@ -63,7 +62,6 @@ class _SpeakerBuffer:
     speaker_name: str
     frames: bytearray
     started_at: float | None = None
-    last_voice_at: float | None = None
     silence_seconds: float = 0.0
 
 
@@ -87,11 +85,14 @@ def _pcm_rms(data: bytes) -> float:
 
 def _to_wav(pcm: bytes) -> bytes:
     output = io.BytesIO()
+    # typeshed currently infers Wave_read for wave.open even in write mode.
+    # pylint: disable=no-member
     with wave.open(output, "wb") as wav_file:
         wav_file.setnchannels(VOICE_CHANNELS)
         wav_file.setsampwidth(VOICE_SAMPLE_WIDTH)
         wav_file.setframerate(VOICE_SAMPLE_RATE)
         wav_file.writeframes(pcm)
+    # pylint: enable=no-member
     return output.getvalue()
 
 
@@ -125,9 +126,7 @@ if voice_recv is not None:
             )
             self.max_utterance = max(
                 1.0,
-                _env_float(
-                    VOICE_MAX_UTTERANCE_ENV, DEFAULT_VOICE_MAX_UTTERANCE
-                ),
+                _env_float(VOICE_MAX_UTTERANCE_ENV, DEFAULT_VOICE_MAX_UTTERANCE),
             )
             self._buffers: dict[int, _SpeakerBuffer] = {}
             self._closed = False
@@ -170,7 +169,6 @@ if voice_recv is not None:
                             type(exc).__name__,
                         )
                 buffer.frames.extend(pcm)
-                buffer.last_voice_at = now
                 buffer.silence_seconds = 0.0
             elif buffer.started_at is not None:
                 buffer.frames.extend(pcm)
@@ -215,7 +213,9 @@ if voice_recv is not None:
             if self.loop.is_closed():
                 return
             try:
-                future = asyncio.run_coroutine_threadsafe(awaitable, self.loop)
+                future = asyncio.run_coroutine_threadsafe(
+                    cast(Coroutine[Any, Any, Any], awaitable), self.loop
+                )
             except RuntimeError:
                 return
 
@@ -288,7 +288,7 @@ class VoiceModeManager:
         session_key: str,
         user_id: int,
         voice_channel: discord.abc.Connectable,
-        text_channel: discord.abc.Messageable,
+        text_channel: Any,
         allow_tools: bool,
         on_transcript: VoiceTranscriptCallback,
     ) -> VoiceSession:
@@ -345,7 +345,7 @@ class VoiceModeManager:
                 on_speech_start=self._on_speech_start,
             )
             try:
-                client.listen(sink)
+                cast(Any, client).listen(sink)
             except (discord.DiscordException, TypeError, RuntimeError) as exc:
                 raise VoiceModeError(
                     f"Could not start voice receive: {_safe_error_reason(exc)}"
@@ -362,7 +362,10 @@ class VoiceModeManager:
             on_transcript=on_transcript,
         )
         self._sessions[session_key] = session
-        logger.info("Voice mode started (sessions_in_guild=%d)", self._guild_session_count(guild_id))
+        logger.info(
+            "Voice mode started (sessions_in_guild=%d)",
+            self._guild_session_count(guild_id),
+        )
         return session
 
     async def stop(self, session_key: str) -> bool:
@@ -382,7 +385,10 @@ class VoiceModeManager:
                         stop_listening()
                 with contextlib.suppress(discord.DiscordException):
                     await client.disconnect()
-        logger.info("Voice mode stopped (sessions_in_guild=%d)", self._guild_session_count(guild_id))
+        logger.info(
+            "Voice mode stopped (sessions_in_guild=%d)",
+            self._guild_session_count(guild_id),
+        )
         return True
 
     async def close(self) -> None:
@@ -455,14 +461,11 @@ class VoiceModeManager:
                 "audio/wav",
             )
         except (AudioProtocolError, RuntimeError) as exc:
-            logger.warning(
-                "Voice transcription failed (error=%s)", type(exc).__name__
-            )
+            logger.warning("Voice transcription failed (error=%s)", type(exc).__name__)
             with contextlib.suppress(discord.DiscordException):
                 await session.text_channel.send(
                     content=_subtext(
-                        "Voice transcription failed: "
-                        + _safe_error_reason(exc)
+                        "Voice transcription failed: " + _safe_error_reason(exc)
                     ),
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
@@ -479,6 +482,7 @@ class VoiceModeManager:
             )
         except RuntimeError:
             return
+
         def completed(done: Any) -> None:
             with contextlib.suppress(Exception):
                 error = done.exception()

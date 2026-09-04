@@ -11,7 +11,7 @@ from typing import Any
 
 import discord
 
-from .core import _codex_logger, _env_float, _safe_log_label
+from .core import _codex_logger, _env_float, _is_tool_item, _safe_log_label
 
 logger = _codex_logger()
 
@@ -22,28 +22,11 @@ DEFAULT_PRESENCE_IDLE_AFTER = 15 * 60
 DEFAULT_PRESENCE_LONG_TASK_AFTER = 60
 DEFAULT_PRESENCE_UPDATE_INTERVAL = 15
 
-_TOOL_ITEM_TYPES = frozenset(
-    {
-        "commandexecution",
-        "filechange",
-        "mcptoolcall",
-        "websearch",
-        "imagegeneration",
-        "computertoolcall",
-        "local_shell",
-    }
-)
-
 
 @dataclass
 class _ActiveRequest:
     started_at: float
     tool_started: bool = False
-
-
-def _is_tool_item(payload: dict[str, Any]) -> bool:
-    item_type = str(payload.get("type") or "").casefold()
-    return item_type in _TOOL_ITEM_TYPES or item_type.endswith("toolcall")
 
 
 class PresenceManager:
@@ -119,7 +102,7 @@ class PresenceManager:
         await self.refresh()
 
     async def begin_request(self, request_id: str) -> None:
-        self._active_requests[str(request_id)] = _ActiveRequest(self._clock())
+        self._active_requests[request_id] = _ActiveRequest(self._clock())
         await self.refresh()
 
     async def observe_event(
@@ -128,7 +111,7 @@ class PresenceManager:
         """Record only real tool activity; compaction never qualifies as a task."""
         if event == "compacted":
             return
-        active = self._active_requests.get(str(request_id))
+        active = self._active_requests.get(request_id)
         if active is None:
             return
         if event == "tool_activity" or (
@@ -138,7 +121,7 @@ class PresenceManager:
             await self.refresh()
 
     async def finish_request(self, request_id: str) -> None:
-        self._active_requests.pop(str(request_id), None)
+        self._active_requests.pop(request_id, None)
         await self.refresh()
 
     async def refresh(self) -> None:

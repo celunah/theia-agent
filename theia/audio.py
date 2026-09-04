@@ -18,9 +18,7 @@ from .core import _codex_logger, _env_float, _truncate
 
 logger = _codex_logger()
 
-_SUPPORTED_PROTOCOLS = frozenset(
-    {"openai", "openai-compatible", "openai_compatible"}
-)
+_SUPPORTED_PROTOCOLS = frozenset({"openai", "openai-compatible", "openai_compatible"})
 _SUPPORTED_TTS_FORMATS = frozenset({"mp3", "opus", "aac", "flac", "wav", "pcm"})
 _MAX_TRANSCRIPTION_RESPONSE_BYTES = 2 * 1024 * 1024
 _MAX_TTS_RESPONSE_BYTES = 32 * 1024 * 1024
@@ -73,8 +71,7 @@ def _protocol(name: str) -> str:
     value = name.casefold().replace(" ", "-")
     if value not in _SUPPORTED_PROTOCOLS:
         logger.warning(
-            "Unsupported audio protocol configured; service disabled "
-            "(protocol=%s)",
+            "Unsupported audio protocol configured; service disabled (protocol=%s)",
             re.sub(r"[^a-z0-9_-]", "", value)[:40] or "unknown",
         )
         return "unsupported"
@@ -174,7 +171,7 @@ class OpenAICompatibleAudio:
         self.tts = tts
 
     @classmethod
-    def from_environment(cls) -> "OpenAICompatibleAudio":
+    def from_environment(cls) -> OpenAICompatibleAudio:
         transcription = AudioServiceConfig(
             protocol=_protocol(
                 _env_text(
@@ -190,7 +187,9 @@ class OpenAICompatibleAudio:
             ),
             timeout=max(1.0, _env_float("THEIA_TRANSCRIPTION_TIMEOUT", 120)),
         )
-        tts_format = _env_text("TTS_FORMAT", "THEIA_TTS_FORMAT", default="mp3").casefold()
+        tts_format = _env_text(
+            "TTS_FORMAT", "THEIA_TTS_FORMAT", default="mp3"
+        ).casefold()
         if tts_format not in _SUPPORTED_TTS_FORMATS:
             logger.warning(
                 "Unsupported TTS response format; using mp3 (format=%s)",
@@ -248,9 +247,7 @@ class OpenAICompatibleAudio:
             raise AudioProtocolError("Audio server response was too large.")
         return body
 
-    def _transcribe_sync(
-        self, filename: str, raw: bytes, content_type: str
-    ) -> str:
+    def _transcribe_sync(self, filename: str, raw: bytes, content_type: str) -> str:
         body, multipart_type = _multipart_body(
             fields={"model": self.transcription.model, "response_format": "json"},
             file_name=filename,
@@ -273,10 +270,7 @@ class OpenAICompatibleAudio:
                 limit=_MAX_TRANSCRIPTION_RESPONSE_BYTES,
             )
         )
-        if isinstance(response, dict):
-            value = response.get("text")
-        else:
-            value = response
+        value = response.get("text") if isinstance(response, dict) else response
         text = str(value or "").strip()
         if not text:
             raise AudioProtocolError("Transcription server returned no text.")
@@ -338,9 +332,9 @@ class OpenAICompatibleAudio:
         return outputs[0] if outputs else None
 
     async def synthesize_many(self, text: str) -> tuple[AudioOutput, ...]:
-        if not self.tts.enabled or not str(text or "").strip():
+        if not self.tts.enabled or not (text or "").strip():
             return ()
-        value = str(text).strip()
+        value = text.strip()
         chunks = [
             value[index : index + _MAX_TTS_INPUT_CHARACTERS]
             for index in range(0, len(value), _MAX_TTS_INPUT_CHARACTERS)

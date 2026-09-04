@@ -4,33 +4,25 @@ from typing import Any
 
 import discord
 
-from .core import _command_embed, _safe_intermediate_text, _subtext, _truncate
+from .core import (
+    _command_embed,
+    _render_frontend_label,
+    _safe_intermediate_text,
+    _subtext,
+    _truncate,
+)
 
 
-def _frontend_label(
-    customizer: Any | None,
-    guild_id: int | None,
-    target: str,
-    default: str,
-    *,
-    context: dict[str, Any] | None = None,
-) -> str:
-    if customizer is None:
-        return _truncate(default, 80)
-    try:
-        label = getattr(customizer, "label", None)
-        if callable(label):
-            value = label(guild_id, target, default, context=context)
-        else:
-            value = customizer.render(
-                guild_id, target, "label", default, context=context
-            )
-        return _truncate(
-            value,
-            80,
-        ) or _truncate(default, 80)
-    except Exception:  # noqa: BLE001 - frontend preferences must be fail-safe
-        return _truncate(default, 80)
+async def _check_interaction_owner(
+    interaction: discord.Interaction, user_id: int | None
+) -> bool:
+    if user_id is not None and interaction.user.id != user_id:
+        await interaction.response.send_message(
+            "Only the user who started this request can answer it.",
+            ephemeral=True,
+        )
+        return False
+    return True
 
 
 class _DecisionView(discord.ui.View):
@@ -69,13 +61,7 @@ class _DecisionView(discord.ui.View):
             self.add_item(button)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if self.user_id is not None and interaction.user.id != self.user_id:
-            await interaction.response.send_message(
-                "Only the user who started this request can answer it.",
-                ephemeral=True,
-            )
-            return False
-        return True
+        return await _check_interaction_owner(interaction, self.user_id)
 
     async def on_timeout(self) -> None:
         self.value = None
@@ -107,11 +93,7 @@ class _JsonModal(discord.ui.Modal):
         self.add_item(self.value)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        if self.user_id is not None and interaction.user.id != self.user_id:
-            await interaction.response.send_message(
-                "Only the user who started this request can answer it.",
-                ephemeral=True,
-            )
+        if not await _check_interaction_owner(interaction, self.user_id):
             return
         try:
             parsed = json.loads(str(self.value))
@@ -144,7 +126,7 @@ class _FormView(discord.ui.View):
         self.customizer = customizer
         self.value: Any = None
         answer = discord.ui.Button(
-            label=_frontend_label(
+            label=_render_frontend_label(
                 customizer,
                 self.guild_id,
                 "label:answer_button",
@@ -153,7 +135,7 @@ class _FormView(discord.ui.View):
             style=discord.ButtonStyle.primary,
         )
         decline = discord.ui.Button(
-            label=_frontend_label(
+            label=_render_frontend_label(
                 customizer,
                 self.guild_id,
                 "label:decline_button",
@@ -185,13 +167,7 @@ class _FormView(discord.ui.View):
         self.add_item(decline)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if self.user_id is not None and interaction.user.id != self.user_id:
-            await interaction.response.send_message(
-                "Only the user who started this request can answer it.",
-                ephemeral=True,
-            )
-            return False
-        return True
+        return await _check_interaction_owner(interaction, self.user_id)
 
     async def on_timeout(self) -> None:
         self.stop()
@@ -287,7 +263,7 @@ class _UserInputView(discord.ui.View):
 
         if question.get("isOther") or not options:
             other = discord.ui.Button(
-                label=_frontend_label(
+                label=_render_frontend_label(
                     self.customizer,
                     self.guild_id,
                     "label:other_button" if options else "label:answer_button",
@@ -307,7 +283,7 @@ class _UserInputView(discord.ui.View):
 
     def _record_answer(self, answer: str) -> bool:
         question_id = str(self.current_question.get("id") or self.question_index)
-        self._answers[question_id] = {"answers": [str(answer)]}
+        self._answers[question_id] = {"answers": [answer]}
         if self.question_index + 1 < len(self.questions):
             self.question_index += 1
             self._build_question_items()
@@ -319,13 +295,7 @@ class _UserInputView(discord.ui.View):
         return True
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if self.user_id is not None and interaction.user.id != self.user_id:
-            await interaction.response.send_message(
-                "Only the user who started this request can answer it.",
-                ephemeral=True,
-            )
-            return False
-        return True
+        return await _check_interaction_owner(interaction, self.user_id)
 
     async def on_timeout(self) -> None:
         self.stop()
@@ -352,11 +322,7 @@ class _TextModal(discord.ui.Modal):
         self.add_item(self.answer)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        if self.user_id is not None and interaction.user.id != self.user_id:
-            await interaction.response.send_message(
-                "Only the user who started this request can answer it.",
-                ephemeral=True,
-            )
+        if not await _check_interaction_owner(interaction, self.user_id):
             return
         complete = self.view._record_answer(str(self.answer))
         if complete:

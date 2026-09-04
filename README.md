@@ -62,6 +62,19 @@ channel context when Discord history is unavailable. Configure the bounds with
 `THEIA_CONTEXT_MESSAGES` (default `12`, maximum `30`) and
 `THEIA_CONTEXT_MAX_CHARACTERS` (default `8000`, maximum `16000`).
 
+## Development checks
+
+Install the development dependencies and run the complete local CI contract:
+
+```bash
+uv sync --dev
+python scripts/run_ci.py
+```
+
+The contract runs Ruff checks, formatting verification, Pylint, Pyrefly, and
+the complete pytest suite. Use `uv run poe test_basic` for serial test
+debugging or `uv run poe test_changed` for local incremental iteration.
+
 ## Discord conversations
 
 Direct messages are accepted without a mention. Guild channels require a
@@ -69,9 +82,20 @@ mention by default, while threads in which the bot has participated can
 continue without repeated mentions. These controls can be configured with
 `THEIA_REQUIRE_MENTION`, `THEIA_THREAD_REQUIRE_MENTION`,
 `THEIA_FREE_RESPONSE_CHANNELS`, and `THEIA_AUTO_THREAD` (the corresponding
-`DISCORD_*` names are also accepted). The bot stores bounded channel
-checkpoints and request IDs in the private state file to recover missed
-messages after a gateway resume and suppress duplicate deliveries.
+`DISCORD_*` names are also accepted). When auto-threading is enabled, Theia
+creates a response thread only when the user's request explicitly asks for
+one; ordinary requests stay in the original channel. If Discord cannot create
+the requested thread, Theia continues in that original channel. The bot stores
+bounded channel checkpoints and request IDs in the private state file to
+recover missed messages after a gateway resume and suppress duplicate
+deliveries.
+
+Server administrators also expose a guarded `discord.create_thread` tool to
+Codex. Codex decides when a thread is needed, can assign its name to both
+Discord and the Codex session, and Theia routes the first response there. The
+tool is unavailable to normal users. Codex exposes dynamic tools when a new
+session is started; restored sessions use the protocol's resume path and retain
+the existing frontend auto-thread behavior.
 
 Server administrators have the configured full Codex tool policy. Other users
 may use read-only/safe tools, but cannot modify files, run state-changing
@@ -80,7 +104,9 @@ effects. This policy is applied when the Codex thread starts and a role-policy
 change starts a fresh thread.
 
 `/model` uses Codex model autocomplete to select the active model. Reasoning
-remains adaptive and is not manually overridden.
+remains adaptive and is not manually overridden. Server administrators can use
+`/restart` to gracefully replace the running bot process in place; persisted
+Codex sessions and frontend settings are reused.
 
 Server administrators can customize the Discord-only presentation with:
 

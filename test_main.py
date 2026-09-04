@@ -7,9 +7,11 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import discord
+from typing_extensions import Self
 
 import main
 
@@ -17,6 +19,10 @@ import main
 class _Channel:
     def __init__(self) -> None:
         self.sent: list[dict] = []
+        self.id: Any = None
+        self.guild: Any = None
+        self.create_thread: Any = None
+        self.edit: Any = None
 
     async def send(self, **kwargs):
         self.sent.append(kwargs)
@@ -70,9 +76,7 @@ class _HistoryChannel(_Channel):
     def history(self, *, limit: int, before=None):
         self.history_calls.append({"limit": limit, "before": before})
         eligible = [
-            item
-            for item in self.messages
-            if before is None or item.id < before.id
+            item for item in self.messages if before is None or item.id < before.id
         ]
 
         async def iterator():
@@ -100,6 +104,7 @@ class CommandSurfaceTests(unittest.TestCase):
                 "personality",
                 "model",
                 "mode",
+                "restart",
                 "customize",
             },
         )
@@ -109,7 +114,7 @@ class CommandSurfaceTests(unittest.TestCase):
 
     def test_commands_refer_to_codex_not_the_harness(self) -> None:
         for command in main.bot.tree.get_commands():
-            self.assertNotIn("Theia", command.description)
+            self.assertNotIn("Theia", getattr(command, "description", ""))
 
     def test_codex_logger_is_concise_colored_and_namespaced(self) -> None:
         logger = logging.getLogger("theia.codex")
@@ -252,7 +257,11 @@ class CommandSurfaceTests(unittest.TestCase):
             self.assertEqual(
                 (private_home / "auth.json").read_text(encoding="utf-8"), auth
             )
-            self.assertEqual((private_home / "auth.json").stat().st_mode & 0o777, 0o600)
+            if os.name != "nt":
+                self.assertEqual(
+                    (private_home / "auth.json").stat().st_mode & 0o777,
+                    0o600,
+                )
             self.assertEqual(
                 (global_home / "auth.json").read_text(encoding="utf-8"), auth
             )
@@ -272,9 +281,11 @@ class CommandSurfaceTests(unittest.TestCase):
                 (private_home / "config.toml").read_text(encoding="utf-8"),
                 'web_search = "indexed"\n',
             )
-            self.assertEqual(
-                (private_home / "config.toml").stat().st_mode & 0o777, 0o600
-            )
+            if os.name != "nt":
+                self.assertEqual(
+                    (private_home / "config.toml").stat().st_mode & 0o777,
+                    0o600,
+                )
 
     def test_explicit_codex_web_search_mode_is_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -494,7 +505,9 @@ class CommandSurfaceTests(unittest.TestCase):
             [("Label: Thinking", "label:thinking")],
         )
 
-    def test_frontend_embed_customization_does_not_change_default_without_server(self) -> None:
+    def test_frontend_embed_customization_does_not_change_default_without_server(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = main.FrontendCustomizationStore(Path(directory) / "frontend.json")
             store.set(42, "usage", "title", "Custom usage")
@@ -516,6 +529,7 @@ class CommandSurfaceTests(unittest.TestCase):
         self.assertEqual(default.title, "Usage")
         self.assertEqual(customized.title, "Custom usage")
 
+
 class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
     async def test_customization_command_is_admin_only_and_server_scoped(self) -> None:
         guild = SimpleNamespace(id=42, name="Example")
@@ -536,7 +550,7 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        await main.codex_customize.callback(
+        await cast(Any, main.codex_customize.callback)(
             interaction,
             "usage",
             "title",
@@ -564,7 +578,7 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
             with patch.object(main.bot, "customizations", store):
-                await main.codex_customize.callback(
+                await cast(Any, main.codex_customize.callback)(
                     admin,
                     "/usage",
                     "title",
@@ -612,8 +626,9 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
             )
 
             assert delivery.status_message is not None
+            status_message = cast(Any, delivery.status_message)
             self.assertEqual(
-                delivery.status_message.edits[-1]["content"],
+                status_message.edits[-1]["content"],
                 "-# Update: Checking the request.",
             )
 
@@ -632,9 +647,7 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
                 },
             ):
                 server = main.CodexAppServer()
-                self.assertEqual(
-                    server._codex_executable(), str(local_cli.resolve())
-                )
+                self.assertEqual(server._codex_executable(), str(local_cli.resolve()))
 
     async def test_typing_indicator_wraps_active_request(self) -> None:
         channel = _TypingChannel()
@@ -646,13 +659,9 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         channel = SimpleNamespace(id=42, edit=AsyncMock())
         with (
             patch("theia.bot._is_thread", return_value=True),
-            patch.object(
-                main.bot.codex, "is_participating_thread", return_value=False
-            ),
+            patch.object(main.bot.codex, "is_participating_thread", return_value=False),
         ):
-            await main._name_new_response_thread(
-                channel, "  Fix the\nthread   title  "
-            )
+            await main._name_new_response_thread(channel, "  Fix the\nthread   title  ")
 
         channel.edit.assert_awaited_once_with(name="Codex: Fix the thread title")
 
@@ -660,15 +669,174 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         channel = SimpleNamespace(id=42, edit=AsyncMock())
         with (
             patch("theia.bot._is_thread", return_value=True),
-            patch.object(
-                main.bot.codex, "is_participating_thread", return_value=True
-            ),
+            patch.object(main.bot.codex, "is_participating_thread", return_value=True),
         ):
             await main._name_new_response_thread(channel, "A later request")
 
         channel.edit.assert_not_awaited()
 
-    async def test_recent_channel_context_is_oldest_to_newest_and_skips_status(self) -> None:
+    async def test_restart_replaces_the_current_process_with_same_invocation(
+        self,
+    ) -> None:
+        close = AsyncMock()
+        with (
+            patch.object(main.bot, "close", new=close),
+            patch("theia.bot.os.execv") as execv,
+            patch("theia.bot.sys.executable", "/usr/bin/python"),
+            patch("theia.bot.sys.argv", ["main.py", "--test"]),
+        ):
+            await main._restart_in_place(delay=0)
+
+        close.assert_awaited_once_with()
+        execv.assert_called_once_with(
+            "/usr/bin/python", ["/usr/bin/python", "main.py", "--test"]
+        )
+
+    def test_thread_request_detection_requires_an_explicit_request(self) -> None:
+        self.assertTrue(main._user_requested_thread("Please create a thread for this."))
+        self.assertTrue(main._user_requested_thread("Can you create me a thread?"))
+        self.assertTrue(
+            main._user_requested_thread("Could you create a Discord thread?")
+        )
+        self.assertTrue(main._user_requested_thread("Can you make a separate thread?"))
+        self.assertTrue(
+            main._user_requested_thread("Move this conversation into a thread.")
+        )
+        self.assertTrue(main._user_requested_thread("I want a thread for this."))
+        self.assertTrue(main._user_requested_thread("Thread this request."))
+        self.assertTrue(main._user_requested_thread("Keep this in its own space."))
+        self.assertTrue(
+            main._user_requested_thread("Split this off into a separate discussion.")
+        )
+        self.assertTrue(main._user_requested_thread("Give this its own conversation."))
+        self.assertFalse(main._user_requested_thread("What did we say recently?"))
+        self.assertFalse(main._user_requested_thread("Please do not create a thread."))
+        self.assertFalse(main._user_requested_thread("How do I create a thread?"))
+        self.assertFalse(
+            main._user_requested_thread("Can you explain how to create a thread?")
+        )
+
+    async def test_auto_thread_stays_in_source_channel_without_explicit_request(
+        self,
+    ) -> None:
+        source = _Channel()
+        source.guild = SimpleNamespace(id=42)
+        message = SimpleNamespace(
+            channel=source,
+            create_thread=AsyncMock(),
+        )
+        with patch.dict(os.environ, {"THEIA_AUTO_THREAD": "true"}):
+            response_channel = await main._maybe_create_response_thread(
+                message,
+                "Please answer this request.",
+            )
+
+        self.assertIs(response_channel, source)
+        message.create_thread.assert_not_awaited()
+
+    async def test_auto_thread_uses_requested_thread(self) -> None:
+        source = _Channel()
+        source.guild = SimpleNamespace(id=42)
+        thread = _Channel()
+        message = SimpleNamespace(
+            channel=source,
+            create_thread=AsyncMock(return_value=thread),
+        )
+        with patch.dict(os.environ, {"THEIA_AUTO_THREAD": "true"}):
+            response_channel = await main._maybe_create_response_thread(
+                message,
+                "Please create a thread for this request.",
+            )
+
+        self.assertIs(response_channel, thread)
+        message.create_thread.assert_awaited_once_with(
+            name="Codex: Please create a thread for this request.",
+            auto_archive_duration=1440,
+        )
+        self.assertEqual(thread.sent, [])
+
+    async def test_requested_thread_can_be_created_from_a_slash_command_channel(
+        self,
+    ) -> None:
+        source = _Channel()
+        source.guild = SimpleNamespace(id=42)
+        thread = _Channel()
+        source.create_thread = AsyncMock(return_value=thread)
+        with patch.dict(os.environ, {"THEIA_AUTO_THREAD": "true"}):
+            response_channel = await main._maybe_create_response_thread(
+                source,
+                "Create a Discord thread for this request.",
+            )
+
+        self.assertIs(response_channel, thread)
+        source.create_thread.assert_awaited_once_with(
+            name="Codex: Create a Discord thread for this request.",
+            auto_archive_duration=1440,
+        )
+        self.assertEqual(thread.sent, [])
+
+    async def test_btw_requested_thread_targets_the_followup_in_that_thread(
+        self,
+    ) -> None:
+        source = _Channel()
+        source.id = 42
+        source.guild = SimpleNamespace(id=99)
+        thread = _Channel()
+        thread.id = 43
+        source.create_thread = AsyncMock(return_value=thread)
+        response = SimpleNamespace(defer=AsyncMock())
+        interaction = SimpleNamespace(
+            id=55,
+            channel=source,
+            response=response,
+            followup=SimpleNamespace(send=AsyncMock()),
+            user=SimpleNamespace(
+                id=7,
+                guild_permissions=SimpleNamespace(administrator=False),
+            ),
+        )
+        with (
+            patch("theia.bot._require_login", new=AsyncMock(return_value=True)),
+            patch(
+                "theia.bot._is_thread", side_effect=lambda channel: channel is thread
+            ),
+            patch("theia.bot._name_new_response_thread", new=AsyncMock()),
+            patch("theia.bot.handle_request", new=AsyncMock()) as handle,
+            patch.dict(os.environ, {"THEIA_AUTO_THREAD": "true"}),
+        ):
+            await cast(Any, main.codex_btw.callback)(
+                interaction,
+                "Create a thread for this request.",
+            )
+
+        handle.assert_awaited_once()
+        await_args = cast(Any, handle.await_args)
+        self.assertIs(await_args.kwargs["channel"], thread)
+        self.assertIs(await_args.kwargs["thread"], thread)
+        main.bot._participating_threads.discard(thread.id)
+        main.bot.codex._discord_threads.discard(thread.id)
+
+    async def test_auto_thread_creation_failure_falls_back_to_source_channel(
+        self,
+    ) -> None:
+        source = _Channel()
+        source.guild = SimpleNamespace(id=42)
+        message = SimpleNamespace(
+            channel=source,
+            create_thread=AsyncMock(side_effect=RuntimeError("thread unavailable")),
+        )
+        with patch.dict(os.environ, {"THEIA_AUTO_THREAD": "true"}):
+            response_channel = await main._maybe_create_response_thread(
+                message,
+                "Create a thread for this request.",
+            )
+
+        self.assertIs(response_channel, source)
+        message.create_thread.assert_awaited_once()
+
+    async def test_recent_channel_context_is_oldest_to_newest_and_skips_status(
+        self,
+    ) -> None:
         def message(
             message_id: int, author: str, content: str, *, bot: bool = False
         ) -> SimpleNamespace:
@@ -694,12 +862,16 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
 
         assert context is not None
         self.assertIn("Recent messages from this Discord channel", context)
-        self.assertLess(context.index("first message"), context.index("most recent message"))
+        self.assertLess(
+            context.index("first message"), context.index("most recent message")
+        )
         self.assertNotIn("Thinking", context)
         self.assertNotIn("What did we say recently?", context)
         self.assertEqual(history.history_calls[0]["limit"], 12)
 
-    async def test_recent_channel_context_is_bounded_and_keeps_newest_messages(self) -> None:
+    async def test_recent_channel_context_is_bounded_and_keeps_newest_messages(
+        self,
+    ) -> None:
         def message(message_id: int) -> SimpleNamespace:
             return SimpleNamespace(
                 id=message_id,
@@ -831,9 +1003,7 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-        with self.assertRaisesRegex(
-            main.CodexAppServerError, "404 Not Found"
-        ):
+        with self.assertRaisesRegex(main.CodexAppServerError, "404 Not Found"):
             await request
 
     async def test_non_adaptive_request_skips_assessment(self) -> None:
@@ -1123,7 +1293,7 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
                     server._session("session"), allow_tools=False
                 )
 
-        params = server._request.await_args.args[1]
+        params = cast(Any, server._request.await_args).args[1]
         self.assertEqual(params["approvalPolicy"], "never")
         self.assertEqual(params["sandbox"], "read-only")
         self.assertIn("non-administrator", params["developerInstructions"])
@@ -1210,7 +1380,9 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(server.resolve_approval(7, False, channel))
         self.assertEqual(await request, {"decision": "decline"})
 
-    async def test_approval_request_describes_the_action_without_raw_details(self) -> None:
+    async def test_approval_request_describes_the_action_without_raw_details(
+        self,
+    ) -> None:
         server = main.CodexAppServer()
         channel = _Channel()
         state = main._TurnState(thread_id="thread", channel=channel, user_id=7)
@@ -1252,6 +1424,173 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(result["success"])
         self.assertEqual(state.channel.sent, [])
+
+    async def test_thread_tool_is_available_without_explicit_user_intent(self) -> None:
+        server = main.CodexAppServer()
+        channel = _Channel()
+        channel.guild = SimpleNamespace(id=1)
+        thread = _Channel()
+        thread.guild = channel.guild
+        channel.create_thread = AsyncMock(return_value=thread)
+        server.set_thread_name = AsyncMock()
+        state = main._TurnState(
+            thread_id="thread",
+            channel=channel,
+            user_id=7,
+            allow_tools=True,
+        )
+
+        result = await server._dynamic_tool_call(
+            state,
+            {
+                "tool": "create_thread",
+                "namespace": "discord",
+                "arguments": {
+                    "name": "Requested by Codex",
+                    "opening_message": "I am organizing this request in a thread.",
+                },
+            },
+        )
+
+        self.assertTrue(result["success"])
+        channel.create_thread.assert_awaited_once_with(
+            name="Requested by Codex", auto_archive_duration=1440
+        )
+
+    async def test_thread_tool_creates_and_routes_the_active_session(self) -> None:
+        server = main.CodexAppServer()
+        channel = _Channel()
+        channel.guild = SimpleNamespace(id=1)
+        thread = _Channel()
+        thread.guild = channel.guild
+        thread.edit = AsyncMock()
+        source_message = SimpleNamespace(
+            channel=channel,
+            create_thread=AsyncMock(return_value=thread),
+        )
+        changed: list[object] = []
+        events: list[tuple[str, dict]] = []
+
+        async def on_event(event: str, payload: dict) -> None:
+            events.append((event, payload))
+
+        server.set_thread_name = AsyncMock()
+        state = main._TurnState(
+            thread_id="thread",
+            session=server._session("source"),
+            channel=channel,
+            user_id=7,
+            allow_tools=True,
+            thread_source=source_message,
+            user_prompt="Create a thread for this request.",
+            on_channel_change=changed.append,
+            on_event=on_event,
+        )
+
+        result = await server._dynamic_tool_call(
+            state,
+            {
+                "threadId": "thread",
+                "turnId": "turn",
+                "callId": "call",
+                "tool": "create_thread",
+                "namespace": "discord",
+                "arguments": {
+                    "name": "  A\nuseful thread  ",
+                    "opening_message": "I am moving this request into its own thread.",
+                },
+            },
+        )
+
+        self.assertTrue(result["success"])
+        thread.edit.assert_awaited_once_with(name="A useful thread")
+        server.set_thread_name.assert_awaited_once_with("thread", "A useful thread")
+        source_message.create_thread.assert_awaited_once_with(
+            name="A useful thread", auto_archive_duration=1440
+        )
+        self.assertIs(state.channel, thread)
+        self.assertEqual(changed, [thread])
+        self.assertEqual(
+            events,
+            [
+                (
+                    "thread_opening",
+                    {
+                        "type": "agentMessage",
+                        "phase": "commentary",
+                        "text": "I am moving this request into its own thread.",
+                    },
+                )
+            ],
+        )
+        self.assertEqual(thread.sent, [])
+
+        repeated = await server._dynamic_tool_call(
+            state,
+            {
+                "tool": "create_thread",
+                "namespace": "discord",
+                "arguments": {"name": "A second thread"},
+            },
+        )
+        self.assertTrue(repeated["success"])
+        self.assertEqual(
+            repeated["contentItems"][0]["text"],
+            "Thread setup is complete. Continue with the user's request now; "
+            "do not mention thread setup or call create_thread again.",
+        )
+        source_message.create_thread.assert_awaited_once()
+        self.assertEqual(len(thread.sent), 0)
+
+    def test_admin_thread_params_include_discord_thread_tool(self) -> None:
+        server = main.CodexAppServer()
+        session = server._session("session")
+
+        admin_params = server._thread_instruction_params(session, True)
+        restricted_params = server._thread_instruction_params(session, False)
+
+        self.assertEqual(admin_params["dynamicTools"][0]["name"], "discord")
+        self.assertEqual(
+            admin_params["dynamicTools"][0]["tools"][0]["name"],
+            "create_thread",
+        )
+        self.assertIn(
+            "same base priors, active personality, user request",
+            admin_params["developerInstructions"],
+        )
+        self.assertIn(
+            "all applicable user formatting requirements",
+            admin_params["dynamicTools"][0]["tools"][0]["inputSchema"]["properties"][
+                "opening_message"
+            ]["description"],
+        )
+        self.assertNotIn("dynamicTools", restricted_params)
+
+    def test_rebinding_a_created_thread_preserves_the_session_after_restart(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "state.json"
+            with patch.dict(os.environ, {"THEIA_STATE": str(state_path)}):
+                server = main.CodexAppServer()
+                session = server._session("source")
+                session.thread_id = "codex-thread"
+                server.rebind_session("source", "thread-channel")
+
+                self.assertIs(
+                    server._session("source"), server._session("thread-channel")
+                )
+                server._persist_state()
+                restarted = main.CodexAppServer()
+
+            self.assertEqual(
+                restarted._session("thread-channel").thread_id,
+                "codex-thread",
+            )
+            self.assertIs(
+                restarted._session("source"),
+                restarted._session("thread-channel"),
+            )
 
     async def test_message_claims_are_persisted_and_deduplicated(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1297,7 +1636,7 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result, "done")
-        turn_params = server._request.await_args.args[1]
+        turn_params = cast(Any, server._request.await_args).args[1]
         self.assertEqual(turn_params["effort"], "high")
 
     async def test_personality_upload_selects_and_persists(self) -> None:
@@ -1370,7 +1709,7 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
                 server._request = AsyncMock(return_value={"thread": {"id": "thread"}})
                 await server._ensure_thread(server._session("session"))
 
-        params = server._request.await_args.args[1]
+        params = cast(Any, server._request.await_args).args[1]
         self.assertEqual(
             params["baseInstructions"], f"{main.BASE_PRIORS}\n\nUse a warm tone."
         )
@@ -1427,9 +1766,10 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
             await server._ensure_thread(session)
 
             self.assertEqual(session.thread_id, "new-thread")
-            self.assertEqual(server._request.await_args.args[0], "thread/start")
+            await_args = cast(Any, server._request.await_args)
+            self.assertEqual(await_args.args[0], "thread/start")
             self.assertEqual(
-                server._request.await_args.args[1]["baseInstructions"],
+                await_args.args[1]["baseInstructions"],
                 main.BASE_PRIORS,
             )
 
@@ -1483,7 +1823,8 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(channel.sent[0]["embed"].title, "Choose an option")
         self.assertNotIn("content", channel.sent[0])
         self.assertEqual(
-            [item.label for item in channel.sent[0]["view"].children], ["Red", "Blue"]
+            [getattr(item, "label", None) for item in channel.sent[0]["view"].children],
+            ["Red", "Blue"],
         )
 
     async def test_multiple_questions_are_asked_in_order_and_return_structured_answers(
@@ -1509,11 +1850,14 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         first = view.message_kwargs()
         self.assertEqual(first["embed"].title, "Choose an option")
         self.assertEqual(
-            [item.label for item in view.children], ["Red", "Blue"]
+            [getattr(item, "label", None) for item in view.children],
+            ["Red", "Blue"],
         )
         self.assertFalse(view._record_answer("Red"))
         self.assertEqual(view.question_index, 1)
-        self.assertEqual([item.label for item in view.children], ["Answer"])
+        self.assertEqual(
+            [getattr(item, "label", None) for item in view.children], ["Answer"]
+        )
         next_question = view.message_kwargs(for_edit=True)
         self.assertIsNone(next_question["embed"])
         self.assertTrue(next_question["content"].startswith("-# "))
@@ -1528,7 +1872,10 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
                 }
             },
         )
-        self.assertNotIn("Answer all (JSON)", [item.label for item in view.children])
+        self.assertNotIn(
+            "Answer all (JSON)",
+            [getattr(item, "label", None) for item in view.children],
+        )
 
     async def test_free_text_request_stays_plain_text(self) -> None:
         server = main.CodexAppServer()
@@ -1630,6 +1977,29 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(calls[0]["content"], f"-# {full}")
 
+    async def test_thread_opening_uses_the_codex_intermediate_delivery_path(
+        self,
+    ) -> None:
+        calls: list[dict] = []
+
+        async def send(**kwargs):
+            calls.append(kwargs)
+            return _Message()
+
+        delivery = main._ResponseDelivery(send, {}, owner_id=7)
+        await delivery.on_event(
+            "thread_opening",
+            {
+                "type": "agentMessage",
+                "phase": "commentary",
+                "text": "I am opening a guided thread response.",
+            },
+        )
+
+        self.assertEqual(
+            calls[0]["content"], "-# I am opening a guided thread response."
+        )
+
     async def test_no_tool_turn_does_not_show_thinking_or_completion(self) -> None:
         calls: list[dict] = []
 
@@ -1686,6 +2056,30 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(calls[0]["embed"].title, "Request failed")
         self.assertIn("Reason: quota reached", calls[0]["embed"].description)
+
+    async def test_agent_created_thread_receives_the_first_response(self) -> None:
+        source = _Channel()
+        source.guild = SimpleNamespace(id=1)
+        thread = _Channel()
+        thread.guild = source.guild
+
+        async def ask(*_args, **kwargs):
+            kwargs["on_channel_change"](thread)
+            return "The first response belongs in the new thread."
+
+        with patch.object(main.bot.codex, "ask", new=ask):
+            await main.handle_request(
+                source.send,
+                "Create a thread for this request.",
+                channel=source,
+                user_id=7,
+            )
+
+        self.assertEqual(source.sent, [])
+        self.assertEqual(
+            thread.sent[0]["content"],
+            "The first response belongs in the new thread.",
+        )
 
     async def test_voice_mode_speaks_the_final_response_and_keeps_text(self) -> None:
         calls: list[dict] = []
@@ -1747,7 +2141,7 @@ class _AudioHTTPResponse:
     def __init__(self, body: bytes) -> None:
         self.body = body
 
-    def __enter__(self) -> "_AudioHTTPResponse":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_args) -> None:
@@ -1789,7 +2183,9 @@ class AudioProtocolTests(unittest.IsolatedAsyncioTestCase):
             "http://transcribe.test/v1/audio/transcriptions",
         )
         self.assertEqual(request.get_method(), "POST")
-        self.assertEqual(request.headers["Authorization"], "Bearer transcription-secret")
+        self.assertEqual(
+            request.headers["Authorization"], "Bearer transcription-secret"
+        )
         self.assertIn(b'name="model"', request.data)
         self.assertIn(b"local-whisper", request.data)
         self.assertIn(b'filename="clip.ogg"', request.data)
@@ -1837,13 +2233,20 @@ class AudioProtocolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0]["content"], "normal text response")
         self.assertEqual(calls[0]["files"][0].filename, "response.mp3")
 
-    async def test_configured_transcription_is_added_alongside_local_audio(self) -> None:
+    async def test_configured_transcription_is_added_alongside_local_audio(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            with patch.dict(os.environ, self._environment() | {
-                "THEIA_HOME": str(root / "theia"),
-                "THEIA_STATE": str(root / "state.json"),
-            }, clear=False):
+            with patch.dict(
+                os.environ,
+                self._environment()
+                | {
+                    "THEIA_HOME": str(root / "theia"),
+                    "THEIA_STATE": str(root / "state.json"),
+                },
+                clear=False,
+            ):
                 server = main.CodexAppServer()
                 server._audio.transcribe = AsyncMock(return_value="spoken request")
                 attachment = SimpleNamespace(

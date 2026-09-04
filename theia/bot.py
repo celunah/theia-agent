@@ -2,10 +2,11 @@ import asyncio
 import contextlib
 import os
 import re
+import sys
 import time
 from collections.abc import Awaitable, Callable, Iterable
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, TypeGuard, cast
 
 import discord
 from discord import app_commands
@@ -37,6 +38,7 @@ from .delivery import (
 )
 from .presence import PresenceManager
 from .voice import VoiceModeError, VoiceModeManager, VoiceSession
+from .audio import AudioProtocolError
 
 logger = _codex_logger()
 
@@ -53,7 +55,7 @@ def _frontend_embed(
     title: str,
     description: str,
     *,
-    channel: discord.abc.Messageable | None = None,
+    channel: Any | None = None,
     user: discord.abc.User | None = None,
     color: discord.Color | None = None,
     context: dict[str, Any] | None = None,
@@ -89,30 +91,28 @@ def _configured_ids(*names: str) -> set[int]:
     return values
 
 
-def _is_server_admin(
-    user: discord.abc.User, channel: discord.abc.Messageable | None
-) -> bool:
+def _is_server_admin(user: discord.abc.User, channel: Any | None) -> bool:
     if getattr(channel, "guild", None) is None:
         return False
     permissions = getattr(user, "guild_permissions", None)
     return bool(permissions and getattr(permissions, "administrator", False))
 
 
-def _channel_id(channel: discord.abc.Messageable | None) -> int | None:
+def _channel_id(channel: Any | None) -> int | None:
     value = getattr(channel, "id", None)
     return value if isinstance(value, int) else None
 
 
-def _guild_id(channel: discord.abc.Messageable | None) -> int | None:
+def _guild_id(channel: Any | None) -> int | None:
     value = getattr(getattr(channel, "guild", None), "id", None)
     return value if isinstance(value, int) else None
 
 
-def _is_thread(channel: discord.abc.Messageable | None) -> bool:
+def _is_thread(channel: Any | None) -> TypeGuard[discord.Thread]:
     return isinstance(channel, discord.Thread)
 
 
-def _thread_has_bot(channel: discord.abc.Messageable | None) -> bool:
+def _thread_has_bot(channel: Any | None) -> bool:
     if not _is_thread(channel):
         return False
     if (
@@ -136,7 +136,7 @@ def _thread_has_bot(channel: discord.abc.Messageable | None) -> bool:
     )
 
 
-def _free_response_channel(channel: discord.abc.Messageable | None) -> bool:
+def _free_response_channel(channel: Any | None) -> bool:
     channel_id = _channel_id(channel)
     return channel_id is not None and channel_id in _configured_ids(
         "THEIA_FREE_RESPONSE_CHANNELS", "DISCORD_FREE_RESPONSE_CHANNELS"
@@ -170,7 +170,7 @@ def _message_context_line(message: discord.Message, bot_id: int | None) -> str:
     author = getattr(message.author, "display_name", None) or getattr(
         message.author, "name", "User"
     )
-    content = str(message.content or "").strip()
+    content = (message.content or "").strip()
     if bot_id is not None:
         content = _mention_prompt(content, bot_id)
     attachments = [
@@ -191,9 +191,7 @@ def _context_setting(name: str, default: int, maximum: int) -> int:
     return max(1, min(maximum, value))
 
 
-def _include_in_channel_context(
-    message: Any, *, exclude_id: int | None = None
-) -> bool:
+def _include_in_channel_context(message: Any, *, exclude_id: int | None = None) -> bool:
     message_id = getattr(message, "id", None)
     if exclude_id is not None and message_id == exclude_id:
         return False
@@ -205,13 +203,11 @@ def _include_in_channel_context(
     # the channel said. Keep ordinary bot replies because they are useful
     # conversational context.
     author = getattr(message, "author", None)
-    if getattr(author, "bot", False) and content.startswith("-#"):
-        return False
-    return True
+    return not (getattr(author, "bot", False) and content.startswith("-#"))
 
 
 async def _recent_channel_messages(
-    channel: discord.abc.Messageable | None,
+    channel: Any | None,
     *,
     before: discord.Message | None = None,
     exclude_id: int | None = None,
@@ -221,6 +217,7 @@ async def _recent_channel_messages(
     history = getattr(channel, "history", None)
     if not callable(history):
         return []
+    history_call = cast(Callable[..., Any], history)
     limit = _context_setting(
         CONTEXT_MESSAGE_LIMIT_ENV,
         DEFAULT_CONTEXT_MESSAGES,
@@ -228,9 +225,9 @@ async def _recent_channel_messages(
     )
     try:
         iterator = (
-            history(limit=limit, before=before)
+            history_call(limit=limit, before=before)
             if before is not None
-            else history(limit=limit)
+            else history_call(limit=limit)
         )
         messages = [item async for item in iterator]
     except TypeError:
@@ -239,7 +236,7 @@ async def _recent_channel_messages(
         if before is None:
             return []
         try:
-            messages = [item async for item in history(limit=limit)]
+            messages = [item async for item in history_call(limit=limit)]
         except (discord.DiscordException, TypeError):
             return []
     except discord.DiscordException as exc:
@@ -256,7 +253,7 @@ async def _recent_channel_messages(
 
 
 def _render_channel_context(messages: Iterable[str]) -> str | None:
-    lines = [str(item) for item in messages if str(item)]
+    lines = [item for item in messages if item]
     if not lines:
         return None
     character_limit = _context_setting(
@@ -282,7 +279,7 @@ def _render_channel_context(messages: Iterable[str]) -> str | None:
 
 
 async def _channel_context(
-    channel: discord.abc.Messageable | None,
+    channel: Any | None,
     *,
     before: discord.Message | None = None,
     exclude_id: int | None = None,
@@ -310,7 +307,7 @@ async def _channel_context(
     return _render_channel_context(lines)
 
 
-async def _message_context(message: discord.Message) -> str | None:
+async def _message_context(message: Any) -> str | None:
     """Collect bounded reply and recent-channel context for a request."""
     reference = getattr(message, "reference", None)
     resolved = getattr(reference, "resolved", None) if reference else None
@@ -323,7 +320,7 @@ async def _message_context(message: discord.Message) -> str | None:
     )
 
 
-def session_key(channel: discord.abc.Messageable | None, user_id: int) -> str:
+def session_key(channel: Any | None, user_id: int) -> str:
     channel_id = getattr(channel, "id", 0)
     guild = getattr(channel, "guild", None)
     guild_id = getattr(guild, "id", 0)
@@ -332,13 +329,13 @@ def session_key(channel: discord.abc.Messageable | None, user_id: int) -> str:
 
 
 @asynccontextmanager
-async def _typing_indicator(channel: discord.abc.Messageable | None):
+async def _typing_indicator(channel: Any | None):
     if channel is None or not hasattr(channel, "typing"):
         yield
         return
     typing = channel.typing()
     try:
-        await typing.__aenter__()
+        await typing.__aenter__()  # pylint: disable=unnecessary-dunder-call
     except (discord.DiscordException, AttributeError):
         yield
         return
@@ -350,7 +347,7 @@ async def _typing_indicator(channel: discord.abc.Messageable | None):
 
 
 async def handle_login(
-    channel: discord.abc.Messageable,
+    channel: Any,
     send: SendMessage,
     *,
     user_id: int,
@@ -379,7 +376,7 @@ async def handle_login(
             ephemeral=ephemeral,
         )
         return
-    except Exception as exc:
+    except OSError as exc:
         logger.error(
             "Codex login command failed (error=%s)",
             type(exc).__name__,
@@ -448,13 +445,15 @@ async def handle_request(
     send: SendMessage,
     prompt: str,
     *,
-    channel: discord.abc.Messageable | None,
+    channel: Any | None,
     user_id: int,
     attachments: Iterable[discord.Attachment] = (),
     allow_tools: bool = True,
     context: str | None = None,
     request_id: str | int | None = None,
     speak_text: Callable[[str], Awaitable[None]] | None = None,
+    use_webhook_thread: bool = False,
+    thread_source: discord.Message | None = None,
     **kwargs: Any,
 ) -> None:
     if request_id is not None and not bot.codex.claim_message(request_id):
@@ -469,17 +468,35 @@ async def handle_request(
         guild_id=_guild_id(channel),
         context=customization_context(channel, user=None, user_id=user_id),
     )
+    request_session_key = session_key(channel, user_id)
+
+    def on_channel_change(new_channel: Any) -> None:
+        if use_webhook_thread:
+            # Interaction follow-ups must keep using the webhook sender while
+            # targeting the newly-created thread explicitly.
+            delivery.kwargs["thread"] = new_channel
+        else:
+            delivery.send = new_channel.send
+            delivery.kwargs.pop("reference", None)
+            delivery.kwargs.pop("thread", None)
+        bot.codex.rebind_session(
+            request_session_key,
+            session_key(new_channel, user_id),
+        )
+        if _is_thread(new_channel):
+            bot._participating_threads.add(new_channel.id)
+            bot.codex.mark_thread_participating(new_channel.id)
+
     presence_request_id = f"request:{id(delivery)}"
     await bot.presence.touch()
     await bot.presence.begin_request(presence_request_id)
+    error_reason: str | None = None
 
     async def on_codex_event(event: str, payload: dict[str, Any]) -> None:
         try:
             await delivery.on_event(event, payload)
         finally:
-            await bot.presence.observe_event(
-                presence_request_id, event, payload
-            )
+            await bot.presence.observe_event(presence_request_id, event, payload)
 
     effective_prompt = prompt
     if context:
@@ -498,6 +515,9 @@ async def handle_request(
                     user_id=user_id,
                     attachments=attachments,
                     allow_tools=allow_tools,
+                    thread_source=thread_source,
+                    user_prompt=prompt,
+                    on_channel_change=on_channel_change,
                     on_event=on_codex_event,
                 )
             except CodexAppServerError as exc:
@@ -512,7 +532,7 @@ async def handle_request(
             if not failed and speak_text is None:
                 try:
                     speech = await bot.codex.synthesize_response(response)
-                except Exception as exc:  # noqa: BLE001 - TTS is supplementary
+                except AudioProtocolError as exc:
                     logger.warning(
                         "Optional TTS response failed (error=%s)",
                         type(exc).__name__,
@@ -556,7 +576,7 @@ def _format_reset(value: Any) -> str:
 def _usage_embed(
     result: dict[str, Any],
     *,
-    channel: discord.abc.Messageable | None = None,
+    channel: Any | None = None,
     user: discord.abc.User | None = None,
 ) -> discord.Embed:
     summary = result.get("summary") if isinstance(result, dict) else None
@@ -589,9 +609,7 @@ def _usage_embed(
             "peak_daily_tokens": _format_count(summary.get("peakDailyTokens")),
             "current_streak": _format_count(summary.get("currentStreakDays")),
             "longest_streak": _format_count(summary.get("longestStreakDays")),
-            "longest_running_turn": _format_count(
-                summary.get("longestRunningTurnSec")
-            ),
+            "longest_running_turn": _format_count(summary.get("longestRunningTurnSec")),
         },
     )
     fields = (
@@ -614,7 +632,7 @@ def _usage_embed(
 def _credits_embed(
     result: dict[str, Any],
     *,
-    channel: discord.abc.Messageable | None = None,
+    channel: Any | None = None,
     user: discord.abc.User | None = None,
 ) -> discord.Embed:
     snapshot = result.get("rateLimits") if isinstance(result, dict) else None
@@ -627,8 +645,8 @@ def _credits_embed(
             user=user,
             color=discord.Color.orange(),
         )
-    credits = snapshot.get("credits")
-    if not isinstance(credits, dict):
+    credit_details = snapshot.get("credits")
+    if not isinstance(credit_details, dict):
         return _frontend_embed(
             "command:credits",
             "Credits unavailable",
@@ -637,11 +655,11 @@ def _credits_embed(
             user=user,
             color=discord.Color.orange(),
         )
-    balance = credits.get("balance")
+    balance = credit_details.get("balance")
     balance_text = str(balance) if balance is not None else "Unavailable"
-    if credits.get("unlimited") is True:
+    if credit_details.get("unlimited") is True:
         balance_text = "Unlimited"
-    balance_available = balance is not None or credits.get("unlimited") is True
+    balance_available = balance is not None or credit_details.get("unlimited") is True
     embed = _frontend_embed(
         "command:credits",
         "Credits" if balance_available else "Credits unavailable",
@@ -658,7 +676,7 @@ def _credits_embed(
         name="Status",
         value=(
             "Unlimited"
-            if credits.get("unlimited")
+            if credit_details.get("unlimited")
             else "Metered"
             if balance is not None
             else "Unavailable"
@@ -688,7 +706,7 @@ def _credits_embed(
 
 def _login_required_embed(
     *,
-    channel: discord.abc.Messageable | None = None,
+    channel: Any | None = None,
     user: discord.abc.User | None = None,
 ) -> discord.Embed:
     return _frontend_embed(
@@ -758,9 +776,7 @@ async def _send_command_failure(
     command = title.removesuffix(" unavailable").strip().casefold()
     command = {"voice": "mode"}.get(command, command)
     target = (
-        f"command:{command}"
-        if command in COMMAND_TARGETS
-        else "label:request_failed"
+        f"command:{command}" if command in COMMAND_TARGETS else "label:request_failed"
     )
     embed = _frontend_embed(
         target,
@@ -787,7 +803,8 @@ class TheiaBot(commands.Bot):
         self.codex = CodexAppServer()
         self.codex.set_frontend_customizer(self.customizations)
         self._participating_threads: set[int] = set()
-        self._known_channels: dict[int, discord.abc.Messageable] = {}
+        self._known_channels: dict[int, Any] = {}
+        self._restart_task: asyncio.Task[None] | None = None
         self._retention_task: asyncio.Task[None] | None = None
         self.presence = PresenceManager(self._change_presence_when_ready)
         self.voice = VoiceModeManager(
@@ -826,8 +843,6 @@ class TheiaBot(commands.Bot):
         while True:
             try:
                 await self.codex.enforce_retention()
-            except asyncio.CancelledError:
-                raise
             except Exception as exc:  # noqa: BLE001 - janitor must stay alive
                 logger.warning(
                     "Codex session retention check failed (error=%s)",
@@ -856,17 +871,17 @@ class TheiaBot(commands.Bot):
             history = getattr(channel, "history", None)
             if not callable(history):
                 continue
+            history_call = cast(Callable[..., Any], history)
             try:
                 missed = [
                     item
-                    async for item in history(
+                    async for item in history_call(
                         limit=limit, after=discord.Object(id=checkpoint)
                     )
                 ]
             except discord.DiscordException as exc:
                 logger.info(
-                    "Could not backfill a Discord channel after reconnect "
-                    "(error=%s)",
+                    "Could not backfill a Discord channel after reconnect (error=%s)",
                     type(exc).__name__,
                 )
                 continue
@@ -881,13 +896,30 @@ CodexBot = TheiaBot
 bot = TheiaBot()
 
 
+async def _restart_in_place(*, delay: float = 0.5) -> None:
+    """Gracefully close the bot and replace this process with the same command."""
+    await asyncio.sleep(delay)
+    logger.info("Restarting Theia process in place")
+    try:
+        await bot.close()
+    except Exception:
+        logger.exception("Theia shutdown raised during in-place restart")
+
+    executable = sys.executable or "python"
+    argv = [executable, *sys.argv]
+    try:
+        os.execv(executable, argv)
+    except Exception:
+        logger.exception("Theia in-place process replacement failed")
+
+
 def _voice_speak_callback(
     session_key_value: str,
 ) -> Callable[[str], Awaitable[None]] | None:
-    if (
-        bot.codex.mode(session_key_value) == VOICE_MODE
-        and bot.voice.has_session(session_key_value)
+    if bot.codex.mode(session_key_value) == VOICE_MODE and bot.voice.has_session(
+        session_key_value
     ):
+
         async def speak(text: str) -> None:
             await bot.voice.speak_text(session_key_value, text)
 
@@ -951,6 +983,44 @@ async def codex_login(interaction: discord.Interaction) -> None:
     )
 
 
+@bot.tree.command(name="restart", description="Restart the Discord bot in place")
+async def codex_restart(interaction: discord.Interaction) -> None:
+    if not await _require_server_admin(
+        interaction,
+        message="Only server administrators can restart the Discord bot.",
+    ):
+        return
+
+    existing = bot._restart_task
+    if existing is not None and not existing.done():
+        await interaction.response.send_message(
+            embed=_frontend_embed(
+                "command:restart",
+                "Restart already scheduled",
+                "The Discord bot is already preparing to restart.",
+                channel=interaction.channel,
+                user=interaction.user,
+                color=discord.Color.orange(),
+            ),
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.send_message(
+        embed=_frontend_embed(
+            "command:restart",
+            "Restarting Theia",
+            "The bot will reconnect in place shortly. Persisted Codex sessions "
+            "and frontend settings will be reused.",
+            channel=interaction.channel,
+            user=interaction.user,
+            color=discord.Color.blurple(),
+        ),
+        ephemeral=True,
+    )
+    bot._restart_task = asyncio.create_task(_restart_in_place())
+
+
 @bot.tree.command(name="usage", description="Show Codex account usage")
 async def codex_usage(interaction: discord.Interaction) -> None:
     if not await _require_login(interaction):
@@ -964,7 +1034,7 @@ async def codex_usage(interaction: discord.Interaction) -> None:
             ),
             ephemeral=True,
         )
-    except Exception as exc:  # noqa: BLE001 - keep every command failure visible
+    except (CodexAppServerError, OSError, discord.DiscordException) as exc:
         await _send_command_failure(interaction, "Usage unavailable", exc)
 
 
@@ -981,7 +1051,7 @@ async def codex_credits(interaction: discord.Interaction) -> None:
             ),
             ephemeral=True,
         )
-    except Exception as exc:  # noqa: BLE001 - keep every command failure visible
+    except (CodexAppServerError, OSError, discord.DiscordException) as exc:
         await _send_command_failure(interaction, "Credits unavailable", exc)
 
 
@@ -1045,7 +1115,7 @@ async def codex_mode(
                 allow_tools=_is_server_admin(interaction.user, interaction.channel),
                 on_transcript=_handle_voice_transcript,
             )
-        except Exception as exc:  # noqa: BLE001 - show mode failures visibly
+        except (CodexAppServerError, VoiceModeError) as exc:
             with contextlib.suppress(Exception):
                 await bot.codex.set_mode(key, DEFAULT_MODE)
             await _send_command_failure(interaction, "Voice unavailable", exc)
@@ -1067,7 +1137,7 @@ async def codex_mode(
     await bot.voice.stop(key)
     try:
         await bot.codex.set_mode(key, TEXT_MODE)
-    except Exception as exc:  # noqa: BLE001 - keep command failures visible
+    except CodexAppServerError as exc:
         await _send_command_failure(interaction, "Mode unavailable", exc)
         return
     await interaction.followup.send(
@@ -1084,11 +1154,12 @@ async def codex_mode(
 
 
 async def model_autocomplete(
-    interaction: discord.Interaction, current: str
+    interaction: Any,  # pylint: disable=unused-argument
+    current: str,
 ) -> list[app_commands.Choice[str]]:
     try:
         models = await bot.codex.available_models()
-    except Exception as exc:
+    except (CodexAppServerError, OSError) as exc:
         logger.debug(
             "Could not load models for autocomplete (error=%s)",
             type(exc).__name__,
@@ -1121,7 +1192,7 @@ async def codex_model(interaction: discord.Interaction, model: str) -> None:
     await interaction.response.defer(ephemeral=True)
     try:
         await bot.codex.set_model(model)
-    except Exception as exc:  # noqa: BLE001 - keep every command failure visible
+    except (CodexAppServerError, OSError) as exc:
         await _send_command_failure(interaction, "Model unavailable", exc)
         return
     await interaction.followup.send(
@@ -1139,7 +1210,8 @@ async def codex_model(interaction: discord.Interaction, model: str) -> None:
 
 
 async def personality_autocomplete(
-    interaction: discord.Interaction, current: str
+    interaction: Any,  # pylint: disable=unused-argument
+    current: str,
 ) -> list[app_commands.Choice[str]]:
     query = current.casefold().strip()
     choices: list[app_commands.Choice[str]] = []
@@ -1201,10 +1273,6 @@ async def codex_personality(
             ephemeral=True,
         )
         return
-    except Exception as exc:  # noqa: BLE001 - keep command failures visible
-        await _send_command_failure(interaction, "Personality unavailable", exc)
-        return
-
     if selected is None:
         description = "The active Codex personality has been cleared."
         title = "Personality cleared"
@@ -1295,7 +1363,7 @@ async def codex_stop(interaction: discord.Interaction) -> None:
                 color=discord.Color.orange() if not stopped else discord.Color.green(),
             )
         )
-    except Exception as exc:  # noqa: BLE001 - keep every command failure visible
+    except (CodexAppServerError, OSError, discord.DiscordException) as exc:
         await _send_command_failure(interaction, "Stop unavailable", exc)
 
 
@@ -1306,7 +1374,7 @@ async def codex_undo(interaction: discord.Interaction) -> None:
     await interaction.response.defer(ephemeral=True)
     try:
         await bot.codex.undo(session_key(interaction.channel, interaction.user.id))
-    except Exception as exc:  # noqa: BLE001 - keep every command failure visible
+    except (CodexAppServerError, OSError) as exc:
         await _send_command_failure(interaction, "Undo unavailable", exc)
         return
     await interaction.followup.send(
@@ -1335,28 +1403,44 @@ async def codex_btw(
     if not await _require_login(interaction):
         return
     await interaction.response.defer()
-    key = session_key(interaction.channel, interaction.user.id)
+    source_channel = interaction.channel
+    response_channel = await _maybe_create_response_thread(source_channel, prompt)
+    if response_channel is None:
+        response_channel = source_channel
+    if _is_thread(response_channel):
+        await _name_new_response_thread(response_channel, prompt)
+        bot._participating_threads.add(response_channel.id)
+        bot.codex.mark_thread_participating(response_channel.id)
+    key = session_key(response_channel, interaction.user.id)
     context = await _channel_context(interaction.channel)
+    send_kwargs: dict[str, Any] = {}
+    if response_channel is not source_channel and _is_thread(response_channel):
+        # Webhook follow-ups can target the newly-created thread while keeping
+        # the interaction acknowledgement valid.
+        send_kwargs["thread"] = response_channel
     await handle_request(
         interaction.followup.send,
         prompt,
-        channel=interaction.channel,
+        channel=response_channel,
         user_id=interaction.user.id,
         attachments=(file,) if file is not None else (),
-        allow_tools=_is_server_admin(interaction.user, interaction.channel),
+        allow_tools=_is_server_admin(interaction.user, response_channel),
         context=context,
         request_id=f"interaction:{interaction.id}",
         speak_text=_voice_speak_callback(key),
+        use_webhook_thread=True,
+        **send_kwargs,
     )
 
 
 async def skill_autocomplete(
-    interaction: discord.Interaction, current: str
+    interaction: discord.Interaction,  # pylint: disable=unused-argument
+    current: str,
 ) -> list[app_commands.Choice[str]]:
     try:
         if not bot.codex.skill_names():
             await bot.codex.refresh_skills(force=True)
-    except Exception:  # noqa: BLE001 - autocomplete must fail closed
+    except (CodexAppServerError, OSError):
         return []
     query = current.casefold()
     choices: list[app_commands.Choice[str]] = []
@@ -1376,7 +1460,7 @@ async def codex_skill(interaction: discord.Interaction, skill_name: str) -> None
     try:
         if not bot.codex.skill_names():
             await bot.codex.refresh_skills(force=True)
-    except Exception as exc:  # noqa: BLE001 - keep every command failure visible
+    except (CodexAppServerError, OSError) as exc:
         await interaction.response.send_message(
             embed=_frontend_embed(
                 "command:skill",
@@ -1420,7 +1504,8 @@ async def codex_skill(interaction: discord.Interaction, skill_name: str) -> None
 
 
 async def customization_target_autocomplete(
-    interaction: discord.Interaction, current: str
+    interaction: Any,  # pylint: disable=unused-argument
+    current: str,
 ) -> list[app_commands.Choice[str]]:
     return [
         app_commands.Choice(name=display[:100], value=value)
@@ -1429,7 +1514,8 @@ async def customization_target_autocomplete(
 
 
 async def customization_element_autocomplete(
-    interaction: discord.Interaction, current: str
+    interaction: Any,  # pylint: disable=unused-argument
+    current: str,
 ) -> list[app_commands.Choice[str]]:
     return [
         app_commands.Choice(name=display, value=value)
@@ -1504,6 +1590,13 @@ async def codex_customize(
             ephemeral=True,
         )
         return
+    if interaction.guild is None:
+        await _send_command_failure(
+            interaction,
+            "Customization unavailable",
+            RuntimeError("Customization requires a server."),
+        )
+        return
     guild_id = interaction.guild.id
     try:
         canonical, selected_element, reset = bot.customizations.set(
@@ -1552,9 +1645,121 @@ def _thread_name(prompt: str) -> str:
     return _truncate(f"Codex: {summary}", 100)
 
 
-async def _name_new_response_thread(
-    channel: discord.abc.Messageable, prompt: str
-) -> None:
+_THREAD_NOUN = (
+    r"(?:(?:a|an|the)\s+)?"
+    r"(?:(?:new|separate|dedicated|discord|private|public|discussion|response)\s+)*"
+    r"thread\b"
+)
+_THREAD_REQUEST_PATTERN = re.compile(
+    rf"(?:\b(?:create|make|start|open|begin|spawn)\s+"
+    rf"(?:(?:me|us)\s+)?{_THREAD_NOUN})"
+    rf"|(?:\b(?:make|turn|convert)\s+(?:this|it|the conversation)\s+"
+    rf"(?:into|to|as|a)\s+{_THREAD_NOUN})"
+    rf"|(?:\b(?:put|move|continue|take|reply|respond)\s+"
+    rf"(?:this conversation|our conversation|the conversation|this|it)?\s*"
+    rf"(?:in|into|to)\s+{_THREAD_NOUN})"
+    r"|(?:\bthread\s+(?:this|it|the conversation)\b)",
+    re.IGNORECASE,
+)
+_THREAD_REQUEST_NEGATION_PATTERN = re.compile(
+    rf"(?:\b(?:don't|dont|do not|never|avoid)\s+"
+    rf"(?:(?:create|make|start|open|begin)\s+)?{_THREAD_NOUN})"
+    rf"|(?:\b(?:no|without)\s+{_THREAD_NOUN})"
+    r"|(?:\bwithout\s+(?:creating|making|starting|opening)\s+"
+    rf"{_THREAD_NOUN})",
+    re.IGNORECASE,
+)
+_THREAD_INTENT_QUESTION_PATTERN = re.compile(
+    r"\b(?:explain|describe|define|show|teach|tell)\b.{0,60}\b"
+    r"(?:how to|how do i|how can i|what is|what are)\b.{0,40}\bthread\b"
+    r"|\b(?:how do i|how can i|what is|what are|when|why)\b"
+    r".{0,80}\bthread\b",
+    re.IGNORECASE,
+)
+_THREAD_SEMANTIC_PATTERN = re.compile(
+    r"\b(?:separate|split|branch)\s+(?:this|it|the conversation)\b"
+    r"|\b(?:keep|continue|move|take|put)\b.{0,50}\b"
+    r"(?:separate|apart|in its own space|in a dedicated space|"
+    r"in a separate discussion|in a separate conversation)\b"
+    r"|\b(?:give|make)\b.{0,50}\b(?:its own|a dedicated|a separate)\s+"
+    r"(?:space|discussion|conversation|thread)\b",
+    re.IGNORECASE,
+)
+
+
+def _user_requested_thread(prompt: str) -> bool:
+    """Return whether the user's message has a high-confidence thread intent."""
+    normalized = re.sub(r"\s+", " ", prompt or "").strip()
+    if not normalized:
+        return False
+    if _THREAD_REQUEST_NEGATION_PATTERN.search(normalized):
+        return False
+    # Questions about the Discord feature are not requests to create one.
+    if _THREAD_INTENT_QUESTION_PATTERN.search(normalized):
+        return False
+    if _THREAD_REQUEST_PATTERN.search(normalized):
+        return True
+    return bool(
+        re.search(
+            rf"\b(?:i|we)\s+(?:want|need|would like)\s+"
+            rf"(?:you\s+to\s+)?{_THREAD_NOUN}",
+            normalized,
+            re.IGNORECASE,
+        )
+        or _THREAD_SEMANTIC_PATTERN.search(normalized)
+    )
+
+
+async def _maybe_create_response_thread(
+    source: Any | None,
+    prompt: str,
+) -> Any | None:
+    """Create an opt-in response thread, retaining the source channel on failure."""
+    original_channel = getattr(source, "channel", None) or source
+    if original_channel is None:
+        return None
+    if not (
+        getattr(original_channel, "guild", None) is not None
+        and not _is_thread(original_channel)
+        and _env_bool_any(("THEIA_AUTO_THREAD", "DISCORD_AUTO_THREAD"), False)
+        and _user_requested_thread(prompt)
+    ):
+        return original_channel
+
+    # Message.create_thread creates a thread anchored to the request, which is
+    # the Discord API used by the previous auto-thread path.
+    create_thread = getattr(source, "create_thread", None)
+    if not callable(create_thread):
+        create_thread = getattr(original_channel, "create_thread", None)
+    if not callable(create_thread):
+        logger.info(
+            "Discord response threads unavailable; continuing in source channel"
+        )
+        return original_channel
+    try:
+        create_thread_async = cast(Callable[..., Awaitable[Any]], create_thread)
+        response_channel = await create_thread_async(
+            name=_thread_name(prompt),
+            auto_archive_duration=1440,
+        )
+    except (discord.DiscordException, TypeError, RuntimeError) as exc:
+        logger.info(
+            "Could not create a Discord response thread; continuing in source "
+            "channel (error=%s)",
+            type(exc).__name__,
+        )
+        return original_channel
+    if response_channel is None or not callable(
+        getattr(response_channel, "send", None)
+    ):
+        logger.info(
+            "Discord response thread was not created; continuing in source channel"
+        )
+        return original_channel
+    return response_channel
+
+
+async def _name_new_response_thread(channel: Any, prompt: str) -> None:
     """Name an existing Discord thread when the bot first joins it."""
     if not _is_thread(channel) or bot.codex.is_participating_thread(channel.id):
         return
@@ -1562,7 +1767,8 @@ async def _name_new_response_thread(
     if not callable(edit):
         return
     try:
-        await edit(name=_thread_name(prompt))
+        edit_async = cast(Callable[..., Awaitable[Any]], edit)
+        await edit_async(name=_thread_name(prompt))
     except discord.DiscordException as exc:
         # Naming is cosmetic and must never prevent the actual response.
         logger.info(
@@ -1592,7 +1798,7 @@ async def on_message(message: discord.Message) -> None:
     prompt = (
         _mention_prompt(message.content, bot.user.id)
         if mentioned
-        else str(message.content or "").strip()
+        else (message.content or "").strip()
     )
     if not prompt and not message.attachments:
         return
@@ -1618,31 +1824,23 @@ async def on_message(message: discord.Message) -> None:
             allowed_mentions=discord.AllowedMentions.none(),
         )
         return
-    response_channel: discord.abc.Messageable = message.channel
-    if (
-        mentioned
-        and getattr(message.channel, "guild", None) is not None
-        and not _is_thread(message.channel)
-        and _env_bool_any(("THEIA_AUTO_THREAD", "DISCORD_AUTO_THREAD"), False)
-    ):
-        create_thread = getattr(message, "create_thread", None)
-        if callable(create_thread):
-            try:
-                response_channel = await create_thread(
-                    name=_thread_name(prompt),
-                    auto_archive_duration=1440,
-                )
-            except discord.DiscordException as exc:
-                logger.info(
-                    "Could not create a Discord response thread (error=%s)",
-                    type(exc).__name__,
-                )
+    response_channel = await _maybe_create_response_thread(
+        message,
+        prompt,
+    )
+    if response_channel is None:
+        response_channel = message.channel
+    if response_channel is None:
+        return
     if _is_thread(response_channel):
         await _name_new_response_thread(response_channel, prompt)
         bot._participating_threads.add(response_channel.id)
         bot.codex.mark_thread_participating(response_channel.id)
     context = await _message_context(message)
     key = session_key(response_channel, message.author.id)
+    send_kwargs: dict[str, Any] = {"mention_author": False}
+    if response_channel is message.channel:
+        send_kwargs["reference"] = message
     await handle_request(
         response_channel.send,
         prompt,
@@ -1652,9 +1850,9 @@ async def on_message(message: discord.Message) -> None:
         allow_tools=_is_server_admin(message.author, response_channel),
         context=context,
         request_id=f"message:{message.id}",
-        reference=message,
-        mention_author=False,
+        thread_source=message,
         speak_text=_voice_speak_callback(key),
+        **send_kwargs,
     )
 
 

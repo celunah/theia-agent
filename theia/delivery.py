@@ -8,15 +8,24 @@ from typing import Any
 import discord
 
 from .audio import AudioOutput
-from .core import _command_embed, _safe_error_reason, _safe_intermediate_text, _subtext
+from .core import (
+    _codex_logger,
+    _command_embed,
+    _is_tool_item,
+    _safe_error_reason,
+    _safe_intermediate_text,
+    _subtext,
+)
+from .customization import CustomizationError
 
 SendMessage = Callable[..., Awaitable[Any]]
 SpeakText = Callable[[str], Awaitable[None]]
 INTERMEDIATE_STATUS_LIMIT = 1990
+logger = _codex_logger()
 
 
 def _split_pages(text: str, limit: int = 1900) -> list[str]:
-    text = str(text or "")
+    text = text or ""
     if not text:
         return [""]
     pages: list[str] = []
@@ -45,19 +54,6 @@ def _format_thought_duration(seconds: float) -> str:
     minute_unit = "minute" if minutes == 1 else "minutes"
     second_unit = "second" if remainder == 1 else "seconds"
     return f"Thought for {minutes} {minute_unit} and {remainder} {second_unit}"
-
-
-def _is_tool_item(payload: dict[str, Any]) -> bool:
-    item_type = str(payload.get("type") or "").casefold()
-    return item_type in {
-        "commandexecution",
-        "filechange",
-        "mcptoolcall",
-        "websearch",
-        "imagegeneration",
-        "computertoolcall",
-        "local_shell",
-    } or item_type.endswith("toolcall")
 
 
 class _PaginatorView(discord.ui.View):
@@ -159,6 +155,7 @@ async def send_paginated(
     speech: Iterable[AudioOutput] = (),
     **kwargs: Any,
 ) -> Any:
+    del title, color
     pages = _split_pages(response)
     speech_outputs = tuple(speech)
     view = _PaginatorView(pages, owner_id=owner_id) if len(pages) > 1 else None
@@ -184,9 +181,7 @@ async def send_paginated(
 
     try:
         message = await send(
-            **send_kwargs(
-                pages[0], page_view=view, include_speech=bool(speech_outputs)
-            )
+            **send_kwargs(pages[0], page_view=view, include_speech=bool(speech_outputs))
         )
         if view is not None:
             view.message = message
@@ -206,9 +201,7 @@ async def send_paginated(
             return message
         except (discord.DiscordException, AttributeError):
             for page in pages[1:]:
-                await send(
-                    **send_kwargs(page, page_view=None, include_speech=False)
-                )
+                await send(**send_kwargs(page, page_view=None, include_speech=False))
             return message
 
 
@@ -232,9 +225,6 @@ class _ResponseDelivery:
         self.guild_id = guild_id
         self.context = dict(context or {})
         self.status_message: discord.Message | discord.WebhookMessage | None = None
-        self.pending_title = "Thinking"
-        self.pending_description = "Thinking"
-        self.current_status: str | None = None
         self.last_edit = 0.0
         self.thought_started_at: float | None = None
         self.lock = asyncio.Lock()
@@ -244,6 +234,23 @@ class _ResponseDelivery:
 
     async def on_event(self, event: str, payload: dict[str, Any]) -> None:
         async with self.lock:
+            if event == "thread_opening":
+                message = _safe_intermediate_text(
+                    payload.get("text"), INTERMEDIATE_STATUS_LIMIT
+                )
+                if message:
+                    try:
+                        await self.send(
+                            content=_subtext(message),
+                            allowed_mentions=discord.AllowedMentions.none(),
+                            **self.kwargs,
+                        )
+                    except discord.DiscordException:
+                        return
+                    if self.speak_text is not None:
+                        with contextlib.suppress(Exception):
+                            await self.speak_text(message)
+                return
             if event == "agent_message":
                 # App-server agent-message events are emitted for every text
                 # delta. Wait for item_completed so Discord receives one full
@@ -306,7 +313,7 @@ class _ResponseDelivery:
             else:
                 label = getattr(self.customizer, "label", None)
                 value = (
-                    label(
+                    label(  # pylint: disable=not-callable
                         self.guild_id,
                         target,
                         title,
@@ -322,21 +329,19 @@ class _ResponseDelivery:
                     )
                 )
             return str(value or (description if title == "Intermediate" else title))
-        except Exception:  # noqa: BLE001 - frontend preferences must be fail-safe
+        except CustomizationError:
             return description if title == "Intermediate" else title
 
     async def _set_status(
         self, title: str, description: str, *, force: bool = False
     ) -> None:
-        self.pending_title = title
-        self.pending_description = description or title
+        description = description or title
         now = time.monotonic()
-        status = self._status_text(title, self.pending_description)
+        status = self._status_text(title, description)
         if title == "Thinking" and self.thought_started_at is None:
             self.thought_started_at = now
         if not force and now - self.last_edit < 0.8:
             return
-        self.current_status = status
         content = _subtext(status)
         try:
             if self.status_message is None:
@@ -374,9 +379,7 @@ class _ResponseDelivery:
                                 thought,
                                 context={
                                     **self.context,
-                                    "duration": thought.removeprefix(
-                                        "Thought for "
-                                    ),
+                                    "duration": thought.removeprefix("Thought for "),
                                     "status": "Thought duration",
                                     "text": thought,
                                 },
@@ -389,19 +392,20 @@ class _ResponseDelivery:
                                 thought,
                                 context={
                                     **self.context,
-                                    "duration": thought.removeprefix(
-                                        "Thought for "
-                                    ),
+                                    "duration": thought.removeprefix("Thought for "),
                                     "status": "Thought duration",
                                     "text": thought,
                                 },
                             )
                         )
-                    except Exception:  # noqa: BLE001 - frontend preferences are optional
-                        pass
+                    except CustomizationError as exc:
+                        logger.debug(
+                            "Could not render thought status with frontend preferences "
+                            "(error=%s)",
+                            type(exc).__name__,
+                        )
                 with contextlib.suppress(discord.DiscordException, AttributeError):
                     await self.status_message.edit(content=_subtext(thought))
-                self.current_status = thought
         if failed:
             reason = _safe_error_reason(error_reason)
             await self.send(

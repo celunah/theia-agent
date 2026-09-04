@@ -1,8 +1,10 @@
 """Validation and storage for Theia personality prompt profiles."""
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, unquote
+from typing import Any, cast
 
 PERSONALITY_SUFFIXES = frozenset({".md", ".markdown", ".text", ".txt"})
 MAX_PERSONALITY_BYTES = 128 * 1024
@@ -25,7 +27,7 @@ class PersonalityStore:
 
     @staticmethod
     def normalize_name(value: str | None) -> str:
-        name = " ".join(str(value or "").strip().split())
+        name = " ".join((value or "").strip().split())
         if not name:
             raise PersonalityError("A personality name is required.")
         if len(name) > MAX_PERSONALITY_NAME_LENGTH:
@@ -44,7 +46,7 @@ class PersonalityStore:
 
     @staticmethod
     def is_clear_name(value: str | None) -> bool:
-        return str(value or "").strip().casefold() in {"none", "default", "neutral"}
+        return (value or "").strip().casefold() in {"none", "default", "neutral"}
 
     def _path_for(self, name: str) -> Path:
         return self.root / f"{quote(name, safe='._-')}.md"
@@ -122,7 +124,8 @@ class PersonalityStore:
         if not callable(read):
             raise PersonalityError("The personality file could not be read.")
         try:
-            raw = await read()
+            read_async = cast(Callable[[], Awaitable[Any]], read)
+            raw = await read_async()
         except Exception as exc:
             raise PersonalityError("The personality file could not be read.") from exc
         if not isinstance(raw, bytes) or len(raw) > MAX_PERSONALITY_BYTES:
