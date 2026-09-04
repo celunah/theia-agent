@@ -257,13 +257,36 @@ class CommandSurfaceTests(unittest.TestCase):
             self.assertEqual(
                 (private_home / "auth.json").read_text(encoding="utf-8"), auth
             )
-            if os.name != "nt":
-                self.assertEqual(
-                    (private_home / "auth.json").stat().st_mode & 0o777,
-                    0o600,
-                )
             self.assertEqual(
                 (global_home / "auth.json").read_text(encoding="utf-8"), auth
+            )
+
+    @unittest.skipIf(
+        os.name == "nt",
+        "POSIX file permission semantics are not enforced on Windows",
+    )
+    def test_private_auth_file_uses_restricted_permissions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            private_home = root / "private"
+            global_home = root / "global"
+            global_home.mkdir()
+            auth = '{"auth_mode":"chatgpt","tokens":{"access_token":"private-test"}}'
+            (global_home / "auth.json").write_text(auth, encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                {
+                    "CODEX_DISCORD_HOME": str(private_home),
+                    "CODEX_HOME": str(global_home),
+                },
+            ):
+                server = main.CodexAppServer()
+                private_home.mkdir(exist_ok=True)
+                server._import_global_auth()
+
+            self.assertEqual(
+                (private_home / "auth.json").stat().st_mode & 0o777,
+                0o600,
             )
 
     def test_private_home_defaults_codex_web_search_to_indexed(self) -> None:
@@ -281,11 +304,26 @@ class CommandSurfaceTests(unittest.TestCase):
                 (private_home / "config.toml").read_text(encoding="utf-8"),
                 'web_search = "indexed"\n',
             )
-            if os.name != "nt":
-                self.assertEqual(
-                    (private_home / "config.toml").stat().st_mode & 0o777,
-                    0o600,
-                )
+
+    @unittest.skipIf(
+        os.name == "nt",
+        "POSIX file permission semantics are not enforced on Windows",
+    )
+    def test_private_config_file_uses_restricted_permissions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            private_home = Path(directory) / "private"
+            with patch.dict(
+                os.environ,
+                {"THEIA_HOME": str(private_home), "THEIA_WEB_SEARCH": ""},
+            ):
+                server = main.CodexAppServer()
+                private_home.mkdir(exist_ok=True)
+                server._ensure_web_search_config()
+
+            self.assertEqual(
+                (private_home / "config.toml").stat().st_mode & 0o777,
+                0o600,
+            )
 
     def test_explicit_codex_web_search_mode_is_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
