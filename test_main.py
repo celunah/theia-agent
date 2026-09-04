@@ -110,10 +110,10 @@ class CommandSurfaceTests(unittest.TestCase):
         for command in main.bot.tree.get_commands():
             self.assertNotIn("Theia", command.description)
 
-    def test_codex_logger_is_verbose_and_namespaced(self) -> None:
+    def test_codex_logger_is_concise_colored_and_namespaced(self) -> None:
         logger = logging.getLogger("theia.codex")
         self.assertEqual(logger.name, "theia.codex")
-        self.assertEqual(logger.level, logging.DEBUG)
+        self.assertEqual(logger.level, logging.INFO)
         self.assertEqual(
             sum(
                 getattr(handler, "_theia_codex_handler", False)
@@ -121,6 +121,21 @@ class CommandSurfaceTests(unittest.TestCase):
             ),
             1,
         )
+        handler = next(
+            handler
+            for handler in logger.handlers
+            if getattr(handler, "_theia_codex_handler", False)
+        )
+        record = logger.makeRecord(
+            logger.name,
+            logging.INFO,
+            __file__,
+            1,
+            "Codex turn started",
+            (),
+            None,
+        )
+        self.assertIn("\x1b[", handler.format(record))
 
     def test_base_priors_are_identity_neutral(self) -> None:
         self.assertNotIn("Codex", main.BASE_PRIORS)

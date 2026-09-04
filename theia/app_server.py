@@ -44,6 +44,7 @@ from .core import (
 )
 from .personality import PersonalityError, PersonalityStore
 from .audio import AudioOutput, AudioProtocolError, OpenAICompatibleAudio
+from .delivery import _is_tool_item
 from .ui import _DecisionView, _FormView, _UserInputView
 
 logger = _codex_logger()
@@ -1468,7 +1469,7 @@ class CodexAppServer:
         session = self._session(session_key)
         assert session.lock is not None
         attachment_list = tuple(attachments)
-        logger.debug(
+        logger.info(
             "Codex request accepted (prompt_characters=%d, attachments=%d, "
             "tools_allowed=%s)",
             len(prompt),
@@ -3099,6 +3100,11 @@ class CodexAppServer:
                     "Codex item started (type=%s)",
                     _safe_log_label(item.get("type")),
                 )
+                if _is_tool_item(item):
+                    logger.info(
+                        "Codex tool started (type=%s)",
+                        _safe_log_label(item.get("type")),
+                    )
                 if item.get("type") == "agentMessage":
                     item_id = str(item.get("id") or "")
                     state.agent_messages[item_id] = {
@@ -3115,6 +3121,11 @@ class CodexAppServer:
                     "Codex item completed (type=%s)",
                     _safe_log_label(item.get("type")),
                 )
+                if _is_tool_item(item):
+                    logger.info(
+                        "Codex tool completed (type=%s)",
+                        _safe_log_label(item.get("type")),
+                    )
                 state.items.append(item)
                 if item.get("type") == "agentMessage":
                     item_id = str(item.get("id") or "")

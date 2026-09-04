@@ -28,20 +28,72 @@ VOICE_MODE = "voice"
 ADAPTIVE_REASONING_ENV = "CODEX_ADAPTIVE_REASONING"
 CODEX_LOGGER_NAME = "theia.codex"
 CODEX_LOG_LEVEL_ENV = "THEIA_CODEX_LOG_LEVEL"
+CODEX_LOG_COLORS_ENV = "THEIA_CODEX_LOG_COLORS"
 
 
 class CodexAppServerError(RuntimeError):
     pass
 
 
+class _CodexColorFormatter(logging.Formatter):
+    """Use the same layout and ANSI palette as discord.py's logger."""
+
+    _LEVEL_COLORS = (
+        (logging.DEBUG, "\x1b[40;1m"),
+        (logging.INFO, "\x1b[34;1m"),
+        (logging.WARNING, "\x1b[33;1m"),
+        (logging.ERROR, "\x1b[31m"),
+        (logging.CRITICAL, "\x1b[41m"),
+    )
+    _FORMATS = {
+        level: logging.Formatter(
+            f"\x1b[30;1m%(asctime)s\x1b[0m {color}%(levelname)-8s\x1b[0m "
+            f"\x1b[35m%(name)s\x1b[0m %(message)s",
+            "%Y-%m-%d %H:%M:%S",
+        )
+        for level, color in _LEVEL_COLORS
+    }
+    _PLAIN_FORMAT = logging.Formatter(
+        "[{asctime}] [{levelname:<8}] {name}: {message}",
+        "%Y-%m-%d %H:%M:%S",
+        style="{",
+    )
+
+    def __init__(self, *args: Any, use_colors: bool = True, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.use_colors = use_colors
+
+    def format(self, record: logging.LogRecord) -> str:
+        if not self.use_colors:
+            return self._PLAIN_FORMAT.format(record)
+        formatter = self._FORMATS.get(record.levelno, self._FORMATS[logging.DEBUG])
+        if record.exc_info:
+            text = formatter.formatException(record.exc_info)
+            record.exc_text = f"\x1b[31m{text}\x1b[0m"
+        output = formatter.format(record)
+        record.exc_text = None
+        return output
+
+
 def _codex_logger() -> logging.Logger:
-    """Return the verbose Codex logger with one safe default stream handler."""
+    """Return the concise Codex logger with one colored stream handler."""
     logger = logging.getLogger(CODEX_LOGGER_NAME)
-    configured_level = os.getenv(CODEX_LOG_LEVEL_ENV, "DEBUG").upper()
-    level = getattr(logging, configured_level, logging.DEBUG)
+    configured_level = os.getenv(CODEX_LOG_LEVEL_ENV, "INFO").upper()
+    level = getattr(logging, configured_level, logging.INFO)
     if not isinstance(level, int):
-        level = logging.DEBUG
+        level = logging.INFO
     logger.setLevel(level)
+    colors_enabled = os.getenv(CODEX_LOG_COLORS_ENV, "true").casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    formatter = _CodexColorFormatter(
+        "%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        use_colors=colors_enabled,
+    )
 
     # discord.py configures its own logger, not this application namespace.
     # Without a handler, DEBUG/INFO records disappear when the embedding
@@ -58,15 +110,10 @@ def _codex_logger() -> logging.Logger:
     if handler is None and not logger.handlers:
         handler = logging.StreamHandler(sys.stderr)
         handler._theia_codex_handler = True  # type: ignore[attr-defined]
-        handler.setFormatter(
-            logging.Formatter(
-                "%(asctime)s %(levelname)s [%(name)s] %(message)s",
-                datefmt="%Y-%m-%d %H:%M:%S",
-            )
-        )
         logger.addHandler(handler)
     if handler is not None:
         handler.setLevel(level)
+        handler.setFormatter(formatter)
     # Avoid duplicate lines when discord.py or an embedding app configures
     # the root logger as well. A caller can still install a handler directly
     # on ``theia.codex`` for custom routing.

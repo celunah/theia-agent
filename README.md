@@ -198,12 +198,13 @@ THEIA_PRESENCE_UPDATE_INTERVAL=15
 
 ## Logging
 
-The Codex layer uses the `theia.codex` Python logger and defaults to verbose
-`DEBUG` output. It reports lifecycle events, protocol method names, request
-durations, result counts, model and account state, turn progress, approvals,
-tool restrictions, and failures without logging raw payloads. Set
-`THEIA_CODEX_LOG_LEVEL=INFO` (or `WARNING`) to reduce verbosity. For more
-detail in an embedding application:
+The Codex layer uses the `theia.codex` Python logger and defaults to concise,
+colored `INFO` output matching discord.py's timestamp, level, and logger
+format. It reports the basic app-server lifecycle, request and turn progress,
+tool activity, approvals, and failures without logging raw payloads. Set
+`THEIA_CODEX_LOG_LEVEL=DEBUG` for protocol-level diagnostics, or `WARNING` to
+show only warnings and errors. Set `THEIA_CODEX_LOG_COLORS=false` when plain
+output is needed. For more detail in an embedding application:
 
 ```python
 import logging
