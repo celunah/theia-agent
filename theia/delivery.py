@@ -220,11 +220,17 @@ class _ResponseDelivery:
         *,
         owner_id: int | None = None,
         speak_text: SpeakText | None = None,
+        customizer: Any | None = None,
+        guild_id: int | None = None,
+        context: dict[str, Any] | None = None,
     ) -> None:
         self.send = send
         self.kwargs = kwargs
         self.owner_id = owner_id
         self.speak_text = speak_text
+        self.customizer = customizer
+        self.guild_id = guild_id
+        self.context = dict(context or {})
         self.status_message: discord.Message | discord.WebhookMessage | None = None
         self.pending_title = "Thinking"
         self.pending_description = "Thinking"
@@ -274,24 +280,59 @@ class _ResponseDelivery:
                         await self._set_status(status, "Thinking", force=True)
                 return
 
+    def _status_text(self, title: str, description: str) -> str:
+        targets = {
+            "Thinking": "label:thinking",
+            "Intermediate": "label:intermediate",
+            "Memory created": "label:memory_created",
+            "Memory updated": "label:memory_updated",
+            "Skill created": "label:skill_created",
+            "Skill updated": "label:skill_updated",
+        }
+        target = targets.get(title)
+        if self.customizer is None or target is None:
+            return description if title == "Intermediate" else title
+        context = dict(self.context)
+        context.update({"status": title, "text": description})
+        try:
+            if title == "Intermediate":
+                value = self.customizer.render(
+                    self.guild_id,
+                    target,
+                    "content",
+                    description,
+                    context=context,
+                )
+            else:
+                label = getattr(self.customizer, "label", None)
+                value = (
+                    label(
+                        self.guild_id,
+                        target,
+                        title,
+                        context=context,
+                    )
+                    if callable(label)
+                    else self.customizer.render(
+                        self.guild_id,
+                        target,
+                        "label",
+                        title,
+                        context=context,
+                    )
+                )
+            return str(value or (description if title == "Intermediate" else title))
+        except Exception:  # noqa: BLE001 - frontend preferences must be fail-safe
+            return description if title == "Intermediate" else title
+
     async def _set_status(
         self, title: str, description: str, *, force: bool = False
     ) -> None:
         self.pending_title = title
         self.pending_description = description or title
         now = time.monotonic()
-        status = (
-            title
-            if title
-            in {
-                "Memory created",
-                "Memory updated",
-                "Skill created",
-                "Skill updated",
-            }
-            else self.pending_description
-        )
-        if status == "Thinking" and self.thought_started_at is None:
+        status = self._status_text(title, self.pending_description)
+        if title == "Thinking" and self.thought_started_at is None:
             self.thought_started_at = now
         if not force and now - self.last_edit < 0.8:
             return
@@ -323,15 +364,55 @@ class _ResponseDelivery:
                 thought = _format_thought_duration(
                     time.monotonic() - self.thought_started_at
                 )
+                if self.customizer is not None:
+                    try:
+                        label = getattr(self.customizer, "label", None)
+                        thought = (
+                            label(
+                                self.guild_id,
+                                "label:thought_duration",
+                                thought,
+                                context={
+                                    **self.context,
+                                    "duration": thought.removeprefix(
+                                        "Thought for "
+                                    ),
+                                    "status": "Thought duration",
+                                    "text": thought,
+                                },
+                            )
+                            if callable(label)
+                            else self.customizer.render(
+                                self.guild_id,
+                                "label:thought_duration",
+                                "label",
+                                thought,
+                                context={
+                                    **self.context,
+                                    "duration": thought.removeprefix(
+                                        "Thought for "
+                                    ),
+                                    "status": "Thought duration",
+                                    "text": thought,
+                                },
+                            )
+                        )
+                    except Exception:  # noqa: BLE001 - frontend preferences are optional
+                        pass
                 with contextlib.suppress(discord.DiscordException, AttributeError):
                     await self.status_message.edit(content=_subtext(thought))
                 self.current_status = thought
         if failed:
+            reason = _safe_error_reason(error_reason)
             await self.send(
                 embed=_command_embed(
                     "Request failed",
-                    f"Codex could not complete this request.\n\nReason: {_safe_error_reason(error_reason)}",
+                    f"Codex could not complete this request.\n\nReason: {reason}",
                     color=discord.Color.red(),
+                    target="label:request_failed",
+                    guild_id=self.guild_id,
+                    customizer=self.customizer,
+                    context={**self.context, "reason": reason, "status": "failed"},
                 ),
                 allowed_mentions=discord.AllowedMentions.none(),
                 **self.kwargs,

@@ -452,11 +452,33 @@ def _command_embed(
     description: str,
     *,
     color: discord.Color | None = None,
+    target: str | None = None,
+    guild_id: int | None = None,
+    customizer: Any | None = None,
+    context: dict[str, Any] | None = None,
 ) -> discord.Embed:
+    base_color = color or discord.Color.blurple()
+    if customizer is not None and target is not None:
+        try:
+            title = customizer.render(
+                guild_id, target, "title", title, context=context
+            )
+            description = customizer.render(
+                guild_id, target, "content", description, context=context
+            )
+            color_value = customizer.color(
+                guild_id,
+                target,
+                base_color.value,
+                context=context,
+            )
+            base_color = discord.Color(color_value)
+        except Exception:  # noqa: BLE001 - frontend preferences must be fail-safe
+            pass
     return discord.Embed(
         title=_truncate(title, 256),
         description=_truncate(description, 4096),
-        color=color or discord.Color.blurple(),
+        color=base_color,
         timestamp=discord.utils.utcnow(),
     )
 

@@ -82,6 +82,25 @@ change starts a fresh thread.
 `/model` uses Codex model autocomplete to select the active model. Reasoning
 remains adaptive and is not manually overridden.
 
+Server administrators can customize the Discord-only presentation with:
+
+```text
+/customize target:<command-or-label> element:<title|content|color|label> value:<value>
+```
+
+Targets may be commands such as `/usage` or frontend labels such as `Thinking`.
+Values support Markdown and these placeholders:
+`{balance}`, `{channel}`, `{channel_id}`, `{command}`, `{count}`, `{current_streak}`,
+`{duration}`, `{longest_running_turn}`, `{longest_streak}`, `{mode}`, `{model}`,
+`{option}`, `{page}`, `{pages}`, `{peak_daily_tokens}`, `{personality}`, `{prompt}`,
+`{question}`, `{reason}`, `{reset_at}`, `{server}`, `{server_id}`, `{skill}`,
+`{status}`, `{text}`, `{user}`, `{user_id}`, `{used_percent}`, and
+`{lifetime_tokens}`. Use `default` as the value to reset an override.
+These preferences are server-wide and stored separately in
+`~/.theia/discord-customizations.json`; they do not enter Codex prompts or
+session state. Set `THEIA_CUSTOMIZATIONS` to use a different customization
+file.
+
 `/undo` removes the most recent completed Codex turn for the current Discord
 session. Sessions inactive for 30 days are archived automatically; activity
 unarchives them and continues the conversation. Sessions inactive for 90 days
@@ -221,6 +240,7 @@ represented by their type rather than their potentially sensitive message.
 ```text
 main.py                    Compatibility launcher and re-exports
 theia/core.py              Shared types, configuration, and safe formatting
+theia/customization.py     Server-scoped Discord UI customization
 theia/ui.py                Approval, input, and modal components
 theia/app_server.py        Codex App Server protocol and session lifecycle
 theia/delivery.py          Progress delivery and response pagination

@@ -155,6 +155,7 @@ class CodexAppServer:
         self._models_loaded_at = 0.0
         self._provider_capabilities: dict[str, Any] | None = None
         self._provider_capabilities_key: tuple[str | None, str | None] | None = None
+        self._frontend_customizer: Any | None = None
         self._loaded_thread_ids: set[str] = set()
         self._model: str | None = None
         self._login_id: str | None = None
@@ -289,6 +290,71 @@ class CodexAppServer:
             self._audio.transcription.enabled,
             self._audio.tts.enabled,
         )
+
+    def set_frontend_customizer(self, customizer: Any | None) -> None:
+        """Attach Discord-only presentation preferences.
+
+        The Codex layer only receives this renderer so it can format embeds
+        delivered through Discord. The preferences are not included in any
+        Codex request or persisted session state.
+        """
+        self._frontend_customizer = customizer
+
+    def _frontend_embed(
+        self,
+        channel: discord.abc.Messageable | None,
+        target: str,
+        title: str,
+        description: str,
+        *,
+        color: discord.Color | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> discord.Embed:
+        guild_id = getattr(getattr(channel, "guild", None), "id", None)
+        return _command_embed(
+            title,
+            description,
+            color=color,
+            target=target,
+            guild_id=guild_id if isinstance(guild_id, int) else None,
+            customizer=self._frontend_customizer,
+            context=context,
+        )
+
+    def _frontend_label(
+        self,
+        channel: discord.abc.Messageable | None,
+        target: str,
+        default: str,
+        *,
+        context: dict[str, Any] | None = None,
+    ) -> str:
+        if self._frontend_customizer is None:
+            return _truncate(default, 80)
+        guild_id = getattr(getattr(channel, "guild", None), "id", None)
+        try:
+            label = getattr(self._frontend_customizer, "label", None)
+            if callable(label):
+                value = label(
+                    guild_id if isinstance(guild_id, int) else None,
+                    target,
+                    default,
+                    context=context,
+                )
+            else:
+                value = self._frontend_customizer.render(
+                    guild_id if isinstance(guild_id, int) else None,
+                    target,
+                    "label",
+                    default,
+                    context=context,
+                )
+            return _truncate(
+                value,
+                80,
+            ) or _truncate(default, 80)
+        except Exception:  # noqa: BLE001 - frontend preferences must be fail-safe
+            return _truncate(default, 80)
 
     def _configured_web_search_mode(self) -> str:
         requested = os.getenv(WEB_SEARCH_ENV, "").strip().casefold()
@@ -2672,8 +2738,18 @@ class CodexAppServer:
             view = _DecisionView(
                 user_id,
                 [
-                    ("Approve", "accept", discord.ButtonStyle.success),
-                    ("Deny", "decline", discord.ButtonStyle.danger),
+                    (
+                        self._frontend_label(
+                            channel, "label:approve_button", "Approve"
+                        ),
+                        "accept",
+                        discord.ButtonStyle.success,
+                    ),
+                    (
+                        self._frontend_label(channel, "label:deny_button", "Deny"),
+                        "decline",
+                        discord.ButtonStyle.danger,
+                    ),
                 ],
                 on_decision=resolve_from_button,
             )
@@ -2686,9 +2762,12 @@ class CodexAppServer:
                 "\n\nChoose Approve or Deny, or use `/approve` or `/deny`."
             )
             await channel.send(
-                embed=_command_embed(
+                embed=self._frontend_embed(
+                    channel,
+                    "label:approval_needed",
                     "Approval needed",
                     description,
+                    context={"reason": reason, "status": "approval"},
                     color=discord.Color.orange(),
                 ),
                 view=view,
@@ -2743,7 +2822,27 @@ class CodexAppServer:
         if channel is None:
             logger.warning("Codex choice request has no Discord channel")
             return "decline"
-        view = _DecisionView(user_id, choices)
+        view = _DecisionView(
+            user_id,
+            [
+                (
+                    self._frontend_label(
+                        channel,
+                        (
+                            "label:approve_button"
+                            if value == "accept"
+                            else "label:deny_button"
+                            if value == "decline"
+                            else "label:answer_button"
+                        ),
+                        label,
+                    ),
+                    value,
+                    style,
+                )
+                for label, value, style in choices
+            ],
+        )
         try:
             await channel.send(
                 content=_subtext(
@@ -2828,7 +2927,12 @@ class CodexAppServer:
         schema = params.get("requestedSchema") or {}
         properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
         names = ", ".join(str(name) for name in properties) or "the requested fields"
-        view = _FormView(user_id, prompt=f"JSON object with these fields: {names}")
+        view = _FormView(
+            user_id,
+            prompt=f"JSON object with these fields: {names}",
+            channel=channel,
+            customizer=self._frontend_customizer,
+        )
         try:
             await channel.send(
                 content=_subtext(
@@ -2992,7 +3096,9 @@ class CodexAppServer:
                     )
                     self._background_send(
                         channel,
-                        _command_embed(
+                        self._frontend_embed(
+                            channel,
+                            "command:login",
                             "Login complete",
                             access_message,
                             color=discord.Color.green(),
@@ -3002,7 +3108,9 @@ class CodexAppServer:
                 else:
                     self._background_send(
                         channel,
-                        _command_embed(
+                        self._frontend_embed(
+                            channel,
+                            "command:login",
                             "Login failed",
                             "Codex login did not complete. Please try `/login` again.",
                             color=discord.Color.red(),

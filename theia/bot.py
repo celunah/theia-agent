@@ -23,6 +23,13 @@ from .core import (
     _subtext,
     _truncate,
 )
+from .customization import (
+    COMMAND_TARGETS,
+    CustomizationError,
+    FrontendCustomizationStore,
+    customization_context,
+    display_target,
+)
 from .delivery import (
     SendMessage,
     _reaction_paginators,
@@ -39,6 +46,31 @@ DEFAULT_CONTEXT_CHARACTERS = 8000
 MAX_CONTEXT_CHARACTERS = 16000
 CONTEXT_MESSAGE_LIMIT_ENV = "THEIA_CONTEXT_MESSAGES"
 CONTEXT_CHARACTER_LIMIT_ENV = "THEIA_CONTEXT_MAX_CHARACTERS"
+
+
+def _frontend_embed(
+    target: str,
+    title: str,
+    description: str,
+    *,
+    channel: discord.abc.Messageable | None = None,
+    user: discord.abc.User | None = None,
+    color: discord.Color | None = None,
+    context: dict[str, Any] | None = None,
+) -> discord.Embed:
+    """Render a command embed using server-only Discord preferences."""
+    values = customization_context(channel, user, command=target)
+    if context:
+        values.update(context)
+    return _command_embed(
+        title,
+        description,
+        color=color,
+        target=target,
+        guild_id=_guild_id(channel),
+        customizer=getattr(globals().get("bot"), "customizations", None),
+        context=values,
+    )
 
 
 def _env_bool_any(names: Iterable[str], default: bool = False) -> bool:
@@ -68,6 +100,11 @@ def _is_server_admin(
 
 def _channel_id(channel: discord.abc.Messageable | None) -> int | None:
     value = getattr(channel, "id", None)
+    return value if isinstance(value, int) else None
+
+
+def _guild_id(channel: discord.abc.Messageable | None) -> int | None:
+    value = getattr(getattr(channel, "guild", None), "id", None)
     return value if isinstance(value, int) else None
 
 
@@ -331,9 +368,12 @@ async def handle_login(
         )
     except CodexAppServerError:
         await send(
-            embed=_command_embed(
+            embed=_frontend_embed(
+                "command:login",
                 "Login unavailable",
                 "Codex could not start authentication. Please try `/login` again.",
+                channel=channel,
+                context={"user_id": user_id},
                 color=discord.Color.red(),
             ),
             ephemeral=ephemeral,
@@ -345,9 +385,12 @@ async def handle_login(
             type(exc).__name__,
         )
         await send(
-            embed=_command_embed(
+            embed=_frontend_embed(
+                "command:login",
                 "Login unavailable",
                 _safe_error_reason(exc),
+                channel=channel,
+                context={"user_id": user_id},
                 color=discord.Color.red(),
             ),
             ephemeral=ephemeral,
@@ -360,7 +403,8 @@ async def handle_login(
             user_id,
             guild_id=guild_id if grant_server else None,
         )
-        embed = _command_embed(
+        embed = _frontend_embed(
+            "command:login",
             "Login ready",
             (
                 "Your cached Codex login is active. Everyone in this server can "
@@ -368,18 +412,26 @@ async def handle_login(
                 if grant_server and guild_id is not None
                 else "Your cached Codex login is active. You can use `/btw` or `/skill`."
             ),
+            channel=channel,
+            context={"user_id": user_id},
             color=discord.Color.green(),
         )
     elif result.get("login_in_progress"):
-        embed = _command_embed(
+        embed = _frontend_embed(
+            "command:login",
             "Login in progress",
             "A Codex login is already in progress. Complete it before trying again.",
+            channel=channel,
+            context={"user_id": user_id},
             color=discord.Color.orange(),
         )
     else:
-        embed = _command_embed(
+        embed = _frontend_embed(
+            "command:login",
             "Log in to Codex",
             "Open the verification link and enter the displayed code.",
+            channel=channel,
+            context={"user_id": user_id},
             color=discord.Color.blurple(),
         )
         url = result.get("verificationUrl") or result.get("verification_url")
@@ -413,6 +465,9 @@ async def handle_request(
         kwargs,
         owner_id=user_id,
         speak_text=speak_text,
+        customizer=bot.customizations,
+        guild_id=_guild_id(channel),
+        context=customization_context(channel, user=None, user_id=user_id),
     )
     presence_request_id = f"request:{id(delivery)}"
     await bot.presence.touch()
@@ -498,21 +553,47 @@ def _format_reset(value: Any) -> str:
     return "Unavailable"
 
 
-def _usage_embed(result: dict[str, Any]) -> discord.Embed:
+def _usage_embed(
+    result: dict[str, Any],
+    *,
+    channel: discord.abc.Messageable | None = None,
+    user: discord.abc.User | None = None,
+) -> discord.Embed:
     summary = result.get("summary") if isinstance(result, dict) else None
     if not isinstance(summary, dict):
-        return _command_embed(
+        return _frontend_embed(
+            "command:usage",
             "Usage unavailable",
             "Usage data is currently unavailable. Please try again later.",
+            channel=channel,
+            user=user,
             color=discord.Color.orange(),
         )
     if not any(value is not None for value in summary.values()):
-        return _command_embed(
+        return _frontend_embed(
+            "command:usage",
             "Usage unavailable",
             "Usage data is currently unavailable. Please try again later.",
+            channel=channel,
+            user=user,
             color=discord.Color.orange(),
         )
-    embed = _command_embed("Usage", "Account usage reported by Codex.")
+    embed = _frontend_embed(
+        "command:usage",
+        "Usage",
+        "Account usage reported by Codex.",
+        channel=channel,
+        user=user,
+        context={
+            "lifetime_tokens": _format_count(summary.get("lifetimeTokens")),
+            "peak_daily_tokens": _format_count(summary.get("peakDailyTokens")),
+            "current_streak": _format_count(summary.get("currentStreakDays")),
+            "longest_streak": _format_count(summary.get("longestStreakDays")),
+            "longest_running_turn": _format_count(
+                summary.get("longestRunningTurnSec")
+            ),
+        },
+    )
     fields = (
         ("Lifetime tokens", _format_count(summary.get("lifetimeTokens"))),
         ("Peak daily tokens", _format_count(summary.get("peakDailyTokens"))),
@@ -530,19 +611,30 @@ def _usage_embed(result: dict[str, Any]) -> discord.Embed:
     return embed
 
 
-def _credits_embed(result: dict[str, Any]) -> discord.Embed:
+def _credits_embed(
+    result: dict[str, Any],
+    *,
+    channel: discord.abc.Messageable | None = None,
+    user: discord.abc.User | None = None,
+) -> discord.Embed:
     snapshot = result.get("rateLimits") if isinstance(result, dict) else None
     if not isinstance(snapshot, dict):
-        return _command_embed(
+        return _frontend_embed(
+            "command:credits",
             "Credits unavailable",
             "Credits data is currently unavailable. Please try again later.",
+            channel=channel,
+            user=user,
             color=discord.Color.orange(),
         )
     credits = snapshot.get("credits")
     if not isinstance(credits, dict):
-        return _command_embed(
+        return _frontend_embed(
+            "command:credits",
             "Credits unavailable",
             "Credits data is currently unavailable. Please try again later.",
+            channel=channel,
+            user=user,
             color=discord.Color.orange(),
         )
     balance = credits.get("balance")
@@ -550,11 +642,15 @@ def _credits_embed(result: dict[str, Any]) -> discord.Embed:
     if credits.get("unlimited") is True:
         balance_text = "Unlimited"
     balance_available = balance is not None or credits.get("unlimited") is True
-    embed = _command_embed(
+    embed = _frontend_embed(
+        "command:credits",
         "Credits" if balance_available else "Credits unavailable",
         "Current Codex credit information."
         if balance_available
         else "Credits data is currently unavailable. Please try again later.",
+        channel=channel,
+        user=user,
+        context={"balance": balance_text},
         color=discord.Color.blurple() if balance_available else discord.Color.orange(),
     )
     embed.add_field(name="Balance", value=balance_text, inline=True)
@@ -590,10 +686,17 @@ def _credits_embed(result: dict[str, Any]) -> discord.Embed:
     return embed
 
 
-def _login_required_embed() -> discord.Embed:
-    return _command_embed(
+def _login_required_embed(
+    *,
+    channel: discord.abc.Messageable | None = None,
+    user: discord.abc.User | None = None,
+) -> discord.Embed:
+    return _frontend_embed(
+        "label:login_required",
         "Login required",
         "Please use `/login` before starting or controlling a Codex request.",
+        channel=channel,
+        user=user,
         color=discord.Color.orange(),
     )
 
@@ -614,7 +717,7 @@ async def _require_login(interaction: discord.Interaction) -> bool:
         bot.codex.mark_server_authenticated(guild_id)
         logger.info("Granted cached Codex access to a server")
         return True
-    embed = _login_required_embed()
+    embed = _login_required_embed(channel=interaction.channel, user=interaction.user)
     if interaction.response.is_done():
         await interaction.followup.send(embed=embed, ephemeral=True)
     else:
@@ -622,12 +725,19 @@ async def _require_login(interaction: discord.Interaction) -> bool:
     return False
 
 
-async def _require_server_admin(interaction: discord.Interaction) -> bool:
+async def _require_server_admin(
+    interaction: discord.Interaction,
+    *,
+    message: str = "Only server administrators can approve or deny tool actions.",
+) -> bool:
     if _is_server_admin(interaction.user, interaction.channel):
         return True
-    embed = _command_embed(
+    embed = _frontend_embed(
+        "label:administrator_access_required",
         "Administrator access required",
-        "Only server administrators can approve or deny tool actions.",
+        message,
+        channel=interaction.channel,
+        user=interaction.user,
         color=discord.Color.orange(),
     )
     if interaction.response.is_done():
@@ -645,9 +755,19 @@ async def _send_command_failure(
         title,
         type(exc).__name__,
     )
-    embed = _command_embed(
+    command = title.removesuffix(" unavailable").strip().casefold()
+    command = {"voice": "mode"}.get(command, command)
+    target = (
+        f"command:{command}"
+        if command in COMMAND_TARGETS
+        else "label:request_failed"
+    )
+    embed = _frontend_embed(
+        target,
         title,
         _safe_error_reason(exc),
+        channel=interaction.channel,
+        user=interaction.user,
         color=discord.Color.orange(),
     )
     if interaction.response.is_done():
@@ -663,7 +783,9 @@ intents.message_content = True
 class TheiaBot(commands.Bot):
     def __init__(self) -> None:
         super().__init__(command_prefix=(), intents=intents, help_command=None)
+        self.customizations = FrontendCustomizationStore()
         self.codex = CodexAppServer()
+        self.codex.set_frontend_customizer(self.customizations)
         self._participating_threads: set[int] = set()
         self._known_channels: dict[int, discord.abc.Messageable] = {}
         self._retention_task: asyncio.Task[None] | None = None
@@ -836,7 +958,12 @@ async def codex_usage(interaction: discord.Interaction) -> None:
     await interaction.response.defer(ephemeral=True)
     try:
         result = await bot.codex.usage()
-        await interaction.followup.send(embed=_usage_embed(result), ephemeral=True)
+        await interaction.followup.send(
+            embed=_usage_embed(
+                result, channel=interaction.channel, user=interaction.user
+            ),
+            ephemeral=True,
+        )
     except Exception as exc:  # noqa: BLE001 - keep every command failure visible
         await _send_command_failure(interaction, "Usage unavailable", exc)
 
@@ -848,7 +975,12 @@ async def codex_credits(interaction: discord.Interaction) -> None:
     await interaction.response.defer(ephemeral=True)
     try:
         result = await bot.codex.credits()
-        await interaction.followup.send(embed=_credits_embed(result), ephemeral=True)
+        await interaction.followup.send(
+            embed=_credits_embed(
+                result, channel=interaction.channel, user=interaction.user
+            ),
+            ephemeral=True,
+        )
     except Exception as exc:  # noqa: BLE001 - keep every command failure visible
         await _send_command_failure(interaction, "Credits unavailable", exc)
 
@@ -877,9 +1009,12 @@ async def codex_mode(
                 else "Voice receive support is unavailable in this installation."
             )
             await interaction.followup.send(
-                embed=_command_embed(
+                embed=_frontend_embed(
+                    "command:mode",
                     "Voice unavailable",
                     reason,
+                    channel=interaction.channel,
+                    user=interaction.user,
                     color=discord.Color.orange(),
                 ),
                 ephemeral=True,
@@ -889,9 +1024,12 @@ async def codex_mode(
         voice_channel = getattr(voice_state, "channel", None)
         if voice_channel is None or interaction.channel is None:
             await interaction.followup.send(
-                embed=_command_embed(
+                embed=_frontend_embed(
+                    "command:mode",
                     "Voice unavailable",
                     "Join a voice channel before selecting voice mode.",
+                    channel=interaction.channel,
+                    user=interaction.user,
                     color=discord.Color.orange(),
                 ),
                 ephemeral=True,
@@ -913,10 +1051,13 @@ async def codex_mode(
             await _send_command_failure(interaction, "Voice unavailable", exc)
             return
         await interaction.followup.send(
-            embed=_command_embed(
+            embed=_frontend_embed(
+                "command:mode",
                 "Voice mode enabled",
                 "Listening in your voice channel. Text messages in this channel "
                 "remain available, and responses will be spoken back.",
+                channel=interaction.channel,
+                user=interaction.user,
                 color=discord.Color.green(),
             ),
             ephemeral=True,
@@ -930,9 +1071,12 @@ async def codex_mode(
         await _send_command_failure(interaction, "Mode unavailable", exc)
         return
     await interaction.followup.send(
-        embed=_command_embed(
+        embed=_frontend_embed(
+            "command:mode",
             "Text mode enabled",
             "Voice listening is disabled for this Discord session.",
+            channel=interaction.channel,
+            user=interaction.user,
             color=discord.Color.green(),
         ),
         ephemeral=True,
@@ -981,9 +1125,13 @@ async def codex_model(interaction: discord.Interaction, model: str) -> None:
         await _send_command_failure(interaction, "Model unavailable", exc)
         return
     await interaction.followup.send(
-        embed=_command_embed(
+        embed=_frontend_embed(
+            "command:model",
             "Model selected",
             f"Codex will use `{model}` for new requests.",
+            channel=interaction.channel,
+            user=interaction.user,
+            context={"model": model},
             color=discord.Color.green(),
         ),
         ephemeral=True,
@@ -1021,12 +1169,15 @@ async def codex_personality(
     await interaction.response.defer(ephemeral=True)
     if file is None and name is None:
         await interaction.followup.send(
-            embed=_command_embed(
+            embed=_frontend_embed(
+                "command:personality",
                 "Personality",
                 "Use `/personality file:<markdown-or-text> name:<name>` to upload "
                 "and activate a profile. Use `/personality name:<name>` to switch "
                 "profiles, or `/personality name:none` to clear the active profile. "
                 "A file must be paired with a name.",
+                channel=interaction.channel,
+                user=interaction.user,
             ),
             ephemeral=True,
         )
@@ -1039,9 +1190,12 @@ async def codex_personality(
         )
     except CodexAppServerError as exc:
         await interaction.followup.send(
-            embed=_command_embed(
+            embed=_frontend_embed(
+                "command:personality",
                 "Personality unavailable",
                 _safe_error_reason(exc),
+                channel=interaction.channel,
+                user=interaction.user,
                 color=discord.Color.orange(),
             ),
             ephemeral=True,
@@ -1061,7 +1215,15 @@ async def codex_personality(
         description = f"Personality `{selected}` is now active."
         title = "Personality selected"
     await interaction.followup.send(
-        embed=_command_embed(title, description, color=discord.Color.green()),
+        embed=_frontend_embed(
+            "command:personality",
+            title,
+            description,
+            channel=interaction.channel,
+            user=interaction.user,
+            context={"personality": selected or "none"},
+            color=discord.Color.green(),
+        ),
         ephemeral=True,
     )
 
@@ -1075,11 +1237,14 @@ async def codex_approve(interaction: discord.Interaction) -> None:
     await interaction.response.defer(ephemeral=True)
     active = bot.codex.resolve_approval(interaction.user.id, True, interaction.channel)
     await interaction.followup.send(
-        embed=_command_embed(
+        embed=_frontend_embed(
+            "command:approve",
             "Approved" if active else "No pending approval",
             "The active request was approved."
             if active
             else "There is no pending approval request active.",
+            channel=interaction.channel,
+            user=interaction.user,
             color=discord.Color.green() if active else discord.Color.orange(),
         ),
         ephemeral=True,
@@ -1095,11 +1260,14 @@ async def codex_deny(interaction: discord.Interaction) -> None:
     await interaction.response.defer(ephemeral=True)
     active = bot.codex.resolve_approval(interaction.user.id, False, interaction.channel)
     await interaction.followup.send(
-        embed=_command_embed(
+        embed=_frontend_embed(
+            "command:deny",
             "Denied" if active else "No pending approval",
             "The active request was denied."
             if active
             else "There is no pending approval request active.",
+            channel=interaction.channel,
+            user=interaction.user,
             color=discord.Color.red() if active else discord.Color.orange(),
         ),
         ephemeral=True,
@@ -1116,11 +1284,14 @@ async def codex_stop(interaction: discord.Interaction) -> None:
             session_key(interaction.channel, interaction.user.id)
         )
         await interaction.followup.send(
-            embed=_command_embed(
+            embed=_frontend_embed(
+                "command:stop",
                 "Stopped" if stopped else "No active request",
                 "The active Codex request was stopped."
                 if stopped
                 else "There is no active Codex request.",
+                channel=interaction.channel,
+                user=interaction.user,
                 color=discord.Color.orange() if not stopped else discord.Color.green(),
             )
         )
@@ -1139,9 +1310,12 @@ async def codex_undo(interaction: discord.Interaction) -> None:
         await _send_command_failure(interaction, "Undo unavailable", exc)
         return
     await interaction.followup.send(
-        embed=_command_embed(
+        embed=_frontend_embed(
+            "command:undo",
             "Last response undone",
             "The most recent Codex turn was removed from this conversation.",
+            channel=interaction.channel,
+            user=interaction.user,
             color=discord.Color.green(),
         ),
         ephemeral=True,
@@ -1204,9 +1378,12 @@ async def codex_skill(interaction: discord.Interaction, skill_name: str) -> None
             await bot.codex.refresh_skills(force=True)
     except Exception as exc:  # noqa: BLE001 - keep every command failure visible
         await interaction.response.send_message(
-            embed=_command_embed(
+            embed=_frontend_embed(
+                "command:skill",
                 "Skill unavailable",
                 _safe_error_reason(exc),
+                channel=interaction.channel,
+                user=interaction.user,
                 color=discord.Color.orange(),
             ),
             ephemeral=True,
@@ -1216,9 +1393,12 @@ async def codex_skill(interaction: discord.Interaction, skill_name: str) -> None
     canonical = known.get(skill_name.casefold())
     if canonical is None:
         await interaction.response.send_message(
-            embed=_command_embed(
+            embed=_frontend_embed(
+                "command:skill",
                 "Skill unavailable",
                 "That skill is not available to this Codex session.",
+                channel=interaction.channel,
+                user=interaction.user,
                 color=discord.Color.orange(),
             ),
             ephemeral=True,
@@ -1236,6 +1416,128 @@ async def codex_skill(interaction: discord.Interaction, skill_name: str) -> None
         context=context,
         request_id=f"interaction:{interaction.id}",
         speak_text=_voice_speak_callback(key),
+    )
+
+
+async def customization_target_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    return [
+        app_commands.Choice(name=display[:100], value=value)
+        for display, value in bot.customizations.targets(current)[:25]
+    ]
+
+
+async def customization_element_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    return [
+        app_commands.Choice(name=display, value=value)
+        for display, value in bot.customizations.elements(current)
+    ]
+
+
+@bot.tree.command(name="customize", description="Customize the Discord frontend")
+@app_commands.describe(
+    target="A command such as /usage, or a frontend label such as Thinking",
+    element="The title, content, color, or label to customize",
+    value="The value or template; use `default` to reset it",
+)
+@app_commands.autocomplete(
+    target=customization_target_autocomplete,
+    element=customization_element_autocomplete,
+)
+async def codex_customize(
+    interaction: discord.Interaction,
+    target: str | None = None,
+    element: str | None = None,
+    value: str | None = None,
+) -> None:
+    await bot.presence.touch()
+    if getattr(interaction.guild, "id", None) is None:
+        await interaction.response.send_message(
+            embed=_frontend_embed(
+                "command:customize",
+                "Server only",
+                "Frontend customization is available only inside a Discord server.",
+                channel=interaction.channel,
+                user=interaction.user,
+                color=discord.Color.orange(),
+            ),
+            ephemeral=True,
+        )
+        return
+    if not await _require_server_admin(
+        interaction,
+        message="Only server administrators can customize the Discord frontend.",
+    ):
+        return
+    if target is None and element is None and value is None:
+        await interaction.response.send_message(
+            embed=_frontend_embed(
+                "command:customize",
+                "Customize the Discord frontend",
+                (
+                    "Use `/customize target:<command-or-label> "
+                    "element:<title|content|color|label> value:<value>`.\n\n"
+                    "Targets can be commands such as `/usage` or labels such as "
+                    "`Thinking`. Values support Markdown and placeholders: "
+                    f"{bot.customizations.placeholder_help()}.\n\n"
+                    "Use `default` as the value to reset a customization."
+                ),
+                channel=interaction.channel,
+                user=interaction.user,
+            ),
+            ephemeral=True,
+        )
+        return
+    if not target or not element or value is None:
+        await interaction.response.send_message(
+            embed=_frontend_embed(
+                "command:customize",
+                "Customization incomplete",
+                "Provide target, element, and value together.",
+                channel=interaction.channel,
+                user=interaction.user,
+                color=discord.Color.orange(),
+            ),
+            ephemeral=True,
+        )
+        return
+    guild_id = interaction.guild.id
+    try:
+        canonical, selected_element, reset = bot.customizations.set(
+            guild_id, target, element, value
+        )
+    except CustomizationError as exc:
+        await interaction.response.send_message(
+            embed=_frontend_embed(
+                "command:customize",
+                "Customization unavailable",
+                str(exc),
+                channel=interaction.channel,
+                user=interaction.user,
+                color=discord.Color.orange(),
+            ),
+            ephemeral=True,
+        )
+        return
+    target_name = display_target(canonical)
+    description = (
+        f"Reset the {selected_element} customization for {target_name}."
+        if reset
+        else f"Updated the {selected_element} customization for {target_name}."
+    )
+    await interaction.response.send_message(
+        embed=_frontend_embed(
+            "command:customize",
+            "Customization reset" if reset else "Customization updated",
+            description,
+            channel=interaction.channel,
+            user=interaction.user,
+            color=discord.Color.green(),
+        ),
+        ephemeral=True,
     )
 
 

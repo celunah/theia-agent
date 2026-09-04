@@ -100,6 +100,7 @@ class CommandSurfaceTests(unittest.TestCase):
                 "personality",
                 "model",
                 "mode",
+                "customize",
             },
         )
         self.assertEqual(main.bot.command_prefix, ())
@@ -419,8 +420,203 @@ class CommandSurfaceTests(unittest.TestCase):
             [("Test model (gpt-test)", "gpt-test")],
         )
 
+    def test_frontend_customization_renders_templates_per_server(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = main.FrontendCustomizationStore(Path(directory) / "frontend.json")
+            store.set(
+                42,
+                "/usage",
+                "title",
+                "Usage for {server}",
+            )
+            store.set(42, "usage", "content", "Balance for {user}: {text}")
+
+            self.assertEqual(
+                store.render(
+                    42,
+                    "command:usage",
+                    "title",
+                    "Usage",
+                    context={"server": "Example", "user": "Alice"},
+                ),
+                "Usage for Example",
+            )
+            self.assertEqual(
+                store.render(
+                    42,
+                    "usage",
+                    "content",
+                    "Account usage reported by Codex.",
+                    context={"server": "Example", "user": "Alice"},
+                ),
+                "Balance for Alice: Account usage reported by Codex.",
+            )
+            self.assertEqual(
+                store.render(7, "usage", "title", "Usage"),
+                "Usage",
+            )
+
+    def test_frontend_customization_persists_separately_and_can_reset(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "frontend.json"
+            store = main.FrontendCustomizationStore(path)
+            store.set(42, "label:thinking", "label", "Working")
+            self.assertEqual(store.color(42, "label:thinking", 0x123456), 0x123456)
+
+            restarted = main.FrontendCustomizationStore(path)
+            self.assertEqual(
+                restarted.render(42, "thinking", "label", "Thinking"),
+                "Working",
+            )
+            _, _, reset = restarted.set(42, "thinking", "label", "default")
+            self.assertTrue(reset)
+            self.assertEqual(
+                restarted.render(42, "thinking", "label", "Thinking"),
+                "Thinking",
+            )
+
+    def test_frontend_customization_validates_placeholders_and_colors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = main.FrontendCustomizationStore(Path(directory) / "frontend.json")
+            with self.assertRaisesRegex(main.CustomizationError, "Unknown placeholder"):
+                store.set(42, "usage", "title", "{secret}")
+            with self.assertRaisesRegex(main.CustomizationError, "hex value"):
+                store.set(42, "usage", "color", "not-a-color")
+            store.set(42, "usage", "color", "#000000")
+            self.assertEqual(store.color(42, "usage", 0xFFFFFF), 0)
+
+    def test_customization_autocomplete_includes_commands_and_labels(self) -> None:
+        choices = asyncio.run(
+            main.customization_target_autocomplete(SimpleNamespace(), "think")
+        )
+        self.assertEqual(
+            [(choice.name, choice.value) for choice in choices],
+            [("Label: Thinking", "label:thinking")],
+        )
+
+    def test_frontend_embed_customization_does_not_change_default_without_server(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = main.FrontendCustomizationStore(Path(directory) / "frontend.json")
+            store.set(42, "usage", "title", "Custom usage")
+            default = main._command_embed(
+                "Usage",
+                "Account usage reported by Codex.",
+                target="command:usage",
+                guild_id=7,
+                customizer=store,
+            )
+            customized = main._command_embed(
+                "Usage",
+                "Account usage reported by Codex.",
+                target="command:usage",
+                guild_id=42,
+                customizer=store,
+            )
+
+        self.assertEqual(default.title, "Usage")
+        self.assertEqual(customized.title, "Custom usage")
 
 class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_customization_command_is_admin_only_and_server_scoped(self) -> None:
+        guild = SimpleNamespace(id=42, name="Example")
+        channel = SimpleNamespace(id=7, name="general", guild=guild)
+        response = SimpleNamespace(
+            is_done=lambda: False,
+            send_message=AsyncMock(),
+        )
+        interaction = SimpleNamespace(
+            guild=guild,
+            channel=channel,
+            response=response,
+            user=SimpleNamespace(
+                id=9,
+                name="member",
+                display_name="Member",
+                guild_permissions=SimpleNamespace(administrator=False),
+            ),
+        )
+
+        await main.codex_customize.callback(
+            interaction,
+            "usage",
+            "title",
+            "Should not save",
+        )
+
+        embed = response.send_message.await_args.kwargs["embed"]
+        self.assertEqual(embed.title, "Administrator access required")
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = main.FrontendCustomizationStore(Path(directory) / "frontend.json")
+            admin_response = SimpleNamespace(
+                is_done=lambda: False,
+                send_message=AsyncMock(),
+            )
+            admin = SimpleNamespace(
+                guild=guild,
+                channel=channel,
+                response=admin_response,
+                user=SimpleNamespace(
+                    id=1,
+                    name="admin",
+                    display_name="Admin",
+                    guild_permissions=SimpleNamespace(administrator=True),
+                ),
+            )
+            with patch.object(main.bot, "customizations", store):
+                await main.codex_customize.callback(
+                    admin,
+                    "/usage",
+                    "title",
+                    "Usage for {server}",
+                )
+
+            self.assertEqual(
+                store.render(
+                    42,
+                    "usage",
+                    "title",
+                    "Usage",
+                    context={"server": "Example"},
+                ),
+                "Usage for Example",
+            )
+
+    async def test_status_customization_changes_only_discord_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = main.FrontendCustomizationStore(Path(directory) / "frontend.json")
+            store.set(42, "thinking", "label", "Working ({status})")
+            store.set(42, "intermediate", "content", "Update: {text}")
+            calls: list[dict] = []
+
+            async def send(**kwargs):
+                calls.append(kwargs)
+                return _Message()
+
+            delivery = main._ResponseDelivery(
+                send,
+                {},
+                owner_id=7,
+                customizer=store,
+                guild_id=42,
+            )
+            await delivery.on_event("tool_activity", {})
+            self.assertEqual(calls[0]["content"], "-# Working (Thinking)")
+            await delivery.on_event(
+                "item_completed",
+                {
+                    "type": "agentMessage",
+                    "phase": "commentary",
+                    "text": "Checking the request.",
+                },
+            )
+
+            assert delivery.status_message is not None
+            self.assertEqual(
+                delivery.status_message.edits[-1]["content"],
+                "-# Update: Checking the request.",
+            )
+
     def test_explicit_codex_cli_override_is_used(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

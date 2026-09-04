@@ -129,15 +129,37 @@ class _JsonModal(discord.ui.Modal):
 
 class _FormView(discord.ui.View):
     def __init__(
-        self, user_id: int | None, *, prompt: str, timeout: float = 300
+        self,
+        user_id: int | None,
+        *,
+        prompt: str,
+        channel: discord.abc.Messageable | None = None,
+        customizer: Any | None = None,
+        timeout: float = 300,
     ) -> None:
         super().__init__(timeout=timeout)
         self.user_id = user_id
         self.prompt = prompt
+        self.guild_id = getattr(getattr(channel, "guild", None), "id", None)
+        self.customizer = customizer
         self.value: Any = None
-        answer = discord.ui.Button(label="Answer", style=discord.ButtonStyle.primary)
+        answer = discord.ui.Button(
+            label=_frontend_label(
+                customizer,
+                self.guild_id,
+                "label:answer_button",
+                "Answer",
+            ),
+            style=discord.ButtonStyle.primary,
+        )
         decline = discord.ui.Button(
-            label="Decline", style=discord.ButtonStyle.secondary
+            label=_frontend_label(
+                customizer,
+                self.guild_id,
+                "label:decline_button",
+                "Decline",
+            ),
+            style=discord.ButtonStyle.secondary,
         )
 
         async def answer_callback(interaction: discord.Interaction) -> None:
