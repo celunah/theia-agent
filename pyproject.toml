@@ -1,17 +1,108 @@
 [project]
 name = "theia-agent"
 version = "0.1.0"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
     "discord.py",
     "discord-ext-voice-recv>=0.5.2a179",
     "python-dotenv",
+    "tomli>=2.0.1",
 ]
 
 [dependency-groups]
 dev = [
+    "docstr-coverage",
+    "poethepoet>=0.48.0",
+    "psutil",
+    "pylint",
     "pytest",
+    "pytest-testmon",
+    "pytest-xdist",
+    "pyrefly>=1.2.0",
+    "ruff==0.16.0",
+    "types-psutil",
+    "typing-extensions>=4.3.0",
 ]
 
 [tool.celtest]
 display_name = "Theia Agent"
+
+[tool.ruff.lint]
+ignore = [
+    # The project supports both legacy and PEP 604 annotation spellings.
+    "UP007",
+    "UP045",
+    # Keep the existing import ordering used by the application and Celtest.
+    "I001",
+]
+
+[tool.pylint.format]
+max-line-length = 120
+
+[tool.pylint.main]
+disable = [
+    # Discord integration and its tests intentionally inspect private state.
+    "W0212",
+    # The application is fail-safe around external Discord/Codex boundaries.
+    "W0718",
+    # These limits are not meaningful for the orchestration layer or fixtures.
+    "R0902",
+    "R0903",
+    "R0904",
+    "R0911",
+    "R0912",
+    "R0913",
+    "R0914",
+    "R0915",
+    "R0916",
+    "R0917",
+    "R1702",
+    "C0302",
+    # Documentation coverage is reported separately while this tree is being
+    # documented incrementally.
+    "C0114",
+    "C0115",
+    "C0116",
+    # Test doubles are assembled per test instead of through constructors.
+    "W0201",
+    # Discord callback signatures are prescribed by discord.py.
+    "W0221",
+    # Celtest updates its shared execution state through a module-level flag.
+    "W0603",
+]
+
+[tool.pylint.similarities]
+min-similarity-lines = 20
+
+[tool.pyrefly]
+project-includes = [
+    "theia",
+    "scripts",
+    "celtest.py",
+    "conftest.py",
+    "main.py",
+    "test_main.py",
+    "test_ci.py",
+]
+search-path = ["."]
+python-version = "3.10"
+min-severity = "warn"
+
+[tool.poe.tasks]
+start = "python main.py"
+test = "pytest -v . -n 2 --dist loadfile"
+test_basic = "pytest -v ."
+test_changed = "pytest -v . --testmon"
+types = "pyrefly check"
+ruff = "ruff check"
+format = "ruff format --check"
+lint = "pylint -j 4 theia scripts main.py celtest.py conftest.py test_main.py test_ci.py"
+lint_basic = "pylint theia scripts main.py celtest.py conftest.py test_main.py test_ci.py"
+
+[tool.poe.tasks.ci]
+sequence = ["ruff", "format", "lint", "types", "test"]
+ignore_fail = "return_non_zero"
+
+[tool.poe.tasks.ci_basic]
+sequence = ["ruff", "format", "lint_basic", "types", "test_basic"]
+ignore_fail = "return_non_zero"

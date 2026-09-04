@@ -1,0 +1,52 @@
+name: Theia Agent CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python-checks:
+    name: Python checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Sync dependencies
+        run: python3 scripts/ci_warnings.py -- uv sync --dev
+
+      - name: Run Ruff checks
+        run: python3 scripts/ci_warnings.py -- uv run poe ruff
+
+      - name: Verify formatting
+        run: python3 scripts/ci_warnings.py -- uv run poe format
+
+      - name: Run Pylint
+        run: python3 scripts/ci_warnings.py -- uv run poe lint
+
+      - name: Type check
+        run: python3 scripts/ci_warnings.py -- uv run poe types
+
+      - name: Check docstring coverage
+        run: |
+          python3 scripts/ci_warnings.py -- uv run docstr-coverage -i -P --fail-under 80 theia scripts main.py celtest.py conftest.py test_main.py test_ci.py || {
+            echo "::warning::Docstring coverage is below 80%. Try adding more missing docstrings."
+          }
+
+      - name: Run unit tests
+        run: python3 scripts/ci_warnings.py -- uv run poe test
+
+      - name: Import smoke test
+        run: python3 scripts/ci_warnings.py -- uv run python -c "import theia; print(dir(theia))"

@@ -33,7 +33,6 @@ import ast
 import re
 import sys
 import time
-import tomllib
 import warnings
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -41,6 +40,11 @@ from collections.abc import Callable, Generator, Mapping
 from typing import Optional, ParamSpec, Protocol, TypeVar, cast
 
 import pytest
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
+    import tomli as tomllib
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -691,7 +695,7 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:
-    """Print the authoritative Celune application header before tests run."""
+    """Print the authoritative project header before tests run."""
     config = session.config
     config.option.no_header = True
     config.option.no_summary = True
