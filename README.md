@@ -79,6 +79,60 @@ Start the bot with:
 uv run python main.py
 ```
 
+### Container deployment
+
+The repository includes a Docker-compatible image and a Compose definition.
+They work with Docker or Podman because the setup uses a standard Dockerfile
+and does not require an exposed port; Theia connects to Discord outbound.
+
+Create the ignored environment file and set at least `TOKEN`:
+
+```bash
+cp .env.example .env
+```
+
+Build and start Theia with Docker Compose:
+
+```bash
+docker compose up --build -d
+docker compose logs -f theia
+```
+
+Podman Compose uses the same commands:
+
+```bash
+podman compose up --build -d
+podman compose logs -f theia
+```
+
+The `theia-data` volume persists Theia's private Codex authentication,
+sessions, attachments, memories, personalities, and skills. The default
+`theia-workspace` volume is the administrator Codex working directory. To use
+a host directory instead, replace that volume in `compose.yaml` with
+`./workspace:/workspace`. Set `THEIA_SAFE_WORKSPACE_ROOTS=/workspace` in `.env`
+only when regular users should receive read-only access to that directory.
+
+The first `/login` in a new deployment may require Codex's device-code flow;
+subsequent container replacements reuse the authentication stored in
+`theia-data`. Keep `.env` out of image builds and source control. The image
+also includes `ffmpeg` and the system Opus library for the optional voice mode.
+
+For a direct engine invocation, use the same image and mount the persistent
+volumes explicitly:
+
+```bash
+docker build --build-arg THEIA_COMMIT="$(git rev-parse --short=7 HEAD)" -t theia-agent:1.0.1 .
+docker run -d --name theia-agent --restart unless-stopped \
+  --env-file .env \
+  -v theia-data:/data \
+  -v theia-workspace:/workspace \
+  theia-agent:1.0.1
+```
+
+Replace `docker` with `podman` for a Podman deployment. The image runs as a
+non-root `theia` user. Rootless Podman users who bind-mount a host workspace
+may need to adjust the host directory ownership or use a named volume.
+
 An optional one-file executable can be built with Nuitka:
 
 ```bash
