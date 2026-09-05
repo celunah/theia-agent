@@ -1686,6 +1686,7 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
                 interaction,
                 "Create a thread for this request.",
             )
+            await asyncio.sleep(0.05)
 
         handle.assert_awaited_once()
         await_args = cast(Any, handle.await_args)
@@ -2292,8 +2293,63 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
             patch("theia.bot.handle_request", new=AsyncMock()) as handle,
         ):
             await _handle_voice_transcript(session, "speaker", "hello")
+            await asyncio.sleep(0.05)
 
         self.assertFalse(cast(Any, handle.await_args).kwargs["allow_tools"])
+
+    async def test_scheduled_requests_run_concurrently(self) -> None:
+        """Keep multiple independent agentic requests active at the same time."""
+        test_bot = main.TheiaBot()
+        started: set[str] = set()
+        release = asyncio.Event()
+
+        async def request(name: str) -> None:
+            started.add(name)
+            await release.wait()
+
+        try:
+            test_bot.schedule_request(request("first"))
+            test_bot.schedule_request(request("second"))
+            for _ in range(20):
+                if started == {"first", "second"}:
+                    break
+                await asyncio.sleep(0)
+            self.assertEqual(started, {"first", "second"})
+        finally:
+            release.set()
+            await test_bot._cancel_request_tasks()
+
+    async def test_btw_acknowledges_before_agentic_request_completes(self) -> None:
+        """Do not hold the slash-command callback open for the Codex turn."""
+        source = _Channel()
+        response = SimpleNamespace(defer=AsyncMock())
+        interaction = SimpleNamespace(
+            id=56,
+            channel=source,
+            response=response,
+            followup=SimpleNamespace(send=AsyncMock()),
+            user=SimpleNamespace(
+                id=7, guild_permissions=SimpleNamespace(administrator=False)
+            ),
+        )
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def request(*_args: Any, **_kwargs: Any) -> None:
+            started.set()
+            await release.wait()
+
+        with (
+            patch("theia.bot._require_login", new=AsyncMock(return_value=True)),
+            patch("theia.bot.handle_request", new=request),
+        ):
+            await cast(Any, main.codex_btw.callback)(interaction, "keep working")
+            self.assertFalse(started.is_set())
+            await asyncio.wait_for(started.wait(), timeout=1)
+            self.assertFalse(release.is_set())
+
+        release.set()
+        await main.bot._cancel_request_tasks()
 
     async def test_attachments_are_cached_as_codex_local_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

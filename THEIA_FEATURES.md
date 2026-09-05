@@ -52,6 +52,8 @@ Theia also:
 - Unarchives an archived session when the user returns.
 - Creates a new session if the old one was deleted.
 - Supports `/undo` through `thread/rollback`.
+- Runs independent message, slash-command, and voice turns concurrently; a
+  long-running agentic task does not hold up other Discord requests.
 
 Normal answers are plain text. Long messages use Discord buttons, emoji reactions as fallback, and finally message splitting if neither is available.
 

@@ -419,6 +419,31 @@ class TestLocalCodexBoundary(unittest.IsolatedAsyncioTestCase):
         ):
             await self._ask(server, "please wait", session_key="timeout")
 
+    async def test_independent_sessions_run_concurrently(self) -> None:
+        """Verify one active Codex turn does not block another Discord session."""
+        server = await self._server(
+            scenario="timeout",
+            extra_environment={"CODEX_TURN_TIMEOUT": "5"},
+        )
+        first = asyncio.create_task(
+            self._ask(server, "keep waiting", session_key="concurrent-first")
+        )
+        await self._wait_for(
+            lambda: server.status("concurrent-first")["turn_id"] is not None
+        )
+        second = asyncio.create_task(
+            self._ask(server, "keep waiting", session_key="concurrent-second")
+        )
+        await self._wait_for(
+            lambda: server.status("concurrent-second")["turn_id"] is not None
+        )
+
+        self.assertTrue(await server.interrupt("concurrent-first"))
+        self.assertTrue(await server.interrupt("concurrent-second"))
+        for task in (first, second):
+            with self.assertRaisesRegex(main.CodexAppServerError, "fake interruption"):
+                await task
+
     async def test_eof_and_process_crashes_release_active_turns(self) -> None:
         """Verify graceful EOF and abnormal child exit wake active callers."""
         eof_server = await self._server(scenario="eof")

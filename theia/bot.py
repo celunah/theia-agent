@@ -7,7 +7,7 @@ import re
 import subprocess
 import sys
 import time
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Coroutine, Iterable
 from contextlib import asynccontextmanager
 from typing import Any, TypeGuard, cast
 
@@ -1060,6 +1060,7 @@ class TheiaBot(commands.Bot):
         self.codex.set_frontend_customizer(self.customizations)
         self._participating_threads: set[int] = set()
         self._known_channels: dict[int, Any] = {}
+        self._request_tasks: set[asyncio.Task[Any]] = set()
         self._restart_task: asyncio.Task[None] | None = None
         self._retention_task: asyncio.Task[None] | None = None
         self.presence = PresenceManager(self._change_presence_when_ready)
@@ -1067,6 +1068,35 @@ class TheiaBot(commands.Bot):
             transcribe=self.codex.transcribe_audio,
             synthesize=self.codex.synthesize_response,
         )
+
+    def schedule_request(self, coroutine: Coroutine[Any, Any, None]) -> None:
+        """Run one agentic request independently of its Discord event callback."""
+        task = asyncio.create_task(coroutine)
+        self._request_tasks.add(task)
+        task.add_done_callback(self._request_task_done)
+
+    def _request_task_done(self, task: asyncio.Task[Any]) -> None:
+        self._request_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            error = task.exception()
+        except asyncio.InvalidStateError:
+            return
+        if error is not None:
+            logger.error(
+                "Background Theia request failed (error=%s)",
+                type(error).__name__,
+            )
+
+    async def _cancel_request_tasks(self) -> None:
+        """Stop agentic requests before shared Codex and Discord resources close."""
+        tasks = tuple(self._request_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._request_tasks.clear()
 
     async def _change_presence_when_ready(self, **kwargs: Any) -> None:
         """Defer presence changes until Discord has established the gateway."""
@@ -1084,6 +1114,7 @@ class TheiaBot(commands.Bot):
 
     async def close(self) -> None:
         """Stop background services and close Discord and Codex resources in order."""
+        await self._cancel_request_tasks()
         if self._retention_task is not None:
             self._retention_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -1227,6 +1258,22 @@ async def _handle_voice_transcript(
                         allowed_mentions=discord.AllowedMentions.none(),
                     )
                 return
+    bot.schedule_request(
+        _run_voice_request(
+            session,
+            prompt,
+            allow_tools=allow_tools,
+        )
+    )
+
+
+async def _run_voice_request(
+    session: VoiceSession,
+    prompt: str,
+    *,
+    allow_tools: bool,
+) -> None:
+    """Run voice input outside the receive callback so transcription stays responsive."""
     context = await _channel_context(session.text_channel)
     await handle_request(
         session.text_channel.send,
@@ -1727,35 +1774,52 @@ async def codex_btw(
     if not await _require_login(interaction):
         return
     await interaction.response.defer()
-    source_channel = interaction.channel
-    response_channel = await _maybe_create_response_thread(source_channel, prompt)
-    if response_channel is None:
-        response_channel = source_channel
-    if _is_thread(response_channel):
-        await _name_new_response_thread(response_channel, prompt)
-        bot._participating_threads.add(response_channel.id)
-        bot.codex.mark_thread_participating(response_channel.id)
-    key = session_key(response_channel, interaction.user.id)
-    context = await _channel_context(interaction.channel)
-    send_kwargs: dict[str, Any] = {}
-    if response_channel is not source_channel and _is_thread(response_channel):
-        # Webhook follow-ups can target the newly-created thread while keeping
-        # the interaction acknowledgement valid.
-        send_kwargs["thread"] = response_channel
-    await handle_request(
-        interaction.followup.send,
-        prompt,
-        channel=response_channel,
-        user_id=interaction.user.id,
-        user=interaction.user,
-        attachments=(file,) if file is not None else (),
-        allow_tools=_is_server_admin(interaction.user, response_channel),
-        context=context,
-        request_id=f"interaction:{interaction.id}",
-        speak_text=_voice_speak_callback(key),
-        use_webhook_thread=True,
-        **send_kwargs,
-    )
+    bot.schedule_request(_run_btw_request(interaction, prompt, file))
+
+
+async def _run_btw_request(
+    interaction: discord.Interaction,
+    prompt: str,
+    file: discord.Attachment | None,
+) -> None:
+    """Prepare and run a slash-command request outside Discord's callback task."""
+    try:
+        source_channel = interaction.channel
+        response_channel = await _maybe_create_response_thread(source_channel, prompt)
+        if response_channel is None:
+            response_channel = source_channel
+        if _is_thread(response_channel):
+            await _name_new_response_thread(response_channel, prompt)
+            bot._participating_threads.add(response_channel.id)
+            bot.codex.mark_thread_participating(response_channel.id)
+        key = session_key(response_channel, interaction.user.id)
+        context = await _channel_context(interaction.channel)
+        send_kwargs: dict[str, Any] = {}
+        if response_channel is not source_channel and _is_thread(response_channel):
+            # Webhook follow-ups can target the newly-created thread while keeping
+            # the interaction acknowledgement valid.
+            send_kwargs["thread"] = response_channel
+        await handle_request(
+            interaction.followup.send,
+            prompt,
+            channel=response_channel,
+            user_id=interaction.user.id,
+            user=interaction.user,
+            attachments=(file,) if file is not None else (),
+            allow_tools=_is_server_admin(interaction.user, response_channel),
+            context=context,
+            request_id=f"interaction:{interaction.id}",
+            speak_text=_voice_speak_callback(key),
+            use_webhook_thread=True,
+            **send_kwargs,
+        )
+    except Exception as exc:  # noqa: BLE001 - a deferred interaction must resolve
+        logger.error(
+            "Background /btw request failed (error=%s)",
+            type(exc).__name__,
+        )
+        with contextlib.suppress(Exception):
+            await _send_command_failure(interaction, "Request unavailable", exc)
 
 
 async def skill_autocomplete(
@@ -1817,18 +1881,41 @@ async def codex_skill(interaction: discord.Interaction, skill_name: str) -> None
         return
     await interaction.response.defer()
     key = session_key(interaction.channel, interaction.user.id)
-    context = await _channel_context(interaction.channel)
-    await handle_request(
-        interaction.followup.send,
-        f"${canonical}",
-        channel=interaction.channel,
-        user_id=interaction.user.id,
-        user=interaction.user,
-        allow_tools=_is_server_admin(interaction.user, interaction.channel),
-        context=context,
-        request_id=f"interaction:{interaction.id}",
-        speak_text=_voice_speak_callback(key),
+    bot.schedule_request(
+        _run_skill_request(
+            interaction,
+            canonical,
+            key,
+        )
     )
+
+
+async def _run_skill_request(
+    interaction: discord.Interaction,
+    skill_name: str,
+    session_key_value: str,
+) -> None:
+    """Run a skill invocation outside the slash-command callback task."""
+    try:
+        context = await _channel_context(interaction.channel)
+        await handle_request(
+            interaction.followup.send,
+            f"${skill_name}",
+            channel=interaction.channel,
+            user_id=interaction.user.id,
+            user=interaction.user,
+            allow_tools=_is_server_admin(interaction.user, interaction.channel),
+            context=context,
+            request_id=f"interaction:{interaction.id}",
+            speak_text=_voice_speak_callback(session_key_value),
+        )
+    except Exception as exc:  # noqa: BLE001 - a deferred interaction must resolve
+        logger.error(
+            "Background /skill request failed (error=%s)",
+            type(exc).__name__,
+        )
+        with contextlib.suppress(Exception):
+            await _send_command_failure(interaction, "Skill unavailable", exc)
 
 
 async def customization_target_autocomplete(
@@ -2155,10 +2242,12 @@ async def on_message(message: discord.Message) -> None:
             allowed_mentions=discord.AllowedMentions.none(),
         )
         return
-    response_channel = await _maybe_create_response_thread(
-        message,
-        prompt,
-    )
+    bot.schedule_request(_run_message_request(message, prompt))
+
+
+async def _run_message_request(message: discord.Message, prompt: str) -> None:
+    """Prepare and run a message request outside the gateway event callback."""
+    response_channel = await _maybe_create_response_thread(message, prompt)
     if response_channel is None:
         response_channel = message.channel
     if response_channel is None:
