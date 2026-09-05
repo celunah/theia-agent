@@ -348,6 +348,8 @@ class CodexAppServer:
         self._turns: dict[str, _TurnState] = {}
         self._realtime_sessions: dict[str, _RealtimeState] = {}
         self._realtime_feature_enabled = False
+        self._realtime_model = os.getenv("THEIA_REALTIME_MODEL", "").strip()
+        self._realtime_voice = os.getenv("THEIA_REALTIME_VOICE", "").strip()
         self._models: tuple[dict[str, Any], ...] = ()
         self._models_loaded_at = 0.0
         self._provider_capabilities: dict[str, Any] | None = None
@@ -1207,12 +1209,10 @@ class CodexAppServer:
                 "outputModality": "audio",
                 "transport": {"type": "websocket"},
             }
-            configured_voice = os.getenv("THEIA_REALTIME_VOICE", "").strip()
-            if configured_voice:
-                params["voice"] = configured_voice
-            configured_model = os.getenv("THEIA_REALTIME_MODEL", "").strip()
-            if configured_model:
-                params["model"] = configured_model
+            if self._realtime_voice:
+                params["voice"] = self._realtime_voice
+            if self._realtime_model:
+                params["model"] = self._realtime_model
             try:
                 result = await self._request("thread/realtime/start", params)
                 session_id = result.get("realtimeSessionId")

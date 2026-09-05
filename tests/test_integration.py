@@ -252,6 +252,22 @@ class TestLocalCodexBoundary(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(main.CodexAppServerError, "unavailable"):
             await server.start_realtime_voice("disabled", False, on_event)
 
+    async def test_realtime_voice_passes_configured_model_and_voice(self) -> None:
+        """Verify configured Realtime model and voice cross the JSONL boundary."""
+        server = await self._server(
+            scenario="realtime-configured",
+            extra_environment={
+                "THEIA_REALTIME_MODEL": "realtime-model",
+                "THEIA_REALTIME_VOICE": "marin",
+            },
+        )
+
+        async def on_event(_event: str, _payload: dict[str, Any]) -> None:
+            return None
+
+        await server.start_realtime_voice("configured", False, on_event)
+        self.assertTrue(await server.stop_realtime_voice("configured"))
+
     async def test_intermediates_and_preambles_are_delivered_before_final_text(
         self,
     ) -> None:

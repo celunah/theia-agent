@@ -69,8 +69,9 @@ python scripts/configure.py
 ```
 
 It asks for text or voice mode, then collects the Discord token and (for voice
-mode) optional OpenAI-compatible STT/TTS URLs and service tokens. Leave both
-URLs blank to use Codex Realtime through the bundled Codex app-server. It writes
+mode) optional OpenAI-compatible STT/TTS URLs, service tokens, and voice
+parameters. Leave both URLs blank to configure Codex Realtime instead; the
+wizard then asks for its optional model and voice IDs. It writes
 the local ignored `.env` atomically. You can also create `.env` from
 `.env.example` and edit it manually.
 
@@ -200,6 +201,11 @@ TTS_FORMAT=mp3
 THEIA_REALTIME_MODEL=       # optional Codex Realtime model override
 THEIA_REALTIME_VOICE=       # optional Codex Realtime voice override
 ```
+
+The setup wizard writes the custom provider's STT model, TTS model, TTS voice,
+and TTS format, or the Realtime model and voice when using the bundled provider.
+Leave a Realtime value blank to let Codex choose its default. Advanced protocol
+aliases remain available through the corresponding environment variables.
 
 Voice mode also needs a system Opus library and `ffmpeg` on `PATH`. When both
 custom audio URLs are empty, Theia enables the experimental Codex Realtime

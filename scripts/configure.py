@@ -23,6 +23,8 @@ _ASSIGNMENT = re.compile(
 )
 _MAX_TOKEN_LENGTH = 1024
 _MAX_URL_LENGTH = 2048
+_MAX_PARAMETER_LENGTH = 256
+_SUPPORTED_TTS_FORMATS = frozenset({"mp3", "opus", "aac", "flac", "wav", "pcm"})
 
 
 class ConfigurationError(ValueError):
@@ -37,8 +39,14 @@ class ConfigurationValues:
     mode: str
     stt_base_url: str = ""
     stt_token: str = ""
+    stt_model: str = "whisper-1"
     tts_base_url: str = ""
     tts_token: str = ""
+    tts_model: str = "tts-1"
+    tts_voice: str = "alloy"
+    tts_format: str = "mp3"
+    realtime_model: str = ""
+    realtime_voice: str = ""
 
     def as_environment(self) -> dict[str, str]:
         """Return values using Theia's supported environment variable names."""
@@ -55,6 +63,22 @@ class ConfigurationValues:
                     "TTS_TOKEN": self.tts_token,
                 }
             )
+            if self.stt_base_url and self.tts_base_url:
+                values.update(
+                    {
+                        "STT_MODEL": self.stt_model,
+                        "TTS_MODEL": self.tts_model,
+                        "TTS_VOICE": self.tts_voice,
+                        "TTS_FORMAT": self.tts_format,
+                    }
+                )
+            else:
+                values.update(
+                    {
+                        "THEIA_REALTIME_MODEL": self.realtime_model,
+                        "THEIA_REALTIME_VOICE": self.realtime_voice,
+                    }
+                )
         return values
 
 
@@ -74,6 +98,25 @@ def _optional_token(value: str, label: str) -> str:
     return cleaned
 
 
+def _optional_parameter(value: str, label: str) -> str:
+    cleaned = value.strip()
+    if len(cleaned) > _MAX_PARAMETER_LENGTH or any(char in cleaned for char in "\r\n"):
+        raise ConfigurationError(f"{label} is not valid.")
+    return cleaned
+
+
+def _parameter(value: str, label: str, default: str) -> str:
+    return _optional_parameter(value, label) or default
+
+
+def _tts_format(value: str) -> str:
+    cleaned = _parameter(value, "The TTS format", "mp3").casefold()
+    if cleaned not in _SUPPORTED_TTS_FORMATS:
+        supported = ", ".join(sorted(_SUPPORTED_TTS_FORMATS))
+        raise ConfigurationError(f"The TTS format must be one of: {supported}.")
+    return cleaned
+
+
 def _url(value: str, label: str) -> str:
     cleaned = _required(value, label, maximum=_MAX_URL_LENGTH)
     parsed = urlparse(cleaned)
@@ -90,8 +133,14 @@ def validate_configuration(
     mode: str,
     stt_base_url: str = "",
     stt_token: str = "",
+    stt_model: str = "",
     tts_base_url: str = "",
     tts_token: str = "",
+    tts_model: str = "",
+    tts_voice: str = "",
+    tts_format: str = "",
+    realtime_model: str = "",
+    realtime_voice: str = "",
 ) -> ConfigurationValues:
     """Validate setup input without logging or displaying credential values."""
     selected_mode = mode.strip().casefold()
@@ -110,13 +159,21 @@ def validate_configuration(
         raise ConfigurationError(
             "Provide both audio service URLs, or leave both blank for Codex Realtime."
         )
+    realtime_model_value = _optional_parameter(realtime_model, "The Realtime model")
+    realtime_voice_value = _optional_parameter(realtime_voice, "The Realtime voice")
     return ConfigurationValues(
         discord_token=token,
         mode=selected_mode,
         stt_base_url=_url(stt_value, "The STT URL") if stt_value else "",
         stt_token=_optional_token(stt_token, "The STT token"),
+        stt_model=_parameter(stt_model, "The STT model", "whisper-1"),
         tts_base_url=_url(tts_value, "The TTS URL") if tts_value else "",
         tts_token=_optional_token(tts_token, "The TTS token"),
+        tts_model=_parameter(tts_model, "The TTS model", "tts-1"),
+        tts_voice=_parameter(tts_voice, "The TTS voice", "alloy"),
+        tts_format=_tts_format(tts_format),
+        realtime_model=realtime_model_value,
+        realtime_voice=realtime_voice_value,
     )
 
 
@@ -258,13 +315,33 @@ def collect_configuration(
     tts_token = (
         read_secret("TTS token (blank if not required): ") if tts_url.strip() else ""
     )
+    if stt_url.strip():
+        stt_model = read("STT model [whisper-1]: ")
+        tts_model = read("TTS model [tts-1]: ")
+        tts_voice = read("TTS voice [alloy]: ")
+        tts_format = read("TTS format [mp3]: ")
+        realtime_model = ""
+        realtime_voice = ""
+    else:
+        stt_model = ""
+        tts_model = ""
+        tts_voice = ""
+        tts_format = ""
+        realtime_model = read("Realtime model (blank for Codex default): ")
+        realtime_voice = read("Realtime voice (blank for Codex default): ")
     return validate_configuration(
         discord_token=token,
         mode=mode,
         stt_base_url=stt_url,
         stt_token=stt_token,
+        stt_model=stt_model,
         tts_base_url=tts_url,
         tts_token=tts_token,
+        tts_model=tts_model,
+        tts_voice=tts_voice,
+        tts_format=tts_format,
+        realtime_model=realtime_model,
+        realtime_voice=realtime_voice,
     )
 
 

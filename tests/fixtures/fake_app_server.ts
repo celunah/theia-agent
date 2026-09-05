@@ -420,6 +420,14 @@ function handleRequest(request: RpcRequest): void {
     }
     case "thread/realtime/start": {
       const threadId = stringParam(params, "threadId") || "thread-missing";
+      if (
+        scenarioIs("realtime-configured") &&
+        (stringParam(params, "model") !== "realtime-model" ||
+          stringParam(params, "voice") !== "marin")
+      ) {
+        fail(request, -32602, "Realtime model and voice were not configured");
+        return;
+      }
       realtimeThreads.add(threadId);
       respond(request, {});
       setTimeout(
