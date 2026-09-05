@@ -1066,6 +1066,12 @@ class TheiaBot(commands.Bot):
         self.voice = VoiceModeManager(
             transcribe=self.codex.transcribe_audio,
             synthesize=self.codex.synthesize_response,
+            realtime_available=lambda: self.codex.voice_provider == "codex-realtime",
+            realtime_start=self.codex.start_realtime_voice,
+            realtime_audio=self.codex.append_realtime_audio,
+            realtime_speech=self.codex.append_realtime_speech,
+            realtime_stop=self.codex.stop_realtime_voice,
+            realtime_authorized=_voice_session_allows_tools,
         )
 
     async def _change_presence_when_ready(self, **kwargs: Any) -> None:
@@ -1380,7 +1386,11 @@ async def codex_mode(
     if selected == VOICE_MODE:
         if not bot.codex.voice_mode_available or not bot.voice.available:
             reason = (
-                "Voice mode requires configured STT_BASE_URL and TTS_BASE_URL."
+                (
+                    "Voice mode requires configured STT_BASE_URL and TTS_BASE_URL."
+                    if bot.codex.custom_audio_configured
+                    else "Codex Realtime voice is unavailable in this installation."
+                )
                 if not bot.codex.voice_mode_available
                 else "Voice receive support is unavailable in this installation."
             )

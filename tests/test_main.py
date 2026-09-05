@@ -26,6 +26,7 @@ from scripts.configure import (
 from theia import core as core_module
 from theia.bot import _handle_voice_transcript
 from theia.core import _path_is_under
+from theia.voice import _RealtimePCMSource, _normalize_realtime_pcm
 
 
 class _Channel:
@@ -149,6 +150,54 @@ class CommandSurfaceTests(unittest.TestCase):
 
         self.assertEqual(server.model_name(), "gpt-5.6-luna")
         self.assertEqual(server.status("model-default")["model"], "gpt-5.6-luna")
+
+    def test_realtime_voice_is_the_default_when_custom_audio_is_absent(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "STT_BASE_URL": "",
+                "TTS_BASE_URL": "",
+                "THEIA_TRANSCRIPTION_BASE_URL": "",
+                "THEIA_TTS_BASE_URL": "",
+            },
+        ):
+            server = main.CodexAppServer()
+            server._realtime_feature_enabled = True
+
+        self.assertTrue(server.voice_mode_available)
+        self.assertEqual(server.voice_provider, "codex-realtime")
+
+    def test_custom_audio_provider_takes_precedence_over_realtime(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "STT_BASE_URL": "https://stt.example/v1",
+                "TTS_BASE_URL": "https://tts.example/v1",
+                "THEIA_TRANSCRIPTION_BASE_URL": "",
+                "THEIA_TTS_BASE_URL": "",
+            },
+        ):
+            server = main.CodexAppServer()
+            server._realtime_feature_enabled = True
+
+        self.assertTrue(server.voice_mode_available)
+        self.assertEqual(server.voice_provider, "custom")
+
+    def test_partial_custom_audio_configuration_does_not_fall_back(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "STT_BASE_URL": "https://stt.example/v1",
+                "TTS_BASE_URL": "",
+                "THEIA_TRANSCRIPTION_BASE_URL": "",
+                "THEIA_TTS_BASE_URL": "",
+            },
+        ):
+            server = main.CodexAppServer()
+            server._realtime_feature_enabled = True
+
+        self.assertFalse(server.voice_mode_available)
+        self.assertIsNone(server.voice_provider)
 
     def test_approval_level_defaults_to_high_and_accepts_configured_values(
         self,
@@ -1094,7 +1143,32 @@ class ConfigurationScriptTests(unittest.TestCase):
         )
         self.assertEqual(
             prompts,
-            ["Mode [1/text]: ", "STT URL: ", "TTS URL: "],
+            [
+                "Mode [1/text]: ",
+                "STT URL (blank for Codex Realtime): ",
+                "TTS URL (blank for Codex Realtime): ",
+            ],
+        )
+
+    def test_voice_setup_can_use_codex_realtime_without_custom_audio(self) -> None:
+        prompts: list[str] = []
+        inputs = iter(["2", "", ""])
+        values = collect_configuration(
+            input_fn=lambda prompt: prompts.append(prompt) or next(inputs),
+            secret_input_fn=lambda _prompt: "discord-token",
+            output_fn=lambda _message: None,
+        )
+
+        self.assertEqual(values.mode, VOICE_MODE)
+        self.assertEqual(values.stt_base_url, "")
+        self.assertEqual(values.tts_base_url, "")
+        self.assertEqual(
+            prompts,
+            [
+                "Mode [1/text]: ",
+                "STT URL (blank for Codex Realtime): ",
+                "TTS URL (blank for Codex Realtime): ",
+            ],
         )
 
     def test_setup_preserves_unrelated_dotenv_settings(self) -> None:
@@ -1132,6 +1206,12 @@ class ConfigurationScriptTests(unittest.TestCase):
                 mode=VOICE_MODE,
                 stt_base_url="https://user:password@stt.example/v1",
                 tts_base_url="https://tts.example/v1",
+            )
+        with self.assertRaisesRegex(ConfigurationError, "both audio service URLs"):
+            validate_configuration(
+                discord_token="discord-token",
+                mode=VOICE_MODE,
+                stt_base_url="https://stt.example/v1",
             )
 
 
@@ -3821,6 +3901,82 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
             main._format_thought_duration(61),
             "Thought for 1 minute and 1 second",
         )
+
+
+class RealtimeVoiceTests(unittest.IsolatedAsyncioTestCase):
+    def test_realtime_output_is_normalized_to_discord_pcm(self) -> None:
+        raw = b"\x64\x00" * 480
+        normalized = _normalize_realtime_pcm(
+            raw,
+            sample_rate=24000,
+            num_channels=1,
+        )
+        self.assertEqual(len(normalized), main.VOICE_FRAME_BYTES)
+
+        source = _RealtimePCMSource()
+        source.feed(normalized)
+        source.finish()
+        self.assertEqual(len(source.read()), main.VOICE_FRAME_BYTES)
+        self.assertEqual(source.read(), b"")
+        source.cleanup()
+
+    async def test_realtime_voice_manager_streams_input_and_output(self) -> None:
+        client = SimpleNamespace(channel=SimpleNamespace(id=8))
+        client.listen = lambda sink: setattr(client, "sink", sink)
+        client.play = lambda source, after: setattr(client, "playing", (source, after))
+        client.stop_playing = lambda: None
+        client.disconnect = AsyncMock()
+        guild = SimpleNamespace(id=42, voice_client=client)
+        voice_channel = SimpleNamespace(id=8, guild=guild)
+        text_channel = SimpleNamespace(send=AsyncMock(), guild=guild)
+        realtime_start = AsyncMock()
+        realtime_audio = AsyncMock()
+        realtime_speech = AsyncMock()
+        realtime_stop = AsyncMock(return_value=True)
+        manager = main.VoiceModeManager(
+            transcribe=AsyncMock(),
+            synthesize=AsyncMock(return_value=()),
+            realtime_available=lambda: True,
+            realtime_start=realtime_start,
+            realtime_audio=realtime_audio,
+            realtime_speech=realtime_speech,
+            realtime_stop=realtime_stop,
+            realtime_authorized=lambda _session: True,
+        )
+
+        await manager.start(
+            session_key="voice",
+            user_id=7,
+            voice_channel=cast(Any, voice_channel),
+            text_channel=text_channel,
+            allow_tools=True,
+            on_transcript=AsyncMock(),
+        )
+        realtime_start.assert_awaited_once()
+        manager._on_audio_packet(42, 8, 7, b"input")
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        realtime_audio.assert_awaited_once_with("voice", b"input", 48000, 2)
+
+        await manager._on_realtime_event(
+            "voice",
+            "output_audio",
+            {
+                "data": b"\x00" * 3840,
+                "sample_rate": 48000,
+                "num_channels": 2,
+            },
+        )
+        self.assertIn("playing", vars(client))
+        await manager._on_realtime_event(
+            "voice",
+            "transcript_done",
+            {"role": "assistant", "text": "spoken response"},
+        )
+        await manager.speak_text("voice", "text response")
+        realtime_speech.assert_awaited_once_with("voice", "text response")
+        await manager.stop("voice")
+        realtime_stop.assert_awaited_once_with("voice")
 
 
 class _AudioHTTPResponse:

@@ -134,6 +134,7 @@ from theia.presence import (
     PresenceManager,
 )
 from theia.voice import (
+    VOICE_FRAME_BYTES,
     VoiceConversationSink,
     VoiceModeError,
     VoiceModeManager,
@@ -180,6 +181,7 @@ __all__ = [
     "SESSION_DELETE_AFTER",
     "TEXT_MODE",
     "THEIA_VERSION",
+    "VOICE_FRAME_BYTES",
     "VOICE_MODE",
     "AudioOutput",
     "AudioProtocolError",

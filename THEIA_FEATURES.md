@@ -290,7 +290,9 @@ The default is indexed search. Live mode can be explicitly selected when current
 
 Text mode is the default.
 
-Voice mode requires configured OpenAI-compatible services:
+Voice mode uses Codex Realtime by default when no custom audio endpoints are
+configured. Custom OpenAI-compatible services can be selected by configuring
+both:
 
 ```text
 STT_BASE_URL
@@ -304,12 +306,21 @@ Optional protocol, model, voice, and format settings are also supported.
 When enabled:
 
 - Theia listens in a Discord voice channel.
-- Speech is transcribed and submitted to the same Codex session.
-- Speakers are differentiated when the STT service supports it.
-- Speech can interrupt and steer an active turn.
-- Preambles, intermediates, and final responses can be spoken through TTS.
+- With Codex Realtime, Discord PCM is streamed to the same Codex session and
+  returned audio deltas are played as they arrive.
+- With custom providers, speech is transcribed and submitted to the same Codex
+  session, and responses are synthesized through TTS.
+- Custom-provider speaker differentiation remains available when the STT
+  service supports it.
+- Custom-provider speech can interrupt and steer an active turn; Realtime
+  sessions handle interruption inside the Realtime conversation.
+- Text responses in a Realtime voice session are sent through Codex's speech
+  append protocol so they can be spoken in the same audio stream.
 - Text is still posted in the associated Discord channel.
-- `/mode voice` is unavailable unless the required APIs and voice dependencies are configured.
+- `/mode voice` is unavailable unless Codex Realtime or both custom APIs and
+  the voice dependencies are available.
+- Codex Realtime audio is streamed through the local app-server boundary; raw
+  audio and protocol payloads are not exposed to Discord.
 
 ## Logging and presence
 

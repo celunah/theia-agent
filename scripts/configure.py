@@ -104,12 +104,18 @@ def validate_configuration(
     )
     if selected_mode == TEXT_MODE:
         return ConfigurationValues(discord_token=token, mode=selected_mode)
+    stt_value = stt_base_url.strip()
+    tts_value = tts_base_url.strip()
+    if bool(stt_value) != bool(tts_value):
+        raise ConfigurationError(
+            "Provide both audio service URLs, or leave both blank for Codex Realtime."
+        )
     return ConfigurationValues(
         discord_token=token,
         mode=selected_mode,
-        stt_base_url=_url(stt_base_url, "The STT URL"),
+        stt_base_url=_url(stt_value, "The STT URL") if stt_value else "",
         stt_token=_optional_token(stt_token, "The STT token"),
-        tts_base_url=_url(tts_base_url, "The TTS URL"),
+        tts_base_url=_url(tts_value, "The TTS URL") if tts_value else "",
         tts_token=_optional_token(tts_token, "The TTS token"),
     )
 
@@ -220,7 +226,7 @@ def _choose_mode(
 ) -> str:
     output_fn("Choose Theia's default interaction mode:")
     output_fn("  1. Text (Discord messages only)")
-    output_fn("  2. Voice (Discord plus STT and TTS services)")
+    output_fn("  2. Voice (Discord plus Codex Realtime or custom STT/TTS)")
     while True:
         choice = input_fn("Mode [1/text]: ").strip().casefold()
         if choice in {"", "1", TEXT_MODE}:
@@ -244,10 +250,14 @@ def collect_configuration(
     token = read_secret("Discord bot token (input hidden): ")
     if mode == TEXT_MODE:
         return validate_configuration(discord_token=token, mode=mode)
-    stt_url = read("STT URL: ")
-    stt_token = read_secret("STT token (blank if not required): ")
-    tts_url = read("TTS URL: ")
-    tts_token = read_secret("TTS token (blank if not required): ")
+    stt_url = read("STT URL (blank for Codex Realtime): ")
+    tts_url = read("TTS URL (blank for Codex Realtime): ")
+    stt_token = (
+        read_secret("STT token (blank if not required): ") if stt_url.strip() else ""
+    )
+    tts_token = (
+        read_secret("TTS token (blank if not required): ") if tts_url.strip() else ""
+    )
     return validate_configuration(
         discord_token=token,
         mode=mode,

@@ -206,6 +206,52 @@ class TestLocalCodexBoundary(unittest.IsolatedAsyncioTestCase):
         prompt = "echo preserve this exact prompt: <opaque-value>"
         self.assertEqual(await self._ask(prompt_server, prompt), f"echo: {prompt}")
 
+    async def test_realtime_voice_protocol_round_trip_crosses_jsonl_boundary(
+        self,
+    ) -> None:
+        """Verify Realtime startup, audio input, and streamed output cross JSONL."""
+        events: list[tuple[str, dict[str, Any]]] = []
+
+        async def on_event(event: str, payload: dict[str, Any]) -> None:
+            events.append((event, payload))
+
+        server = await self._server(scenario="realtime")
+        self.assertTrue(server.realtime_voice_available)
+        await server.start_realtime_voice("realtime", False, on_event)
+        await server.append_realtime_audio(
+            "realtime",
+            b"\x00" * 3840,
+            48000,
+            2,
+        )
+        await self._wait_for(
+            lambda: any(event == "output_audio" for event, _ in events)
+        )
+
+        transcripts = [
+            payload for event, payload in events if event == "transcript_done"
+        ]
+        self.assertEqual(
+            {payload["role"] for payload in transcripts}, {"user", "assistant"}
+        )
+        output = next(payload for event, payload in events if event == "output_audio")
+        self.assertEqual(output["data"], b"\x00" * 3840)
+        self.assertEqual(output["sample_rate"], 48000)
+        self.assertEqual(output["num_channels"], 2)
+        self.assertTrue(await server.stop_realtime_voice("realtime"))
+
+    async def test_realtime_voice_feature_gate_is_honored(self) -> None:
+        """Verify a disabled experimental feature cannot become a voice provider."""
+        server = await self._server(scenario="realtime-disabled")
+
+        async def on_event(_event: str, _payload: dict[str, Any]) -> None:
+            return None
+
+        self.assertFalse(server.realtime_voice_available)
+        self.assertFalse(server.voice_mode_available)
+        with self.assertRaisesRegex(main.CodexAppServerError, "unavailable"):
+            await server.start_realtime_voice("disabled", False, on_event)
+
     async def test_intermediates_and_preambles_are_delivered_before_final_text(
         self,
     ) -> None:

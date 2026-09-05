@@ -1,6 +1,8 @@
 """Codex App Server transport, session state, and Discord-facing orchestration."""
 
 import asyncio
+import base64
+import binascii
 import contextlib
 import hashlib
 import json
@@ -10,6 +12,7 @@ import shutil
 import subprocess
 import time
 from collections.abc import Awaitable, Callable, Coroutine, Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -91,6 +94,10 @@ DEFAULT_ATTACHMENT_CACHE_LIMIT_BYTES = 512 * 1024 * 1024
 DEFAULT_ATTACHMENT_CACHE_MAX_AGE = SESSION_DELETE_AFTER
 WEB_SEARCH_ENV = "THEIA_WEB_SEARCH"
 WEB_SEARCH_MODES = frozenset({"disabled", "indexed", "live"})
+CODEX_REALTIME_FEATURE = "realtime_conversation"
+CODEX_REALTIME_PROVIDER = "codex-realtime"
+_REALTIME_AUDIO_MAX_BYTES = 256 * 1024
+_REALTIME_AUDIO_REQUEST_TIMEOUT = 10.0
 _APPROVAL_RISK_SAFE = "safe"
 _APPROVAL_RISK_DANGEROUS = "dangerous"
 _APPROVAL_RISK_VERY_DANGEROUS = "very_dangerous"
@@ -295,6 +302,20 @@ _DISCORD_DYNAMIC_TOOLS = [
 ]
 
 
+@dataclass
+class _RealtimeState:
+    """Track one thread-scoped Codex Realtime session."""
+
+    session_key: str
+    thread_id: str
+    allow_tools: bool
+    on_event: Callable[[str, dict[str, Any]], Awaitable[None]]
+    started: asyncio.Future[None]
+    closed: asyncio.Future[None]
+    realtime_session_id: str | None = None
+    failed: bool = False
+
+
 class CodexAppServer:
     """Own the local Codex process and map Discord sessions to Codex threads.
 
@@ -325,6 +346,8 @@ class CodexAppServer:
         self._next_request_id = 1
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._turns: dict[str, _TurnState] = {}
+        self._realtime_sessions: dict[str, _RealtimeState] = {}
+        self._realtime_feature_enabled = False
         self._models: tuple[dict[str, Any], ...] = ()
         self._models_loaded_at = 0.0
         self._provider_capabilities: dict[str, Any] | None = None
@@ -505,7 +528,7 @@ class CodexAppServer:
         logger.debug(
             "Codex layer initialized (adaptive_reasoning=%s, approval_level=%s, "
             "self_improvement=%s, memory_roots=%d, skill_roots=%d, "
-            "transcription=%s, tts=%s)",
+            "transcription=%s, tts=%s, realtime=%s)",
             self._adaptive_reasoning,
             self._approval_level,
             self._self_improvement_enabled,
@@ -513,6 +536,7 @@ class CodexAppServer:
             len(self._skill_roots),
             self._audio.transcription.enabled,
             self._audio.tts.enabled,
+            self._realtime_feature_enabled,
         )
 
     def set_frontend_customizer(self, customizer: Any | None) -> None:
@@ -1070,8 +1094,31 @@ class CodexAppServer:
 
     @property
     def voice_mode_available(self) -> bool:
-        """Whether both configured audio services can support voice mode."""
-        return self._audio.transcription.enabled and self._audio.tts.enabled
+        """Whether one complete voice provider can support voice mode."""
+        if self._audio.transcription.enabled and self._audio.tts.enabled:
+            return True
+        if self.custom_audio_configured:
+            return False
+        return self.realtime_voice_available
+
+    @property
+    def voice_provider(self) -> str | None:
+        """Return the selected voice provider, if one is available."""
+        if self.custom_audio_configured:
+            if self._audio.transcription.enabled and self._audio.tts.enabled:
+                return "custom"
+            return None
+        return CODEX_REALTIME_PROVIDER if self.realtime_voice_available else None
+
+    @property
+    def custom_audio_configured(self) -> bool:
+        """Return whether either custom audio endpoint was configured."""
+        return bool(self._audio.transcription.base_url or self._audio.tts.base_url)
+
+    @property
+    def realtime_voice_available(self) -> bool:
+        """Whether Codex Realtime is enabled for the running app-server."""
+        return self._realtime_feature_enabled
 
     def mode(self, session_key: str) -> str:
         """Return the text or voice mode selected for a Discord session."""
@@ -1083,9 +1130,12 @@ class CodexAppServer:
         if selected not in {TEXT_MODE, VOICE_MODE}:
             raise CodexAppServerError("Mode must be `voice` or `text`.")
         if selected == VOICE_MODE and not self.voice_mode_available:
-            raise CodexAppServerError(
+            reason = (
                 "Voice mode requires both STT_BASE_URL and TTS_BASE_URL."
+                if self.custom_audio_configured
+                else "Codex Realtime voice is unavailable in this installation."
             )
+            raise CodexAppServerError(reason)
         session = self._session(session_key)
         assert session.lock is not None
         async with session.lock:
@@ -1107,6 +1157,150 @@ class CodexAppServer:
         if not value:
             raise CodexAppServerError("Audio transcription returned no text.")
         return value
+
+    async def start_realtime_voice(
+        self,
+        session_key: str,
+        allow_tools: bool,
+        on_event: Callable[[str, dict[str, Any]], Awaitable[None]],
+    ) -> None:
+        """Start a Codex Realtime audio session on the session's thread."""
+        if not self.realtime_voice_available:
+            raise CodexAppServerError(
+                "Codex Realtime voice is unavailable in this installation."
+            )
+        if self.voice_provider != CODEX_REALTIME_PROVIDER:
+            raise CodexAppServerError(
+                "Codex Realtime is not the active voice provider."
+            )
+        await self._ensure_running()
+        await self.refresh_account()
+        if self.account is None and self.requires_openai_auth:
+            raise CodexAppServerError("Run `/login` first.")
+
+        session = self._session(session_key)
+        canonical_key = session.key
+        existing = self._realtime_sessions.get(canonical_key)
+        if existing is not None and not existing.closed.done():
+            existing.on_event = on_event
+            return
+        assert session.lock is not None
+        async with session.lock:
+            await self._prepare_session_for_activity(session)
+            await self._ensure_thread(session, allow_tools=allow_tools)
+            thread_id = session.thread_id
+            if not thread_id:
+                raise CodexAppServerError("Theia could not create a Codex thread.")
+            started = asyncio.get_running_loop().create_future()
+            closed = asyncio.get_running_loop().create_future()
+            state = _RealtimeState(
+                session_key=canonical_key,
+                thread_id=thread_id,
+                allow_tools=allow_tools,
+                on_event=on_event,
+                started=started,
+                closed=closed,
+            )
+            self._realtime_sessions[canonical_key] = state
+            params: dict[str, Any] = {
+                "threadId": thread_id,
+                "outputModality": "audio",
+                "transport": {"type": "websocket"},
+            }
+            configured_voice = os.getenv("THEIA_REALTIME_VOICE", "").strip()
+            if configured_voice:
+                params["voice"] = configured_voice
+            configured_model = os.getenv("THEIA_REALTIME_MODEL", "").strip()
+            if configured_model:
+                params["model"] = configured_model
+            try:
+                result = await self._request("thread/realtime/start", params)
+                session_id = result.get("realtimeSessionId")
+                if isinstance(session_id, str):
+                    state.realtime_session_id = session_id
+                await asyncio.wait_for(
+                    asyncio.shield(state.started), self._request_timeout
+                )
+            except BaseException:
+                self._realtime_sessions.pop(canonical_key, None)
+                raise
+        logger.info("Codex Realtime voice started")
+
+    async def append_realtime_audio(
+        self,
+        session_key: str,
+        pcm: bytes,
+        sample_rate: int,
+        num_channels: int,
+    ) -> None:
+        """Append one bounded PCM chunk to an active Realtime session."""
+        if not pcm:
+            return
+        if len(pcm) > _REALTIME_AUDIO_MAX_BYTES:
+            raise CodexAppServerError("Realtime audio chunk is too large.")
+        if sample_rate <= 0 or num_channels <= 0:
+            raise CodexAppServerError("Realtime audio metadata is invalid.")
+        state = self._realtime_sessions.get(self._canonical_session_key(session_key))
+        if state is None or state.closed.done():
+            raise CodexAppServerError("The Codex Realtime voice session is closed.")
+        await self._request(
+            "thread/realtime/appendAudio",
+            {
+                "threadId": state.thread_id,
+                "audio": {
+                    "data": base64.b64encode(pcm).decode("ascii"),
+                    "sampleRate": sample_rate,
+                    "numChannels": num_channels,
+                },
+            },
+            timeout=_REALTIME_AUDIO_REQUEST_TIMEOUT,
+        )
+
+    async def append_realtime_speech(self, session_key: str, text: str) -> None:
+        """Ask an active Realtime session to speak text supplied by Theia."""
+        value = text.strip()
+        if not value:
+            return
+        state = self._realtime_sessions.get(self._canonical_session_key(session_key))
+        if state is None or state.closed.done():
+            raise CodexAppServerError("The Codex Realtime voice session is closed.")
+        await self._request(
+            "thread/realtime/appendSpeech",
+            {"threadId": state.thread_id, "text": value[:4096]},
+            timeout=_REALTIME_AUDIO_REQUEST_TIMEOUT,
+        )
+
+    async def stop_realtime_voice(self, session_key: str) -> bool:
+        """Stop a session's Codex Realtime transport and forget its callbacks."""
+        canonical_key = self._canonical_session_key(session_key)
+        state = self._realtime_sessions.pop(canonical_key, None)
+        if state is None:
+            return False
+        try:
+            if not state.closed.done():
+                await self._request(
+                    "thread/realtime/stop",
+                    {"threadId": state.thread_id},
+                    timeout=_REALTIME_AUDIO_REQUEST_TIMEOUT,
+                )
+        except CodexAppServerError as exc:
+            if not any(
+                phrase in str(exc).casefold()
+                for phrase in ("closed", "not found", "no active")
+            ):
+                raise
+        finally:
+            if not state.closed.done():
+                state.closed.set_result(None)
+        logger.info("Codex Realtime voice stopped")
+        return True
+
+    async def list_realtime_voices(self) -> dict[str, Any]:
+        """Return the voices supported by the installed Codex Realtime server."""
+        if not self.realtime_voice_available:
+            raise CodexAppServerError("Codex Realtime voice is unavailable.")
+        await self._ensure_running()
+        return await self._request("thread/realtime/listVoices", {})
 
     def active_personality(self, session_key: str) -> str | None:
         """Return the active personality name for a Discord session, if any."""
@@ -1351,6 +1545,8 @@ class CodexAppServer:
         try:
             self._process = await asyncio.create_subprocess_exec(
                 executable,
+                "--enable",
+                CODEX_REALTIME_FEATURE,
                 "app-server",
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
@@ -1382,6 +1578,7 @@ class CodexAppServer:
                 },
             )
             await self._send({"method": "initialized", "params": {}})
+            await self._refresh_realtime_capability()
             await self._configure_shared_roots()
             await self.refresh_account()
             if (
@@ -1498,6 +1695,29 @@ class CodexAppServer:
         ):
             await self.start()
 
+    async def _refresh_realtime_capability(self) -> None:
+        """Read the Realtime feature gate from the selected app-server."""
+        self._realtime_feature_enabled = False
+        try:
+            result = await self._request("experimentalFeature/list", {})
+        except (CodexAppServerError, OSError):
+            logger.info("Codex Realtime capability is unavailable")
+            return
+        features = result.get("data")
+        if not isinstance(features, list):
+            return
+        for feature in features:
+            if not isinstance(feature, dict):
+                continue
+            if feature.get("name") != CODEX_REALTIME_FEATURE:
+                continue
+            self._realtime_feature_enabled = bool(feature.get("enabled"))
+            logger.info(
+                "Codex Realtime capability detected (enabled=%s)",
+                self._realtime_feature_enabled,
+            )
+            return
+
     async def close(self) -> None:
         """Stop the Codex process and resolve pending interaction state safely."""
         was_running = self._process is not None
@@ -1507,6 +1727,10 @@ class CodexAppServer:
                 await self._skills_refresh_task
             self._skills_refresh_task = None
         self._clear_all_pending()
+        for state in self._realtime_sessions.values():
+            if not state.closed.done():
+                state.closed.set_result(None)
+        self._realtime_sessions.clear()
         for task in self._server_tasks:
             task.cancel()
         self._server_tasks.clear()
@@ -4538,6 +4762,155 @@ class CodexAppServer:
                 return turn_id
         return ""
 
+    def _realtime_for_thread(self, thread_id: str) -> _RealtimeState | None:
+        if not thread_id:
+            return None
+        for state in self._realtime_sessions.values():
+            if state.thread_id == thread_id:
+                return state
+        return None
+
+    @staticmethod
+    def _decode_realtime_audio(value: Any) -> bytes | None:
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            decoded = base64.b64decode(value, validate=True)
+        except (ValueError, binascii.Error):
+            return None
+        if not decoded or len(decoded) > _REALTIME_AUDIO_MAX_BYTES:
+            return None
+        return decoded
+
+    @staticmethod
+    def _realtime_audio_payload(audio: Any) -> dict[str, Any] | None:
+        if not isinstance(audio, dict):
+            return None
+        data = CodexAppServer._decode_realtime_audio(audio.get("data"))
+        sample_rate = audio.get("sampleRate")
+        num_channels = audio.get("numChannels")
+        if (
+            data is None
+            or isinstance(sample_rate, bool)
+            or not isinstance(sample_rate, int)
+            or sample_rate <= 0
+            or isinstance(num_channels, bool)
+            or not isinstance(num_channels, int)
+            or num_channels <= 0
+        ):
+            return None
+        samples = audio.get("samplesPerChannel")
+        return {
+            "data": data,
+            "sample_rate": sample_rate,
+            "num_channels": num_channels,
+            "samples_per_channel": samples
+            if isinstance(samples, int) and not isinstance(samples, bool)
+            else None,
+        }
+
+    def _emit_realtime(
+        self, state: _RealtimeState, event: str, payload: dict[str, Any]
+    ) -> None:
+        task = asyncio.create_task(
+            cast(Coroutine[Any, Any, None], state.on_event(event, payload))
+        )
+        task.add_done_callback(lambda done: self._realtime_event_done(done, event))
+
+    @staticmethod
+    def _realtime_event_done(task: asyncio.Task[Any], event: str) -> None:
+        with contextlib.suppress(Exception):
+            error = task.exception()
+            if error is not None:
+                logger.debug(
+                    "Codex Realtime event callback failed (event=%s, error=%s)",
+                    _safe_log_label(event),
+                    type(error).__name__,
+                )
+
+    def _handle_realtime_notification(
+        self,
+        state: _RealtimeState,
+        method: str,
+        params: dict[str, Any],
+    ) -> None:
+        if method == "thread/realtime/started":
+            session_id = params.get("realtimeSessionId")
+            if isinstance(session_id, str):
+                state.realtime_session_id = session_id
+            if not state.started.done():
+                state.started.set_result(None)
+            self._emit_realtime(state, "started", {})
+            return
+        if method == "thread/realtime/itemAdded":
+            item = params.get("item")
+            if isinstance(item, dict):
+                self._emit_realtime(state, "item_added", item)
+            return
+        if method == "thread/realtime/item/started":
+            item = params.get("item")
+            if isinstance(item, dict):
+                self._emit_realtime(state, "item_started", item)
+            return
+        if method == "thread/realtime/item/transcript/delta":
+            delta = params.get("delta")
+            item_id = params.get("itemId")
+            if isinstance(delta, str) and isinstance(item_id, str):
+                self._emit_realtime(
+                    state,
+                    "item_transcript_delta",
+                    {"item_id": item_id, "delta": delta},
+                )
+            return
+        if method == "thread/realtime/item/completed":
+            item = params.get("item")
+            if isinstance(item, dict):
+                self._emit_realtime(state, "item_completed", item)
+            return
+        if method == "thread/realtime/transcript/delta":
+            delta = params.get("delta")
+            role = params.get("role")
+            if isinstance(delta, str) and isinstance(role, str):
+                self._emit_realtime(
+                    state,
+                    "transcript_delta",
+                    {"role": role, "delta": delta},
+                )
+            return
+        if method == "thread/realtime/transcript/done":
+            text = params.get("text")
+            role = params.get("role")
+            if isinstance(text, str) and isinstance(role, str):
+                self._emit_realtime(
+                    state,
+                    "transcript_done",
+                    {"role": role, "text": text},
+                )
+            return
+        if method == "thread/realtime/outputAudio/delta":
+            payload = self._realtime_audio_payload(params.get("audio"))
+            if payload is not None:
+                self._emit_realtime(state, "output_audio", payload)
+            else:
+                logger.debug("Ignored invalid Codex Realtime audio chunk")
+            return
+        if method == "thread/realtime/sdp":
+            logger.debug("Ignored unexpected Codex Realtime SDP notification")
+            return
+        if method == "thread/realtime/error":
+            state.failed = True
+            message = params.get("message")
+            self._emit_realtime(
+                state,
+                "error",
+                {"message": message if isinstance(message, str) else "unknown"},
+            )
+            return
+        if method == "thread/realtime/closed":
+            if not state.closed.done():
+                state.closed.set_result(None)
+            self._emit_realtime(state, "closed", {})
+
     def _handle_notification(self, message: dict[str, Any]) -> None:
         method = message.get("method")
         params = message.get("params") or {}
@@ -4619,6 +4992,14 @@ class CodexAppServer:
             or (thread.get("id") if isinstance(thread, dict) else "")
             or ""
         )
+        realtime_state = self._realtime_for_thread(thread_id)
+        if (
+            realtime_state is not None
+            and isinstance(method, str)
+            and method.startswith("thread/realtime/")
+        ):
+            self._handle_realtime_notification(realtime_state, method, params)
+            return
         if method == "thread/started":
             if thread_id:
                 self._set_thread_loaded(thread_id, True)

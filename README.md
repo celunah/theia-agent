@@ -15,8 +15,8 @@ The current release is `1.0.1`.
 - Dynamic Codex model selection, adaptive reasoning, native web search, skills,
   memories, and Markdown personality profiles.
 - Attachments for images, audio, and text-like files.
-- Optional voice mode using OpenAI-compatible speech-to-text and text-to-speech
-  services.
+- Voice mode using Codex Realtime by default, with optional OpenAI-compatible
+  speech-to-text and text-to-speech services.
 - Server-scoped Discord presentation customization and administrator controls.
 - Read-only/safe tool access for regular users; administrators receive the
   configured full Codex policy.
@@ -31,8 +31,8 @@ The current release is `1.0.1`.
 ```
 
 Prefix commands are disabled. `/restart` and `/customize` are
-administrator-only. `/mode voice` requires the voice dependencies and audio
-services described below.
+administrator-only. `/mode voice` requires the voice dependencies and either
+Codex Realtime or the custom audio services described below.
 `/customize` also covers pagination controls, input modal labels, and embed
 field labels in the account, usage, credits, and About views.
 Successful `/restart`, `/model`, and `/customize` confirmations are public;
@@ -69,7 +69,8 @@ python scripts/configure.py
 ```
 
 It asks for text or voice mode, then collects the Discord token and (for voice
-mode) the OpenAI-compatible STT/TTS URLs and optional service tokens. It writes
+mode) optional OpenAI-compatible STT/TTS URLs and service tokens. Leave both
+URLs blank to use Codex Realtime through the bundled Codex app-server. It writes
 the local ignored `.env` atomically. You can also create `.env` from
 `.env.example` and edit it manually.
 
@@ -186,7 +187,8 @@ THEIA_AUTO_THREAD=true
 THEIA_CONTEXT_MESSAGES=12
 THEIA_CONTEXT_MAX_CHARACTERS=8000
 
-# Optional OpenAI-compatible audio services
+# Optional custom OpenAI-compatible audio services. Leave both URLs blank for
+# the bundled Codex Realtime voice provider.
 STT_BASE_URL=
 STT_TOKEN=
 STT_MODEL=whisper-1
@@ -195,10 +197,16 @@ TTS_TOKEN=
 TTS_MODEL=tts-1
 TTS_VOICE=alloy
 TTS_FORMAT=mp3
+THEIA_REALTIME_MODEL=       # optional Codex Realtime model override
+THEIA_REALTIME_VOICE=       # optional Codex Realtime voice override
 ```
 
-Voice mode also needs a system Opus library and `ffmpeg` on `PATH`. The audio
-integrations remain disabled when their base URLs are empty.
+Voice mode also needs a system Opus library and `ffmpeg` on `PATH`. When both
+custom audio URLs are empty, Theia enables the experimental Codex Realtime
+provider in the bundled app-server. It streams Discord PCM audio to Codex and
+plays returned audio deltas directly; the feature remains subject to the
+installed Codex version and account's Realtime availability. A partial custom
+STT/TTS configuration is rejected rather than silently mixing providers.
 
 ## Security and privacy
 
