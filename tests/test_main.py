@@ -114,6 +114,33 @@ class _HistoryChannel(_Channel):
 
 
 class CommandSurfaceTests(unittest.TestCase):
+    def test_default_codex_model_is_configured(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(
+                os.environ,
+                {
+                    "THEIA_HOME": str(Path(directory) / "theia"),
+                    "THEIA_STATE": str(Path(directory) / "state.json"),
+                },
+            ),
+        ):
+            server = main.CodexAppServer()
+
+        self.assertEqual(server.model_name(), "gpt-5.6-luna")
+        self.assertEqual(server.status("model-default")["model"], "gpt-5.6-luna")
+
+    def test_approval_level_defaults_to_high_and_accepts_configured_values(
+        self,
+    ) -> None:
+        with patch.dict(os.environ, {"THEIA_APPROVAL_LEVEL": "medium"}):
+            server = main.CodexAppServer()
+        self.assertEqual(server.approval_level(), "medium")
+
+        with patch.dict(os.environ, {"THEIA_APPROVAL_LEVEL": "unsupported"}):
+            fallback = main.CodexAppServer()
+        self.assertEqual(fallback.approval_level(), main.DEFAULT_APPROVAL_LEVEL)
+
     def test_environment_loads_from_compiled_executable_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1256,6 +1283,21 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
                 "-# Update: Checking the request.",
             )
 
+    async def test_self_improvement_statuses_are_customizable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = main.FrontendCustomizationStore(Path(directory) / "frontend.json")
+            store.set(42, "personality_updated", "label", "Style refined")
+            server = main.CodexAppServer()
+            server.set_frontend_customizer(store)
+            channel = _Channel()
+            channel.guild = SimpleNamespace(id=42)
+
+            await server._notify_self_improvement(
+                cast(Any, channel), ["Personality updated"]
+            )
+
+        self.assertEqual(channel.sent[0]["content"], "-# Style refined")
+
     def test_explicit_codex_cli_override_is_used(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1315,6 +1357,22 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         execv.assert_called_once_with(
             "/usr/bin/python", ["/usr/bin/python", "main.py", "--test"]
         )
+
+    async def test_restart_uses_the_original_binary_for_compiled_processes(
+        self,
+    ) -> None:
+        close = AsyncMock()
+        with (
+            patch.object(main.bot, "close", new=close),
+            patch("theia.bot.os.execv") as execv,
+            patch("theia.bot.sys.executable", "/tmp/onefile-runtime/theia"),
+            patch("theia.bot.sys.argv", ["/opt/theia", "--test"]),
+            patch("theia.bot.__compiled__", object(), create=True),
+        ):
+            await main._restart_in_place(delay=0)
+
+        close.assert_awaited_once_with()
+        execv.assert_called_once_with("/opt/theia", ["/opt/theia", "--test"])
 
     def test_thread_request_detection_requires_an_explicit_request(self) -> None:
         self.assertTrue(main._user_requested_thread("Please create a thread for this."))
@@ -1484,7 +1542,11 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         ) -> SimpleNamespace:
             return SimpleNamespace(
                 id=message_id,
-                author=SimpleNamespace(display_name=author, bot=bot),
+                author=SimpleNamespace(
+                    id=message_id + 100,
+                    display_name=author,
+                    bot=bot,
+                ),
                 content=content,
                 attachments=[],
                 mentions=[],
@@ -1509,6 +1571,7 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("Thinking", context)
         self.assertNotIn("What did we say recently?", context)
+        self.assertIn("Alice [Discord user id:", context)
         self.assertEqual(history.history_calls[0]["limit"], 12)
 
     async def test_recent_channel_context_is_bounded_and_keeps_newest_messages(
@@ -2160,6 +2223,103 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(server.resolve_approval(7, False, channel))
         self.assertEqual(await request, {"decision": "decline"})
 
+    async def test_approval_uses_request_user_when_member_cache_is_empty(self) -> None:
+        server = main.CodexAppServer()
+        channel = _Channel()
+        user = SimpleNamespace(
+            id=7,
+            guild_permissions=SimpleNamespace(administrator=True),
+        )
+        channel.guild = SimpleNamespace(id=1, get_member=lambda _user_id: None)
+        state = main._TurnState(
+            thread_id="thread",
+            channel=channel,
+            user_id=user.id,
+            user=user,
+        )
+        server._turns["turn"] = state
+        request = asyncio.create_task(
+            server._server_request_result(
+                "item/commandExecution/requestApproval",
+                {"threadId": "thread", "turnId": "turn", "itemId": "item"},
+            )
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        self.assertEqual(channel.sent[0]["embed"].title, "Approval needed")
+        interaction = SimpleNamespace(
+            user=user,
+            response=SimpleNamespace(edit_message=AsyncMock()),
+        )
+        await cast(Any, channel.sent[0]["view"].children[0]).callback(interaction)
+        self.assertEqual(await request, {"decision": "accept"})
+
+    async def test_approval_falls_back_to_active_turn_when_ids_are_missing(
+        self,
+    ) -> None:
+        server = main.CodexAppServer()
+        channel = _Channel()
+        channel.guild = _admin_guild()
+        state = main._TurnState(thread_id="thread", channel=channel, user_id=7)
+        server._turns["turn"] = state
+        request = asyncio.create_task(
+            server._server_request_result(
+                "item/fileChange/requestApproval",
+                {"threadId": "thread"},
+                request_id="request-1",
+            )
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        self.assertEqual(channel.sent[0]["embed"].title, "Approval needed")
+        self.assertTrue(server.resolve_approval(7, False, channel))
+        self.assertEqual(await request, {"decision": "decline"})
+
+    async def test_unavailable_approval_is_reported_in_discord(self) -> None:
+        server = main.CodexAppServer()
+        channel = _Channel()
+        channel.guild = _admin_guild()
+        state = main._TurnState(
+            thread_id="thread", channel=channel, user_id=7, allow_tools=False
+        )
+        server._turns["turn"] = state
+
+        result = await server._server_request_result(
+            "item/commandExecution/requestApproval",
+            {"threadId": "thread", "turnId": "turn", "itemId": "item"},
+        )
+
+        self.assertEqual(result, {"decision": "decline"})
+        self.assertEqual(len(channel.sent), 1)
+        self.assertEqual(channel.sent[0]["embed"].title, "Approval needed")
+        self.assertIn("cannot be approved", channel.sent[0]["embed"].description)
+        self.assertNotIn("view", channel.sent[0])
+
+    async def test_approval_lost_admin_access_is_reported_in_discord(self) -> None:
+        server = main.CodexAppServer()
+        channel = _Channel()
+        channel.guild = _admin_guild(administrator=False)
+        request_user = SimpleNamespace(
+            id=7,
+            guild_permissions=SimpleNamespace(administrator=True),
+        )
+        state = main._TurnState(
+            thread_id="thread", channel=channel, user_id=7, user=request_user
+        )
+        server._turns["turn"] = state
+
+        result = await server._server_request_result(
+            "item/commandExecution/requestApproval",
+            {"threadId": "thread", "turnId": "turn", "itemId": "item"},
+        )
+
+        self.assertEqual(result, {"decision": "decline"})
+        self.assertEqual(len(channel.sent), 1)
+        self.assertIn("administrator access", channel.sent[0]["embed"].description)
+        self.assertFalse(state.allow_tools)
+
     async def test_approval_request_describes_the_action_without_raw_details(
         self,
     ) -> None:
@@ -2183,10 +2343,135 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
 
         description = channel.sent[0]["embed"].description
-        self.assertIn("run a command using the configured Codex tools", description)
-        self.assertIn("Reason: I need to", description)
+        self.assertEqual(description, "I need to run in")
+        self.assertEqual(
+            channel.sent[0]["embed"].footer.text,
+            "You can also use /approve or /deny.",
+        )
         self.assertNotIn("git status", description)
         self.assertNotIn("/workspace/project", description)
+        self.assertTrue(server.resolve_approval(7, False, channel))
+        self.assertEqual(await request, {"decision": "decline"})
+
+    async def test_medium_approval_level_auto_approves_safe_commands(self) -> None:
+        with patch.dict(os.environ, {"THEIA_APPROVAL_LEVEL": "medium"}):
+            server = main.CodexAppServer()
+        channel = _Channel()
+        channel.guild = _admin_guild()
+        state = main._TurnState(thread_id="thread", channel=channel, user_id=7)
+        server._turns["turn"] = state
+
+        result = await server._server_request_result(
+            "item/commandExecution/requestApproval",
+            {
+                "threadId": "thread",
+                "turnId": "turn",
+                "itemId": "item",
+                "command": "git status",
+            },
+        )
+
+        self.assertEqual(result, {"decision": "accept"})
+        self.assertEqual(channel.sent, [])
+
+    async def test_high_approval_level_still_surfaces_safe_commands(self) -> None:
+        with patch.dict(os.environ, {"THEIA_APPROVAL_LEVEL": "high"}):
+            server = main.CodexAppServer()
+        channel = _Channel()
+        channel.guild = _admin_guild()
+        state = main._TurnState(thread_id="thread", channel=channel, user_id=7)
+        server._turns["turn"] = state
+
+        request = asyncio.create_task(
+            server._server_request_result(
+                "item/commandExecution/requestApproval",
+                {
+                    "threadId": "thread",
+                    "turnId": "turn",
+                    "itemId": "item",
+                    "command": "git status",
+                },
+            )
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        self.assertEqual(len(channel.sent), 1)
+        self.assertTrue(server.resolve_approval(7, False, channel))
+        self.assertEqual(await request, {"decision": "decline"})
+
+    async def test_low_approval_level_keeps_very_dangerous_commands_manual(
+        self,
+    ) -> None:
+        with patch.dict(os.environ, {"THEIA_APPROVAL_LEVEL": "low"}):
+            server = main.CodexAppServer()
+        channel = _Channel()
+        channel.guild = _admin_guild()
+        state = main._TurnState(thread_id="thread", channel=channel, user_id=7)
+        server._turns["turn"] = state
+
+        request = asyncio.create_task(
+            server._server_request_result(
+                "item/commandExecution/requestApproval",
+                {
+                    "threadId": "thread",
+                    "turnId": "turn",
+                    "itemId": "item",
+                    "command": "rm -rf /tmp/example",
+                },
+            )
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        self.assertEqual(len(channel.sent), 1)
+        self.assertTrue(server.resolve_approval(7, False, channel))
+        self.assertEqual(await request, {"decision": "decline"})
+
+    async def test_low_approval_level_auto_approves_an_ordinary_command(self) -> None:
+        with patch.dict(os.environ, {"THEIA_APPROVAL_LEVEL": "low"}):
+            server = main.CodexAppServer()
+        channel = _Channel()
+        channel.guild = _admin_guild()
+        state = main._TurnState(thread_id="thread", channel=channel, user_id=7)
+        server._turns["turn"] = state
+
+        result = await server._server_request_result(
+            "item/commandExecution/requestApproval",
+            {
+                "threadId": "thread",
+                "turnId": "turn",
+                "itemId": "item",
+                "command": "echo hello",
+            },
+        )
+
+        self.assertEqual(result, {"decision": "accept"})
+        self.assertEqual(channel.sent, [])
+
+    async def test_low_approval_level_keeps_interpreters_manual(self) -> None:
+        with patch.dict(os.environ, {"THEIA_APPROVAL_LEVEL": "low"}):
+            server = main.CodexAppServer()
+        channel = _Channel()
+        channel.guild = _admin_guild()
+        state = main._TurnState(thread_id="thread", channel=channel, user_id=7)
+        server._turns["turn"] = state
+
+        request = asyncio.create_task(
+            server._server_request_result(
+                "item/commandExecution/requestApproval",
+                {
+                    "threadId": "thread",
+                    "turnId": "turn",
+                    "itemId": "item",
+                    "command": "python -c 'print(1)'",
+                },
+            )
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        self.assertEqual(len(channel.sent), 1)
         self.assertTrue(server.resolve_approval(7, False, channel))
         self.assertEqual(await request, {"decision": "decline"})
 
@@ -2231,6 +2516,44 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
             thread_id="thread", channel=channel, user_id=7, allow_tools=True
         )
         channel.guild.get_member(7).guild_permissions.administrator = False
+
+        result = await server._dynamic_tool_call(
+            state,
+            {
+                "tool": "send_message",
+                "namespace": "discord",
+                "arguments": {"content": "should not send"},
+            },
+        )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(channel.sent, [])
+        self.assertFalse(state.allow_tools)
+
+    async def test_dynamic_discord_tool_rechecks_cached_member_for_stored_user(
+        self,
+    ) -> None:
+        server = main.CodexAppServer()
+        channel = _Channel()
+        cached_member = SimpleNamespace(
+            id=7,
+            guild_permissions=SimpleNamespace(administrator=False),
+        )
+        request_user = SimpleNamespace(
+            id=7,
+            guild_permissions=SimpleNamespace(administrator=True),
+        )
+        channel.guild = SimpleNamespace(
+            id=1,
+            get_member=lambda user_id: cached_member if user_id == 7 else None,
+        )
+        state = main._TurnState(
+            thread_id="thread",
+            channel=channel,
+            user_id=7,
+            user=request_user,
+            allow_tools=True,
+        )
 
         result = await server._dynamic_tool_call(
             state,
@@ -2515,6 +2838,286 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "done")
         turn_params = cast(Any, server._request.await_args).args[1]
         self.assertEqual(turn_params["effort"], "high")
+        self.assertEqual(turn_params["model"], main.DEFAULT_CODEX_MODEL)
+
+    async def test_completed_admin_turn_schedules_self_improvement_in_background(
+        self,
+    ) -> None:
+        server = main.CodexAppServer()
+        server.account = {"type": "chatgpt"}
+        server.requires_openai_auth = True
+        server._ensure_running = AsyncMock()
+        server.refresh_account = AsyncMock()
+        server._select_reasoning_effort = AsyncMock(return_value="low")
+        server._ensure_thread = AsyncMock()
+        server._request = AsyncMock(return_value={"turn": {"id": "turn"}})
+        server._wait_for_turn = AsyncMock(return_value="done")
+        review = AsyncMock()
+        server._run_self_improvement_review = review
+        channel = _Channel()
+        channel.guild = _admin_guild()
+
+        result = await server.ask(
+            "inspect the project",
+            session_key="session",
+            channel=cast(Any, channel),
+            user_id=7,
+            allow_tools=True,
+        )
+        await asyncio.sleep(0)
+
+        self.assertEqual(result, "done")
+        review.assert_awaited_once()
+
+    async def test_self_improvement_can_create_private_memories_and_skills(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(
+                os.environ,
+                {
+                    "THEIA_HOME": str(root / "theia"),
+                    "THEIA_STATE": str(root / "state.json"),
+                },
+            ):
+                server = main.CodexAppServer()
+                memory_root = root / "theia" / "memories"
+                skill_root = root / "theia" / "skills"
+                updates = (
+                    {
+                        "kind": "memory",
+                        "path": "MEMORY.md",
+                        "content": "- The user prefers concise release notes.",
+                    },
+                    {
+                        "kind": "user_profile",
+                        "path": "USER.md",
+                        "content": "- User works on Discord-native agents.",
+                    },
+                    {
+                        "kind": "skill",
+                        "path": "release-notes/SKILL.md",
+                        "content": "# Release notes\nPrefer a short checklist.",
+                    },
+                )
+
+                applied = server._apply_self_improvement_updates(
+                    updates,
+                    memory_root=memory_root,
+                    skill_root=skill_root,
+                    personality_path=None,
+                )
+
+            self.assertEqual(applied, 3)
+            self.assertEqual(
+                (memory_root / "MEMORY.md").read_text(encoding="utf-8"),
+                updates[0]["content"] + "\n",
+            )
+            self.assertEqual(
+                (memory_root / "USER.md").read_text(encoding="utf-8"),
+                updates[1]["content"] + "\n",
+            )
+            self.assertEqual(
+                (skill_root / "release-notes" / "SKILL.md").read_text(encoding="utf-8"),
+                updates[2]["content"] + "\n",
+            )
+
+    async def test_self_improvement_rejects_skill_traversal_and_unsafe_names(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            server = main.CodexAppServer()
+            memory_root = root / "memories"
+            skill_root = root / "skills"
+            outside = root / "outside"
+            updates = (
+                {
+                    "kind": "skill",
+                    "path": "../outside/SKILL.md",
+                    "content": "must not escape",
+                },
+                {
+                    "kind": "skill",
+                    "path": "new skill/SKILL.md",
+                    "content": "must use a safe name",
+                },
+                {
+                    "kind": "skill",
+                    "path": "nested/child/SKILL.md",
+                    "content": "must stay direct-child",
+                },
+            )
+
+            applied = server._apply_self_improvement_updates(
+                updates,
+                memory_root=memory_root,
+                skill_root=skill_root,
+                personality_path=None,
+            )
+
+            self.assertEqual(applied, 0)
+            self.assertFalse(outside.exists())
+            self.assertFalse(skill_root.exists())
+
+    async def test_self_improvement_review_applies_structured_updates_for_admin_turn(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(
+                os.environ,
+                {
+                    "THEIA_HOME": str(root / "theia"),
+                    "THEIA_STATE": str(root / "state.json"),
+                },
+            ):
+                server = main.CodexAppServer()
+                personality_root = root / "theia" / "personalities"
+                personality_root.mkdir(parents=True)
+                personality_path = personality_root / "Cel.md"
+                personality_path.write_text("Be warm.", encoding="utf-8")
+                session = server._session("session")
+                session.personality_name = "Cel"
+                server._request = AsyncMock(
+                    side_effect=(
+                        {"thread": {"id": "review-thread"}},
+                        {"turn": {"id": "review-turn"}},
+                    )
+                )
+                server._wait_for_turn = AsyncMock(
+                    return_value=json.dumps(
+                        {
+                            "updates": [
+                                {
+                                    "kind": "memory",
+                                    "path": "MEMORY.md",
+                                    "content": "- Keep release summaries concise.",
+                                },
+                                {
+                                    "kind": "user_profile",
+                                    "path": "USER.md",
+                                    "content": "- User maintains Theia.",
+                                },
+                                {
+                                    "kind": "skill",
+                                    "path": "review/SKILL.md",
+                                    "content": "# Review\nUse evidence.",
+                                },
+                                {
+                                    "kind": "personality",
+                                    "path": "active",
+                                    "content": "Keep the tone warm and direct.",
+                                },
+                            ]
+                        }
+                    )
+                )
+                channel = _Channel()
+                channel.guild = _admin_guild()
+
+                applied = await server._run_self_improvement_review(
+                    session,
+                    "Please review the release.",
+                    "The release is ready.",
+                    channel=cast(Any, channel),
+                    user_id=7,
+                    user=SimpleNamespace(
+                        id=7,
+                        guild_permissions=SimpleNamespace(administrator=True),
+                    ),
+                    allow_tools=True,
+                )
+
+            self.assertEqual(applied, 4)
+            thread_params = cast(Any, server._request.await_args_list[0]).args[1]
+            self.assertEqual(thread_params["sandbox"], "read-only")
+            self.assertEqual(thread_params["approvalPolicy"], "never")
+            self.assertTrue(thread_params["ephemeral"])
+            self.assertNotIn(server._cwd, thread_params["runtimeWorkspaceRoots"])
+            turn_params = cast(Any, server._request.await_args_list[1]).args[1]
+            self.assertIn("outputSchema", turn_params)
+            self.assertEqual(
+                [message["content"] for message in channel.sent],
+                [
+                    "-# Memory created",
+                    "-# Skill created",
+                    "-# Personality updated",
+                ],
+            )
+            self.assertIn(
+                "Keep release summaries concise.",
+                (root / "theia" / "memories" / "MEMORY.md").read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "# Review",
+                (root / "theia" / "skills" / "review" / "SKILL.md").read_text(
+                    encoding="utf-8"
+                ),
+            )
+            self.assertIn(
+                "warm and direct", personality_path.read_text(encoding="utf-8")
+            )
+
+    async def test_self_improvement_failure_never_fails_the_completed_turn(
+        self,
+    ) -> None:
+        server = main.CodexAppServer()
+        server._request = AsyncMock(
+            side_effect=main.CodexAppServerError("review unavailable")
+        )
+        channel = _Channel()
+        channel.guild = _admin_guild()
+
+        result = await server._run_self_improvement_review(
+            server._session("session"),
+            "request",
+            "response",
+            channel=cast(Any, channel),
+            user_id=7,
+            user=None,
+            allow_tools=True,
+        )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(channel.sent, [])
+
+    async def test_changing_model_resets_thread_before_next_request(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(
+                os.environ,
+                {
+                    "THEIA_HOME": str(Path(directory) / "theia"),
+                    "THEIA_STATE": str(Path(directory) / "state.json"),
+                },
+            ),
+        ):
+            server = main.CodexAppServer()
+            server.available_models = AsyncMock(
+                return_value=(
+                    {"id": main.DEFAULT_CODEX_MODEL},
+                    {"id": "gpt-test"},
+                )
+            )
+            session = server._session("model-change")
+            session.thread_id = "old-thread"
+            session.loaded = True
+            session.tool_policy = True
+            session.instruction_fingerprint = server._instruction_fingerprint(session)
+
+            await server.set_model("gpt-test")
+
+            server._ensure_running = AsyncMock()
+            server._request = AsyncMock(return_value={"thread": {"id": "new-thread"}})
+            await server._ensure_thread(session)
+
+        self.assertEqual(server.model_name(), "gpt-test")
+        self.assertEqual(session.thread_id, "new-thread")
+        request = cast(Any, server._request.await_args)
+        self.assertEqual(request.args[0], "thread/start")
+        self.assertEqual(request.args[1]["model"], "gpt-test")
 
     async def test_personality_upload_selects_and_persists(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2587,9 +3190,12 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
                 await server._ensure_thread(server._session("session"))
 
         params = cast(Any, server._request.await_args).args[1]
-        self.assertEqual(
-            params["baseInstructions"], f"{main.BASE_PRIORS}\n\nUse a warm tone."
+        self.assertTrue(params["baseInstructions"].startswith(main.BASE_PRIORS))
+        self.assertIn("style-only guidance", params["baseInstructions"])
+        self.assertIn(
+            "<personality_profile>\nUse a warm tone.", params["baseInstructions"]
         )
+        self.assertIn("source code", params["developerInstructions"])
         self.assertIn("server administrator", params["developerInstructions"])
 
     async def test_changing_personality_resets_the_session_thread(self) -> None:
@@ -2804,9 +3410,10 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
             return _Message()
 
         response = "This is the complete Codex response."
-        await main.send_paginated(send, response)
+        await main.send_paginated(send, response, view=None)
         self.assertEqual(calls[0]["content"], response)
         self.assertNotIn("embed", calls[0])
+        self.assertNotIn("view", calls[0])
 
     async def test_status_does_not_render_path_from_intermediate_message(self) -> None:
         message = _Message()
@@ -2934,6 +3541,32 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(calls[0]["embed"].title, "Request failed")
         self.assertIn("Reason: quota reached", calls[0]["embed"].description)
+
+    async def test_request_prompt_includes_trusted_current_author_metadata(
+        self,
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        async def ask(prompt: str, **_kwargs: Any) -> str:
+            captured["prompt"] = prompt
+            return "response"
+
+        user = SimpleNamespace(id=7, display_name="M Λ J Λ N")
+        with patch.object(main.bot.codex, "ask", new=ask):
+            await main.handle_request(
+                AsyncMock(),
+                "hello",
+                channel=_Channel(),
+                user_id=user.id,
+                user=user,
+            )
+
+        self.assertIn("trusted Discord metadata", captured["prompt"])
+        self.assertIn("Current request author user id: 7", captured["prompt"])
+        self.assertIn(
+            "Current request author display name: M Λ J Λ N", captured["prompt"]
+        )
+        self.assertTrue(captured["prompt"].endswith("hello"))
 
     async def test_agent_created_thread_receives_the_first_response(self) -> None:
         source = _Channel()
