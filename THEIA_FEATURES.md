@@ -299,7 +299,9 @@ TTS_BASE_URL
 TTS_TOKEN
 ```
 
-Optional protocol, model, voice, and format settings are also supported.
+Optional protocol, model, voice, and format settings are also supported. The
+local setup wizard configures the custom STT model, TTS model, TTS voice, and
+TTS format.
 
 When enabled:
 

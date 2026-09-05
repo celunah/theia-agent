@@ -1072,7 +1072,17 @@ class ConfigurationScriptTests(unittest.TestCase):
 
     def test_voice_setup_requests_both_audio_services(self) -> None:
         prompts: list[str] = []
-        inputs = iter(["2", "https://stt.example/v1", "https://tts.example/v1"])
+        inputs = iter(
+            [
+                "2",
+                "https://stt.example/v1",
+                "https://tts.example/v1",
+                "local-whisper",
+                "local-tts",
+                "voice-one",
+                "wav",
+            ]
+        )
         secrets = iter(["discord-token", "stt-token", "tts-token"])
         values = collect_configuration(
             input_fn=lambda prompt: prompts.append(prompt) or next(inputs),
@@ -1088,13 +1098,25 @@ class ConfigurationScriptTests(unittest.TestCase):
                 "THEIA_DEFAULT_MODE": VOICE_MODE,
                 "STT_BASE_URL": "https://stt.example/v1",
                 "STT_TOKEN": "stt-token",
+                "STT_MODEL": "local-whisper",
                 "TTS_BASE_URL": "https://tts.example/v1",
                 "TTS_TOKEN": "tts-token",
+                "TTS_MODEL": "local-tts",
+                "TTS_VOICE": "voice-one",
+                "TTS_FORMAT": "wav",
             },
         )
         self.assertEqual(
             prompts,
-            ["Mode [1/text]: ", "STT URL: ", "TTS URL: "],
+            [
+                "Mode [1/text]: ",
+                "STT URL: ",
+                "TTS URL: ",
+                "STT model [whisper-1]: ",
+                "TTS model [tts-1]: ",
+                "TTS voice [alloy]: ",
+                "TTS format [mp3]: ",
+            ],
         )
 
     def test_setup_preserves_unrelated_dotenv_settings(self) -> None:
@@ -1132,6 +1154,14 @@ class ConfigurationScriptTests(unittest.TestCase):
                 mode=VOICE_MODE,
                 stt_base_url="https://user:password@stt.example/v1",
                 tts_base_url="https://tts.example/v1",
+            )
+        with self.assertRaisesRegex(ConfigurationError, "TTS format"):
+            validate_configuration(
+                discord_token="discord-token",
+                mode=VOICE_MODE,
+                stt_base_url="https://stt.example/v1",
+                tts_base_url="https://tts.example/v1",
+                tts_format="not-audio",
             )
 
 

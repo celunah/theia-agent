@@ -23,6 +23,8 @@ _ASSIGNMENT = re.compile(
 )
 _MAX_TOKEN_LENGTH = 1024
 _MAX_URL_LENGTH = 2048
+_MAX_PARAMETER_LENGTH = 256
+_SUPPORTED_TTS_FORMATS = frozenset({"mp3", "opus", "aac", "flac", "wav", "pcm"})
 
 
 class ConfigurationError(ValueError):
@@ -37,8 +39,12 @@ class ConfigurationValues:
     mode: str
     stt_base_url: str = ""
     stt_token: str = ""
+    stt_model: str = "whisper-1"
     tts_base_url: str = ""
     tts_token: str = ""
+    tts_model: str = "tts-1"
+    tts_voice: str = "alloy"
+    tts_format: str = "mp3"
 
     def as_environment(self) -> dict[str, str]:
         """Return values using Theia's supported environment variable names."""
@@ -51,8 +57,12 @@ class ConfigurationValues:
                 {
                     "STT_BASE_URL": self.stt_base_url,
                     "STT_TOKEN": self.stt_token,
+                    "STT_MODEL": self.stt_model,
                     "TTS_BASE_URL": self.tts_base_url,
                     "TTS_TOKEN": self.tts_token,
+                    "TTS_MODEL": self.tts_model,
+                    "TTS_VOICE": self.tts_voice,
+                    "TTS_FORMAT": self.tts_format,
                 }
             )
         return values
@@ -74,6 +84,25 @@ def _optional_token(value: str, label: str) -> str:
     return cleaned
 
 
+def _optional_parameter(value: str, label: str) -> str:
+    cleaned = value.strip()
+    if len(cleaned) > _MAX_PARAMETER_LENGTH or any(char in cleaned for char in "\r\n"):
+        raise ConfigurationError(f"{label} is not valid.")
+    return cleaned
+
+
+def _parameter(value: str, label: str, default: str) -> str:
+    return _optional_parameter(value, label) or default
+
+
+def _tts_format(value: str) -> str:
+    cleaned = _parameter(value, "The TTS format", "mp3").casefold()
+    if cleaned not in _SUPPORTED_TTS_FORMATS:
+        supported = ", ".join(sorted(_SUPPORTED_TTS_FORMATS))
+        raise ConfigurationError(f"The TTS format must be one of: {supported}.")
+    return cleaned
+
+
 def _url(value: str, label: str) -> str:
     cleaned = _required(value, label, maximum=_MAX_URL_LENGTH)
     parsed = urlparse(cleaned)
@@ -90,8 +119,12 @@ def validate_configuration(
     mode: str,
     stt_base_url: str = "",
     stt_token: str = "",
+    stt_model: str = "",
     tts_base_url: str = "",
     tts_token: str = "",
+    tts_model: str = "",
+    tts_voice: str = "",
+    tts_format: str = "",
 ) -> ConfigurationValues:
     """Validate setup input without logging or displaying credential values."""
     selected_mode = mode.strip().casefold()
@@ -109,8 +142,12 @@ def validate_configuration(
         mode=selected_mode,
         stt_base_url=_url(stt_base_url, "The STT URL"),
         stt_token=_optional_token(stt_token, "The STT token"),
+        stt_model=_parameter(stt_model, "The STT model", "whisper-1"),
         tts_base_url=_url(tts_base_url, "The TTS URL"),
         tts_token=_optional_token(tts_token, "The TTS token"),
+        tts_model=_parameter(tts_model, "The TTS model", "tts-1"),
+        tts_voice=_parameter(tts_voice, "The TTS voice", "alloy"),
+        tts_format=_tts_format(tts_format),
     )
 
 
@@ -220,7 +257,7 @@ def _choose_mode(
 ) -> str:
     output_fn("Choose Theia's default interaction mode:")
     output_fn("  1. Text (Discord messages only)")
-    output_fn("  2. Voice (Discord plus STT and TTS services)")
+    output_fn("  2. Voice (Discord plus custom STT and TTS)")
     while True:
         choice = input_fn("Mode [1/text]: ").strip().casefold()
         if choice in {"", "1", TEXT_MODE}:
@@ -245,16 +282,24 @@ def collect_configuration(
     if mode == TEXT_MODE:
         return validate_configuration(discord_token=token, mode=mode)
     stt_url = read("STT URL: ")
-    stt_token = read_secret("STT token (blank if not required): ")
     tts_url = read("TTS URL: ")
+    stt_token = read_secret("STT token (blank if not required): ")
     tts_token = read_secret("TTS token (blank if not required): ")
+    stt_model = read("STT model [whisper-1]: ")
+    tts_model = read("TTS model [tts-1]: ")
+    tts_voice = read("TTS voice [alloy]: ")
+    tts_format = read("TTS format [mp3]: ")
     return validate_configuration(
         discord_token=token,
         mode=mode,
         stt_base_url=stt_url,
         stt_token=stt_token,
+        stt_model=stt_model,
         tts_base_url=tts_url,
         tts_token=tts_token,
+        tts_model=tts_model,
+        tts_voice=tts_voice,
+        tts_format=tts_format,
     )
 
 

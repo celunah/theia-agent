@@ -69,7 +69,8 @@ python scripts/configure.py
 ```
 
 It asks for text or voice mode, then collects the Discord token and (for voice
-mode) the OpenAI-compatible STT/TTS URLs and optional service tokens. It writes
+mode) the OpenAI-compatible STT/TTS URLs, optional service tokens, and voice
+parameters. It writes
 the local ignored `.env` atomically. You can also create `.env` from
 `.env.example` and edit it manually.
 
@@ -187,15 +188,21 @@ THEIA_CONTEXT_MESSAGES=12
 THEIA_CONTEXT_MAX_CHARACTERS=8000
 
 # Optional OpenAI-compatible audio services
+STT_PROTOCOL=openai-compatible
 STT_BASE_URL=
 STT_TOKEN=
 STT_MODEL=whisper-1
+TTS_PROTOCOL=openai-compatible
 TTS_BASE_URL=
 TTS_TOKEN=
 TTS_MODEL=tts-1
 TTS_VOICE=alloy
 TTS_FORMAT=mp3
 ```
+
+The setup wizard writes the custom provider's STT model, TTS model, TTS voice,
+and TTS format. Advanced protocol aliases remain available through the
+corresponding environment variables.
 
 Voice mode also needs a system Opus library and `ffmpeg` on `PATH`. The audio
 integrations remain disabled when their base URLs are empty.
