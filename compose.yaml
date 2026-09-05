@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: theia-agent:1.0.1
+    image: theia-agent:1.1.0
     env_file:
       - .env
     environment:

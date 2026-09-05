@@ -985,7 +985,7 @@ class CommandSurfaceTests(unittest.TestCase):
         self.assertEqual(
             [(field.name, field.value) for field in embed.fields],
             [
-                ("Theia Agent", "1.0.1 (a1b2c3d)"),
+                ("Theia Agent", "1.1.0 (a1b2c3d)"),
                 ("Codex CLI", "0.153.0"),
                 ("Account", "@username"),
                 ("Plan", "Plus ($20/mo)"),
@@ -1298,7 +1298,7 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [(field.name, field.value) for field in kwargs["embed"].fields],
             [
-                ("Theia Agent", "1.0.1 (a1b2c3d)"),
+                ("Theia Agent", "1.1.0 (a1b2c3d)"),
                 ("Codex CLI", "0.153.0"),
                 ("Account", "@username"),
                 ("Plan", "Plus ($20/mo)"),

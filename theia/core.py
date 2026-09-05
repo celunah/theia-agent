@@ -44,7 +44,7 @@ _load_environment()
 
 AGENT_NAME = "Theia"
 AGENT_DISPLAY_NAME = "Theia Agent"
-THEIA_VERSION = "1.0.1"
+THEIA_VERSION = "1.1.0"
 _REVISION_RE = re.compile(r"^[0-9a-f]{7,40}$", re.IGNORECASE)
 _BUILD_REVISION_FILENAME = "build-revision.txt"
 BASE_PRIORS = """Follow the user's request and use available tools when needed.
