@@ -8,7 +8,9 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import os
 import sys
+import unittest
 from pathlib import Path
 from unittest import mock
 
@@ -28,6 +30,7 @@ SPEC.loader.exec_module(CI_WARNINGS)
 class TestRunCi:
     """Verify CI process cleanup behavior."""
 
+    @unittest.skipUnless(os.name == "nt", "Windows-only process startup behavior")
     def test_windows_start_keeps_console_interrupts_on_runner(self) -> None:
         """Verify the child is not isolated from the runner's console group."""
         process = mock.Mock()
@@ -43,6 +46,7 @@ class TestRunCi:
 
         popen.assert_called_once_with(run_ci.POE_COMMAND, text=True)
 
+    @unittest.skipUnless(os.name == "nt", "Windows-only process cleanup behavior")
     def test_windows_cleanup_kills_tree_after_wrapper_exits(self) -> None:
         """Verify fallback cleanup still runs when the wrapper has exited."""
         process = mock.Mock()
@@ -67,6 +71,7 @@ class TestRunCi:
         process.kill.assert_called_once_with()
         process.wait.assert_called_once_with(timeout=run_ci.GRACE_PERIOD)
 
+    @unittest.skipUnless(os.name != "nt", "POSIX-only process cleanup behavior")
     def test_posix_cleanup_uses_immediate_process_group_kill(self) -> None:
         """Verify cleanup does not let Poe advance to another task."""
         process = mock.Mock()
@@ -124,6 +129,7 @@ class TestCIWarnings:
             "50%25%0D%0Awarning"
         )
 
+    @unittest.skipUnless(os.name != "nt", "POSIX-only process cleanup behavior")
     def test_interrupt_cleanup_kills_the_wrapped_process_group(self) -> None:
         """Stop descendants instead of leaving a CI subprocess tree behind."""
         process = mock.Mock()

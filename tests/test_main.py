@@ -1502,6 +1502,10 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
             "/usr/bin/python", ["/usr/bin/python", "main.py", "--test"]
         )
 
+    @unittest.skipIf(
+        os.name == "nt",
+        "POSIX executable path fixture is not portable to Windows",
+    )
     async def test_restart_uses_the_original_binary_for_compiled_processes(
         self,
     ) -> None:
