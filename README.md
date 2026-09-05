@@ -4,7 +4,7 @@ Theia Agent is a Discord bot that brings private, persistent Codex
 conversations to Discord. It runs the Codex App Server locally and keeps each
 user, channel, and thread in an isolated session.
 
-The current release is `1.0.0`.
+The current release is `1.0.1`.
 
 ## Highlights
 
@@ -35,6 +35,10 @@ administrator-only. `/mode voice` requires the voice dependencies and audio
 services described below.
 `/customize` also covers pagination controls, input modal labels, and embed
 field labels in the account, usage, credits, and About views.
+Successful `/restart`, `/model`, and `/customize` confirmations are public;
+account, session, authentication, and permission-sensitive responses remain
+ephemeral. `/stop`, `/btw`, and successful `/skill` responses are already
+public conversation or action results.
 `/about` privately shows the running Theia version and revision, selected
 Codex CLI version, invoking Discord account, Codex plan, and current session
 mode and personality.
@@ -87,6 +91,8 @@ therefore needs Node.js plus the bootstrapped or explicitly configured Codex CLI
 Nuitka and a supported platform compiler are build-time requirements.
 `/restart` re-executes the original one-file binary, including after its
 temporary extraction directory has been cleaned up.
+The build embeds the short Git revision used to produce the executable so
+`/about` remains accurate after extraction.
 
 Keep `.env` private. Theia stores its Codex login, session state, cached
 attachments, personalities, and installed skills in a private home at
@@ -108,6 +114,7 @@ The most useful optional settings are:
 # Codex and runtime
 THEIA_DEFAULT_MODE=text        # text or voice for new sessions
 THEIA_APPROVAL_LEVEL=high      # high, medium, or low approval handling
+THEIA_ALWAYS_ADMIN_USERS=      # comma-delimited trusted Discord user IDs
 THEIA_SELF_IMPROVEMENT=true    # review completed admin turns for durable updates
 THEIA_SELF_IMPROVEMENT_TIMEOUT=90
 THEIA_CODEX_CLI=
@@ -164,6 +171,10 @@ write source code, configuration, authentication, session state, Git metadata,
 or arbitrary workspace files. Set `THEIA_SELF_IMPROVEMENT=false` to disable it.
 Applied changes are reported in Discord with compact statuses such as `Memory
 created`, `Skill updated`, and `Personality updated`.
+Set `THEIA_ALWAYS_ADMIN_USERS` to a comma-delimited list of trusted Discord user
+IDs to grant those users Theia administrator access even without Discord server
+administrator permission. This is a global deployment override and does not
+replace the normal Codex login requirement.
 
 ## Development
 

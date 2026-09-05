@@ -14,6 +14,7 @@ import discord
 from typing_extensions import Self
 
 import main
+from scripts import build_nuitka
 from scripts.configure import (
     VOICE_MODE,
     TEXT_MODE,
@@ -113,6 +114,25 @@ class _HistoryChannel(_Channel):
         return iterator()
 
 
+class _ForbiddenHistoryIterator:
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raise discord.Forbidden(
+            SimpleNamespace(status=403, reason="Forbidden"), "forbidden"
+        )
+
+
+class _ForbiddenHistoryChannel(_Channel):
+    def __init__(self, channel_id: int) -> None:
+        super().__init__()
+        self.id = channel_id
+
+    def history(self, *, limit: int, after=None):  # pylint: disable=unused-argument
+        return _ForbiddenHistoryIterator()
+
+
 class CommandSurfaceTests(unittest.TestCase):
     def test_default_codex_model_is_configured(self) -> None:
         with (
@@ -141,6 +161,46 @@ class CommandSurfaceTests(unittest.TestCase):
             fallback = main.CodexAppServer()
         self.assertEqual(fallback.approval_level(), main.DEFAULT_APPROVAL_LEVEL)
 
+    def test_always_admin_users_parse_and_override_discord_permissions(self) -> None:
+        with patch.dict(
+            os.environ,
+            {main.ALWAYS_ADMIN_USERS_ENV: "42, 99,invalid,0,42"},
+        ):
+            self.assertEqual(
+                main._configured_user_ids(main.ALWAYS_ADMIN_USERS_ENV),
+                frozenset({42, 99}),
+            )
+            configured_user = SimpleNamespace(
+                id=42,
+                guild_permissions=SimpleNamespace(administrator=False),
+            )
+            regular_user = SimpleNamespace(
+                id=7,
+                guild_permissions=SimpleNamespace(administrator=False),
+            )
+
+            self.assertTrue(
+                main._is_server_admin(cast(Any, configured_user), _Channel())
+            )
+            self.assertFalse(main._is_server_admin(cast(Any, regular_user), _Channel()))
+            self.assertTrue(main._is_server_admin(cast(Any, configured_user), None))
+
+            channel = _Channel()
+            self.assertTrue(
+                main.CodexAppServer._has_current_server_admin_access(
+                    channel,
+                    42,
+                    current_user=configured_user,
+                )
+            )
+            self.assertFalse(
+                main.CodexAppServer._has_current_server_admin_access(
+                    channel,
+                    7,
+                    current_user=regular_user,
+                )
+            )
+
     def test_environment_loads_from_compiled_executable_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -161,6 +221,47 @@ class CommandSurfaceTests(unittest.TestCase):
                 core_module._load_environment()
 
         load_dotenv.assert_called_once_with(dotenv_path, override=False)
+
+    def test_embedded_build_revision_is_used_when_git_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / "theia"
+            package.mkdir()
+            (package / "build-revision.txt").write_text("a1b2c3d\n", encoding="ascii")
+            with (
+                patch.object(core_module, "__file__", str(package / "core.py")),
+                patch.dict(os.environ, {"THEIA_COMMIT": ""}),
+            ):
+                self.assertEqual(core_module._theia_revision(), "a1b2c3d")
+
+    def test_nuitka_build_embeds_the_build_revision(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(
+                build_nuitka.importlib.util,
+                "find_spec",
+                return_value=object(),
+            ),
+            patch.object(
+                build_nuitka,
+                "_git_revision",
+                return_value="a1b2c3d",
+            ),
+            patch.object(
+                build_nuitka.subprocess,
+                "run",
+                return_value=SimpleNamespace(returncode=0),
+            ) as run,
+        ):
+            self.assertEqual(
+                build_nuitka.build_executable(Path(directory), "theia"),
+                0,
+            )
+
+        command = run.call_args.args[0]
+        self.assertTrue(
+            any(argument.endswith("=theia/build-revision.txt") for argument in command)
+        )
 
     def test_only_requested_slash_commands_are_registered(self) -> None:
         names = {command.name for command in main.bot.tree.get_commands()}
@@ -821,7 +922,7 @@ class CommandSurfaceTests(unittest.TestCase):
         self.assertEqual(label_customized.title, "Failure")
 
     def test_about_embed_contains_only_the_requested_runtime_details(self) -> None:
-        user = SimpleNamespace(name="username", mention="@username")
+        user = SimpleNamespace(name="username", mention="<@123456789>")
         with patch("theia.bot._theia_revision", return_value="a1b2c3d"):
             embed = main._about_embed(
                 account={"planType": "plus"},
@@ -835,7 +936,7 @@ class CommandSurfaceTests(unittest.TestCase):
         self.assertEqual(
             [(field.name, field.value) for field in embed.fields],
             [
-                ("Theia Agent", "1.0.0 (a1b2c3d)"),
+                ("Theia Agent", "1.0.1 (a1b2c3d)"),
                 ("Codex CLI", "0.153.0"),
                 ("Account", "@username"),
                 ("Plan", "Plus ($20/mo)"),
@@ -845,7 +946,7 @@ class CommandSurfaceTests(unittest.TestCase):
         )
 
     def test_about_embed_customizes_field_labels(self) -> None:
-        user = SimpleNamespace(name="username", mention="@username")
+        user = SimpleNamespace(name="username", mention="<@123456789>")
         with tempfile.TemporaryDirectory() as directory:
             store = main.FrontendCustomizationStore(Path(directory) / "frontend.json")
             for target, value in (
@@ -1074,7 +1175,7 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [(field.name, field.value) for field in kwargs["embed"].fields],
             [
-                ("Theia Agent", "1.0.0 (a1b2c3d)"),
+                ("Theia Agent", "1.0.1 (a1b2c3d)"),
                 ("Codex CLI", "0.153.0"),
                 ("Account", "@username"),
                 ("Plan", "Plus ($20/mo)"),
@@ -1210,6 +1311,7 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
 
         embed = response.send_message.await_args.kwargs["embed"]
         self.assertEqual(embed.title, "Administrator access required")
+        self.assertTrue(response.send_message.await_args.kwargs["ephemeral"])
 
         with tempfile.TemporaryDirectory() as directory:
             store = main.FrontendCustomizationStore(Path(directory) / "frontend.json")
@@ -1236,6 +1338,7 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
                     "Usage for {server}",
                 )
 
+            self.assertNotIn("ephemeral", admin_response.send_message.await_args.kwargs)
             self.assertEqual(
                 store.render(
                     42,
@@ -1246,6 +1349,47 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 "Usage for Example",
             )
+
+    async def test_model_selection_confirmation_is_public(self) -> None:
+        interaction = SimpleNamespace(
+            guild=SimpleNamespace(id=42),
+            channel=SimpleNamespace(id=7, guild=SimpleNamespace(id=42)),
+            user=SimpleNamespace(id=9),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        with (
+            patch.object(main.bot.presence, "touch", new=AsyncMock()),
+            patch.object(main.bot.codex, "is_authenticated", return_value=True),
+            patch.object(main.bot.codex, "set_model", new=AsyncMock()),
+        ):
+            await cast(Any, main.codex_model.callback)(interaction, "gpt-test")
+
+        interaction.response.defer.assert_awaited_once_with()
+        self.assertNotIn("ephemeral", interaction.followup.send.await_args.kwargs)
+
+    async def test_restart_confirmation_is_public(self) -> None:
+        interaction = SimpleNamespace(
+            guild=SimpleNamespace(id=42),
+            channel=SimpleNamespace(id=7, guild=SimpleNamespace(id=42)),
+            user=SimpleNamespace(
+                id=9,
+                guild_permissions=SimpleNamespace(administrator=True),
+            ),
+            response=SimpleNamespace(send_message=AsyncMock()),
+        )
+        with (
+            patch.object(main.bot, "_restart_task", None),
+            patch("theia.bot._restart_in_place", new=AsyncMock()),
+        ):
+            await cast(Any, main.codex_restart.callback)(interaction)
+            restart_task = main.bot._restart_task
+            if restart_task is not None:
+                await restart_task
+
+        self.assertNotIn(
+            "ephemeral", interaction.response.send_message.await_args.kwargs
+        )
 
     async def test_status_customization_changes_only_discord_delivery(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1599,6 +1743,37 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("message 1", context)
         self.assertIn("message 7", context)
         self.assertLessEqual(len(context.split("\n", 1)[1]), 45)
+
+    async def test_backfill_logs_channel_id_when_history_is_forbidden(self) -> None:
+        channel = _ForbiddenHistoryChannel(321)
+        known_channels = dict(main.bot._known_channels)
+        main.bot._known_channels.clear()
+        try:
+            with (
+                patch.object(
+                    main.bot.codex,
+                    "channel_checkpoints",
+                    return_value=(channel.id,),
+                ),
+                patch.object(
+                    main.bot.codex,
+                    "channel_checkpoint",
+                    return_value=99,
+                ),
+                patch.object(main.bot, "get_channel", return_value=channel),
+                self.assertLogs("theia.codex", level="INFO") as logs,
+            ):
+                await main.bot.backfill_after_resume()
+        finally:
+            main.bot._known_channels.clear()
+            main.bot._known_channels.update(known_channels)
+
+        self.assertTrue(
+            any(
+                "channel_id=321" in message and "error=Forbidden" in message
+                for message in logs.output
+            )
+        )
 
     async def test_login_uses_cached_account(self) -> None:
         server = main.CodexAppServer()

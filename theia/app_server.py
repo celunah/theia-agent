@@ -39,6 +39,7 @@ from .core import (
     _env_bool,
     _env_float,
     _error_message,
+    _is_always_admin_user,
     _is_tool_item,
     _path_from_value,
     _path_is_under,
@@ -3224,12 +3225,16 @@ class CodexAppServer:
         current_user: Any | None = None,
     ) -> bool:
         """Return whether the current guild member still has administrator access."""
+        if user_id is None:
+            return False
+        if current_user is not None and getattr(current_user, "id", None) != user_id:
+            return False
+        if _is_always_admin_user(user_id):
+            return True
         guild = getattr(channel, "guild", None)
-        if guild is None or user_id is None:
+        if guild is None:
             return False
         if current_user is not None:
-            if getattr(current_user, "id", None) != user_id:
-                return False
             permissions = getattr(current_user, "guild_permissions", None)
             return bool(permissions and getattr(permissions, "administrator", False))
         get_member = getattr(guild, "get_member", None)

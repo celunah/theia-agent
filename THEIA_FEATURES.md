@@ -28,7 +28,8 @@ Prefix commands are disabled.
 
 `/about` privately displays the running Theia version and short source
 revision, selected Codex CLI version, invoking Discord account, Codex plan,
-and current session mode and personality.
+and current session mode and personality. One-file builds embed the short Git
+revision used to produce them.
 
 Theia also:
 
@@ -63,6 +64,11 @@ Command responses, approvals, and choices use embeds. Statuses use compact `-#` 
 - Raw commands, tool calls, paths, output, credentials, and chain-of-thought are not exposed.
 - Failure embeds include the underlying sanitized Codex error.
 
+Successful `/restart`, `/model`, and `/customize` confirmations are public;
+account, session, authentication, and permission-sensitive responses remain
+ephemeral. `/stop`, `/btw`, and successful `/skill` responses are public by
+design.
+
 Typing indicators are shown while Theia is responding.
 
 Server administrators can use `/customize` to change Discord-only embed
@@ -89,6 +95,8 @@ agent state.
 - Login reports `Already logged in`, `Cached authentication imported`,
   `Device code required`, and `Authentication completed` for those states.
 - A server administrator can authenticate the bot for server-wide use.
+- `THEIA_ALWAYS_ADMIN_USERS` can grant trusted Discord user IDs global Theia
+  administrator access even when they are not Discord server administrators.
 - Sessions are isolated by Discord user, channel, and thread.
 - Approvals are bound to the Discord user, thread, turn, and approval item.
 - Codex approval requests are surfaced in Discord even when the current policy
@@ -224,6 +232,10 @@ Supported tool categories include:
 - Theia’s Discord messaging tool.
 
 Server administrators receive the configured Codex tool policy, normally workspace-write with approval requests. Normal users are restricted to read-only/safe operation and cannot perform writes, state-changing commands, credential access, external side effects, or unrestricted dynamic Discord actions.
+Users listed in `THEIA_ALWAYS_ADMIN_USERS` receive the same Theia administrator
+authorization for commands, full tool access, approvals, voice rechecks, and
+self-improvement review. The setting is a trusted deployment override and does
+not bypass Codex authentication.
 
 Tool availability still depends on the selected model, account, provider capabilities, and Codex configuration. `modelProvider/capabilities/read` is implemented and cached, but does not currently have a dedicated Discord command.
 

@@ -44,8 +44,9 @@ _load_environment()
 
 AGENT_NAME = "Theia"
 AGENT_DISPLAY_NAME = "Theia Agent"
-THEIA_VERSION = "1.0.0"
+THEIA_VERSION = "1.0.1"
 _REVISION_RE = re.compile(r"^[0-9a-f]{7,40}$", re.IGNORECASE)
+_BUILD_REVISION_FILENAME = "build-revision.txt"
 BASE_PRIORS = """Follow the user's request and use available tools when needed.
 Keep user-facing progress concise and natural. Do not expose hidden chain-of-thought,
 raw tool calls, shell commands, command output, credentials, or internal paths.
@@ -57,6 +58,7 @@ DEFAULT_CODEX_MODEL = "gpt-5.6-luna"
 APPROVAL_LEVEL_ENV = "THEIA_APPROVAL_LEVEL"
 APPROVAL_LEVELS = frozenset({"high", "medium", "low"})
 DEFAULT_APPROVAL_LEVEL = "high"
+ALWAYS_ADMIN_USERS_ENV = "THEIA_ALWAYS_ADMIN_USERS"
 SELF_IMPROVEMENT_ENV = "THEIA_SELF_IMPROVEMENT"
 SELF_IMPROVEMENT_TIMEOUT_ENV = "THEIA_SELF_IMPROVEMENT_TIMEOUT"
 DEFAULT_SELF_IMPROVEMENT = True
@@ -84,11 +86,39 @@ _TOOL_ITEM_TYPES = frozenset(
 )
 
 
+def _configured_user_ids(environment_name: str) -> frozenset[int]:
+    """Parse a comma-delimited environment setting containing user IDs."""
+    configured = os.getenv(environment_name, "")
+    user_ids: set[int] = set()
+    for raw_value in configured.split(","):
+        value = raw_value.strip()
+        if re.fullmatch(r"[0-9]+", value):
+            user_id = int(value)
+            if user_id > 0:
+                user_ids.add(user_id)
+    return frozenset(user_ids)
+
+
+def _is_always_admin_user(user_id: int | None) -> bool:
+    """Return whether configuration grants this user global Theia admin access."""
+    return user_id is not None and user_id in _configured_user_ids(
+        ALWAYS_ADMIN_USERS_ENV
+    )
+
+
 def _theia_revision() -> str:
     """Return the short source revision included in the About embed."""
     configured = os.getenv("THEIA_COMMIT", "").strip()
     if _REVISION_RE.fullmatch(configured):
         return configured[:7]
+
+    embedded_path = Path(__file__).resolve().with_name(_BUILD_REVISION_FILENAME)
+    try:
+        embedded = embedded_path.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError):
+        embedded = ""
+    if _REVISION_RE.fullmatch(embedded):
+        return embedded[:7]
 
     project_root = Path(__file__).resolve().parent.parent
     try:

@@ -26,6 +26,7 @@ from .core import (
     _env_bool,
     _render_frontend_label,
     _safe_error_reason,
+    _is_always_admin_user,
     _theia_revision,
     _subtext,
     _truncate,
@@ -119,6 +120,8 @@ def _configured_ids(*names: str) -> set[int]:
 
 
 def _is_server_admin(user: discord.abc.User, channel: Any | None) -> bool:
+    if _is_always_admin_user(getattr(user, "id", None)):
+        return True
     if getattr(channel, "guild", None) is None:
         return False
     permissions = getattr(user, "guild_permissions", None)
@@ -854,9 +857,6 @@ _PLAN_PRICES = {
 def _about_account(user: discord.abc.User | None) -> str:
     if user is None:
         return "Unavailable"
-    mention = getattr(user, "mention", None)
-    if isinstance(mention, str) and mention:
-        return mention
     name = getattr(user, "name", None) or getattr(user, "display_name", None)
     if not name:
         return "Unavailable"
@@ -1141,7 +1141,9 @@ class TheiaBot(commands.Bot):
                 ]
             except discord.DiscordException as exc:
                 logger.info(
-                    "Could not backfill a Discord channel after reconnect (error=%s)",
+                    "Could not backfill a Discord channel after reconnect "
+                    "(channel_id=%s, error=%s)",
+                    channel_id,
                     type(exc).__name__,
                 )
                 continue
@@ -1276,7 +1278,6 @@ async def codex_restart(interaction: discord.Interaction) -> None:
                 user=interaction.user,
                 color=discord.Color.orange(),
             ),
-            ephemeral=True,
         )
         return
 
@@ -1290,7 +1291,6 @@ async def codex_restart(interaction: discord.Interaction) -> None:
             user=interaction.user,
             color=discord.Color.blurple(),
         ),
-        ephemeral=True,
     )
     bot._restart_task = asyncio.create_task(_restart_in_place())
 
@@ -1497,7 +1497,7 @@ async def codex_model(interaction: discord.Interaction, model: str) -> None:
     """Select the Codex model used for new requests in this installation."""
     if not await _require_login(interaction):
         return
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer()
     try:
         await bot.codex.set_model(model)
     except (CodexAppServerError, OSError) as exc:
@@ -1513,7 +1513,6 @@ async def codex_model(interaction: discord.Interaction, model: str) -> None:
             context={"model": model},
             color=discord.Color.green(),
         ),
-        ephemeral=True,
     )
 
 
@@ -1962,7 +1961,6 @@ async def codex_customize(
             user=interaction.user,
             color=discord.Color.green(),
         ),
-        ephemeral=True,
     )
 
 
