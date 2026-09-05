@@ -1,5 +1,7 @@
 services:
   theia:
+    userns_mode: "keep-id:uid=10001,gid=10001"
+    network_mode: host
     build:
       context: .
       dockerfile: Dockerfile
@@ -7,14 +9,17 @@ services:
     env_file:
       - .env
     environment:
-      THEIA_HOME: /data/theia
-      THEIA_STATE: /data/theia/sessions.json
+      THEIA_HOME: /data
+      THEIA_STATE: /data/sessions.json
       CODEX_CWD: /workspace
     volumes:
-      - theia-data:/data
-      - theia-workspace:/workspace
+      - type: bind
+        source: ${HOME}/.theia
+        target: /data
+      - type: bind
+        source: ${HOME}/theia-workspace
+        target: /workspace
     restart: unless-stopped
 
-volumes:
-  theia-data:
-  theia-workspace:
+x-podman:
+  in_pod: false
