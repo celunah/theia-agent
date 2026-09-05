@@ -55,6 +55,7 @@ DEFAULT_CONTEXT_CHARACTERS = 8000
 MAX_CONTEXT_CHARACTERS = 16000
 CONTEXT_MESSAGE_LIMIT_ENV = "THEIA_CONTEXT_MESSAGES"
 CONTEXT_CHARACTER_LIMIT_ENV = "THEIA_CONTEXT_MAX_CHARACTERS"
+BARE_MENTION_PROMPT = "Please respond to the recent conversation context."
 
 
 def _frontend_embed(
@@ -2218,10 +2219,13 @@ async def on_message(message: discord.Message) -> None:
         if mentioned
         else (message.content or "").strip()
     )
-    if not prompt and not message.attachments:
-        return
     if not prompt:
-        prompt = "Please process the attached file(s)."
+        if mentioned:
+            prompt = BARE_MENTION_PROMPT
+        elif message.attachments:
+            prompt = "Please process the attached file(s)."
+        else:
+            return
     guild_id = getattr(getattr(message.channel, "guild", None), "id", None)
     authenticated = bot.codex.is_authenticated(message.author.id, guild_id)
     if (

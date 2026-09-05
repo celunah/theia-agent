@@ -44,6 +44,8 @@ Codex CLI version, invoking Discord account, Codex plan, and current session
 mode and personality.
 Independent message, slash-command, and voice turns run as tracked background
 tasks, so a long-running agentic action does not block other Discord requests.
+A bare mention of Theia prompts a response to the bounded recent channel
+context.
 The default Codex model is `gpt-5.6-luna`; `/model` can select another
 available model, and changing it starts the next request in a fresh
 conversation.

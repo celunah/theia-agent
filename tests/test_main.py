@@ -24,7 +24,7 @@ from scripts.configure import (
     validate_configuration,
 )
 from theia import core as core_module
-from theia.bot import _handle_voice_transcript
+from theia.bot import _handle_voice_transcript, on_message
 from theia.core import _path_is_under
 
 
@@ -1712,6 +1712,50 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(response_channel, source)
         message.create_thread.assert_awaited_once()
+
+    async def test_bare_mention_uses_recent_context_nudge(self) -> None:
+        """Route a mention without message text instead of dropping it."""
+        channel = _Channel()
+        author = SimpleNamespace(
+            id=7,
+            bot=False,
+            guild_permissions=SimpleNamespace(administrator=False),
+        )
+        theia_user = SimpleNamespace(id=123)
+        message = SimpleNamespace(
+            id=88,
+            channel=channel,
+            author=author,
+            content="<@123>",
+            mentions=[theia_user],
+            attachments=[],
+        )
+        scheduled: list[Any] = []
+        with (
+            patch.object(main.bot._connection, "user", theia_user),
+            patch.object(main.bot.presence, "touch", new=AsyncMock()),
+            patch.object(main.bot.codex, "is_authenticated", return_value=True),
+            patch.object(
+                main.bot,
+                "schedule_request",
+                side_effect=scheduled.append,
+            ),
+            patch(
+                "theia.bot._message_context",
+                new=AsyncMock(return_value="recent context"),
+            ),
+            patch("theia.bot.handle_request", new=AsyncMock()) as handle,
+        ):
+            await on_message(cast(Any, message))
+            self.assertEqual(len(scheduled), 1)
+            await scheduled.pop()
+
+        handle.assert_awaited_once()
+        await_args = cast(Any, handle.await_args)
+        self.assertEqual(
+            await_args.args[1], "Please respond to the recent conversation context."
+        )
+        self.assertEqual(await_args.kwargs["context"], "recent context")
 
     async def test_recent_channel_context_is_oldest_to_newest_and_skips_status(
         self,
