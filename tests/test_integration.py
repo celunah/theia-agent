@@ -147,6 +147,7 @@ class TestLocalCodexBoundary(unittest.IsolatedAsyncioTestCase):
                 "HERMES_HOME": str(self._root / "hermes"),
                 "THEIA_HOME": str(self._root / "theia"),
                 "THEIA_STATE": str(self._root / "sessions.json"),
+                "THEIA_APPROVAL_LEVEL": "high",
                 "THEIA_CODEX_CLI": str(launcher),
                 "THEIA_INCLUDE_GLOBAL_MEMORY": "false",
             },

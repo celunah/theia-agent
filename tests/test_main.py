@@ -1166,6 +1166,14 @@ class ConfigurationScriptTests(unittest.TestCase):
 
 
 class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        """Keep default-policy tests independent of a developer's .env file."""
+        self._approval_environment = patch.dict(
+            os.environ, {"THEIA_APPROVAL_LEVEL": "high"}
+        )
+        self._approval_environment.start()
+        self.addCleanup(self._approval_environment.stop)
+
     async def test_about_command_fetches_data_and_sends_a_private_embed(self) -> None:
         guild = SimpleNamespace(id=42)
         channel = SimpleNamespace(id=7, guild=guild)
@@ -3974,10 +3982,20 @@ class _AudioHTTPResponse:
 class AudioProtocolTests(unittest.IsolatedAsyncioTestCase):
     def _environment(self) -> dict[str, str]:
         return {
+            "STT_PROTOCOL": "openai-compatible",
+            "STT_BASE_URL": "http://transcribe.test/v1/",
+            "STT_TOKEN": "transcription-secret",
+            "STT_MODEL": "local-whisper",
             "THEIA_TRANSCRIPTION_PROTOCOL": "openai-compatible",
             "THEIA_TRANSCRIPTION_BASE_URL": "http://transcribe.test/v1/",
             "THEIA_TRANSCRIPTION_API_KEY": "transcription-secret",
             "THEIA_TRANSCRIPTION_MODEL": "local-whisper",
+            "TTS_PROTOCOL": "openai-compatible",
+            "TTS_BASE_URL": "http://speech.test/v1",
+            "TTS_TOKEN": "tts-secret",
+            "TTS_MODEL": "local-tts",
+            "TTS_VOICE": "voice-one",
+            "TTS_FORMAT": "wav",
             "THEIA_TTS_PROTOCOL": "openai-compatible",
             "THEIA_TTS_BASE_URL": "http://speech.test/v1",
             "THEIA_TTS_API_KEY": "tts-secret",
