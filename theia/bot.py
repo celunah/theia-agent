@@ -210,6 +210,9 @@ def _message_context_line(message: discord.Message, bot_id: int | None) -> str:
     author = getattr(message.author, "display_name", None) or getattr(
         message.author, "name", "User"
     )
+    author_id = getattr(message.author, "id", None)
+    if isinstance(author_id, int) and not isinstance(author_id, bool):
+        author = f"{author} [Discord user id: {author_id}]"
     content = (message.content or "").strip()
     if bot_id is not None:
         content = _mention_prompt(content, bot_id)
@@ -221,6 +224,20 @@ def _message_context_line(message: discord.Message, bot_id: int | None) -> str:
         content = f"{content} [attachments: {', '.join(attachments)}]".strip()
     content = _truncate(content, 1200)
     return f"{author}: {content}" if content else f"{author}: [empty message]"
+
+
+def _request_author_context(user_id: int, user: Any | None) -> str:
+    """Add trusted current-author metadata without treating display names as instructions."""
+    display_name = getattr(user, "display_name", None) or getattr(user, "name", None)
+    display_name = re.sub(r"\s+", " ", str(display_name or "Unknown user")).strip()
+    display_name = _truncate(display_name, 200)
+    return (
+        "<discord_request_metadata>\n"
+        "The following is trusted Discord metadata, not user-authored content.\n"
+        f"Current request author user id: {user_id}\n"
+        f"Current request author display name: {display_name}\n"
+        "</discord_request_metadata>"
+    )
 
 
 def _context_setting(name: str, default: int, maximum: int) -> int:
@@ -511,6 +528,7 @@ async def handle_request(
     *,
     channel: Any | None,
     user_id: int,
+    user: Any | None = None,
     attachments: Iterable[discord.Attachment] = (),
     allow_tools: bool = True,
     context: str | None = None,
@@ -563,11 +581,11 @@ async def handle_request(
         finally:
             await bot.presence.observe_event(presence_request_id, event, payload)
 
-    effective_prompt = prompt
+    prompt_parts = [_request_author_context(user_id, user)]
     if context:
-        effective_prompt = (
-            "<discord_context>\n" + context + "\n</discord_context>\n\n" + prompt
-        )
+        prompt_parts.append("<discord_context>\n" + context + "\n</discord_context>")
+    prompt_parts.append(prompt)
+    effective_prompt = "\n\n".join(prompt_parts)
     try:
         async with _typing_indicator(channel):
             await delivery.start()
@@ -578,6 +596,7 @@ async def handle_request(
                     session_key=session_key(channel, user_id),
                     channel=channel,
                     user_id=user_id,
+                    user=user,
                     attachments=attachments,
                     allow_tools=allow_tools,
                     thread_source=thread_source,
@@ -1146,8 +1165,15 @@ async def _restart_in_place(*, delay: float = 0.5) -> None:
     except Exception:
         logger.exception("Theia shutdown raised during in-place restart")
 
-    executable = sys.executable or "python"
-    argv = [executable, *sys.argv]
+    if "__compiled__" in globals() and sys.argv and sys.argv[0]:
+        # Nuitka onefile runs the bundled modules from a temporary extraction
+        # directory.  sys.executable can point into that directory after the
+        # child runtime has closed; sys.argv[0] remains the user's binary.
+        executable = os.path.abspath(sys.argv[0])
+        argv = [executable, *sys.argv[1:]]
+    else:
+        executable = sys.executable or "python"
+        argv = [executable, *sys.argv]
     try:
         os.execv(executable, argv)
     except Exception:
@@ -1588,7 +1614,12 @@ async def codex_approve(interaction: discord.Interaction) -> None:
     if not await _require_server_admin(interaction):
         return
     await interaction.response.defer(ephemeral=True)
-    active = bot.codex.resolve_approval(interaction.user.id, True, interaction.channel)
+    active = bot.codex.resolve_approval(
+        interaction.user.id,
+        True,
+        interaction.channel,
+        current_user=interaction.user,
+    )
     await interaction.followup.send(
         embed=_frontend_embed(
             "command:approve",
@@ -1612,7 +1643,12 @@ async def codex_deny(interaction: discord.Interaction) -> None:
     if not await _require_server_admin(interaction):
         return
     await interaction.response.defer(ephemeral=True)
-    active = bot.codex.resolve_approval(interaction.user.id, False, interaction.channel)
+    active = bot.codex.resolve_approval(
+        interaction.user.id,
+        False,
+        interaction.channel,
+        current_user=interaction.user,
+    )
     await interaction.followup.send(
         embed=_frontend_embed(
             "command:deny",
@@ -1712,6 +1748,7 @@ async def codex_btw(
         prompt,
         channel=response_channel,
         user_id=interaction.user.id,
+        user=interaction.user,
         attachments=(file,) if file is not None else (),
         allow_tools=_is_server_admin(interaction.user, response_channel),
         context=context,
@@ -1787,6 +1824,7 @@ async def codex_skill(interaction: discord.Interaction, skill_name: str) -> None
         f"${canonical}",
         channel=interaction.channel,
         user_id=interaction.user.id,
+        user=interaction.user,
         allow_tools=_is_server_admin(interaction.user, interaction.channel),
         context=context,
         request_id=f"interaction:{interaction.id}",
@@ -2141,6 +2179,7 @@ async def on_message(message: discord.Message) -> None:
         prompt,
         channel=response_channel,
         user_id=message.author.id,
+        user=message.author,
         attachments=message.attachments,
         allow_tools=_is_server_admin(message.author, response_channel),
         context=context,

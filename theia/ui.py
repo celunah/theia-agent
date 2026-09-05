@@ -35,7 +35,7 @@ class _DecisionView(discord.ui.View):
         choices: Iterable[tuple[str, str, discord.ButtonStyle]],
         *,
         timeout: float = 300,
-        on_decision: Callable[[str], Awaitable[None]] | None = None,
+        on_decision: Callable[[str, discord.abc.User], Awaitable[None]] | None = None,
     ) -> None:
         super().__init__(timeout=timeout)
         self.user_id = user_id
@@ -57,7 +57,7 @@ class _DecisionView(discord.ui.View):
                         child.disabled = True
                 await interaction.response.edit_message(view=self)
                 if self.on_decision is not None:
-                    await self.on_decision(decision)
+                    await self.on_decision(decision, interaction.user)
                 self.stop()
 
             button.callback = callback

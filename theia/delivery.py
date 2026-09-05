@@ -204,11 +204,13 @@ async def send_paginated(
         include_speech: bool,
     ) -> dict[str, Any]:
         values = dict(kwargs)
+        values.pop("view", None)
         values.update(
             content=content,
-            view=page_view,
             allowed_mentions=discord.AllowedMentions.none(),
         )
+        if page_view is not None:
+            values["view"] = page_view
         if include_speech and speech_outputs:
             values["files"] = [
                 discord.File(io.BytesIO(output.data), filename=output.filename)

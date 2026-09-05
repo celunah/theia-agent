@@ -47,6 +47,7 @@ LABEL_TARGETS = (
     "memory_updated",
     "skill_created",
     "skill_updated",
+    "personality_updated",
     "request_failed",
     "login_required",
     "administrator_access_required",
