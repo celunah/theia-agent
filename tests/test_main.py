@@ -3960,6 +3960,10 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
     def test_thought_duration_switches_units(self) -> None:
         self.assertEqual(main._format_thought_duration(2), "Thought for 2 seconds")
         self.assertEqual(
+            main._format_thought_duration(60),
+            "Thought for 1 minute",
+        )
+        self.assertEqual(
             main._format_thought_duration(61),
             "Thought for 1 minute and 1 second",
         )

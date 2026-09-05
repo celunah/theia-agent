@@ -55,6 +55,8 @@ def _format_thought_duration(seconds: float) -> str:
         return f"Thought for {elapsed} {unit}"
     minutes, remainder = divmod(elapsed, 60)
     minute_unit = "minute" if minutes == 1 else "minutes"
+    if remainder == 0:
+        return f"Thought for {minutes} {minute_unit}"
     second_unit = "second" if remainder == 1 else "seconds"
     return f"Thought for {minutes} {minute_unit} and {remainder} {second_unit}"
 
