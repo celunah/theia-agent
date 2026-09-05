@@ -45,7 +45,8 @@ Theia also:
 - Names threads from the initial request.
 - Includes bounded recent Discord history when asked about channel context.
 - Restores sessions after restart.
-- Lets server administrators restart the bot process in place.
+- Lets server administrators restart the bot process in place, including from
+  a compiled one-file executable.
 - Archives sessions after 30 days of inactivity and deletes them after 90 days.
 - Unarchives an archived session when the user returns.
 - Creates a new session if the old one was deleted.
@@ -90,15 +91,27 @@ agent state.
 - A server administrator can authenticate the bot for server-wide use.
 - Sessions are isolated by Discord user, channel, and thread.
 - Approvals are bound to the Discord user, thread, turn, and approval item.
+- Codex approval requests are surfaced in Discord even when the current policy
+  makes them non-actionable; those requests are visibly reported and declined.
+- `THEIA_APPROVAL_LEVEL` controls emitted approval requests: High always asks,
+  Medium auto-approves safe requests, and Low auto-approves most requests
+  except very dangerous ones. File changes, permission changes, and
+  out-of-workspace or destructive commands remain manual.
+- Missing app-server turn or item identifiers are recovered from the active
+  local turn when possible, so incomplete protocol metadata does not hide an
+  otherwise routable approval request.
 - Users cannot approve or deny another user’s request.
 - Pending approvals are cleared after completion, denial, cancellation, timeout, or interruption.
 - ChatGPT tokens and internal app-server credentials are never sent to Discord.
 
 ## Models and reasoning
 
+- The default Codex model is `gpt-5.6-luna`.
 - `/model` obtains available models dynamically through `model/list`.
 - Model autocomplete is populated from the current Codex model catalog.
-- Theia does not hardcode a fixed list of models.
+- `/model` replaces the default for future turns and persists across restarts.
+- A model change invalidates the current Codex thread, so the next request
+  starts a fresh conversation with the selected model.
 - Actual models depend on the logged-in account, Codex build, configuration, and provider.
 - Reasoning is automatic:
   - No-tool requests use low/light reasoning.
@@ -237,6 +250,7 @@ The default is indexed search. Live mode can be explicitly selected when current
 - It refreshes when `skills/changed` is received.
 - Skills are discovered from Theia’s private directory, global Codex directories, Hermes directories, and project-local skill roots.
 - Skills created by other Codex agents are discoverable when they are under the configured shared roots.
+- After successful administrator turns, the private self-improvement review may create a new `skills/<name>/SKILL.md` or append a useful update to an existing private skill.
 
 ### Memories
 
@@ -244,6 +258,8 @@ The default is indexed search. Live mode can be explicitly selected when current
 - Theia can read private Theia memories, shared Hermes memories, global Codex memories, and project memory directories.
 - Memory snapshots are bounded for safety.
 - `Memory created` and `Memory updated` are displayed only after verified file-change/tool events affecting configured memory roots.
+- The private self-improvement review may create or append to Theia’s private `MEMORY.md` and `USER.md` after a completed administrator turn.
+- Applied self-improvement changes are reported in Discord with compact statuses such as `Memory created`, `Memory updated`, `Skill created`, `Skill updated`, and `Personality updated`.
 
 ### Personalities
 
@@ -254,6 +270,9 @@ The default is indexed search. Live mode can be explicitly selected when current
 - Personality-name autocomplete is supported.
 - Changing personality resets the Codex thread so the system instructions remain consistent.
 - The base prior is identity-neutral and personality-independent.
+- When enabled, the private post-turn self-improvement review may append style-only guidance to the active personality profile.
+- Personality profiles affect presentation only; profile text cannot authorize
+  source-code, configuration, memory, skill, or other file changes.
 
 ## Voice mode
 
@@ -307,7 +326,7 @@ Theia is not a complete implementation of every current Codex app-server API. Th
 - Plugin-management APIs.
 - Remote-control APIs.
 - Realtime APIs.
-- Review APIs.
+- Review APIs beyond the private post-turn self-improvement pass.
 - Fuzzy file-search APIs.
 - Direct command-execution APIs outside normal Codex turns.
 

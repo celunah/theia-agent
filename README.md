@@ -38,6 +38,9 @@ field labels in the account, usage, credits, and About views.
 `/about` privately shows the running Theia version and revision, selected
 Codex CLI version, invoking Discord account, Codex plan, and current session
 mode and personality.
+The default Codex model is `gpt-5.6-luna`; `/model` can select another
+available model, and changing it starts the next request in a fresh
+conversation.
 
 ## Installation
 
@@ -82,6 +85,8 @@ This removes the need for a loose Python `.venv`; the executable is `dist/theia`
 (`dist/theia.exe` on Windows). It still starts Codex as a child process and
 therefore needs Node.js plus the bootstrapped or explicitly configured Codex CLI.
 Nuitka and a supported platform compiler are build-time requirements.
+`/restart` re-executes the original one-file binary, including after its
+temporary extraction directory has been cleaned up.
 
 Keep `.env` private. Theia stores its Codex login, session state, cached
 attachments, personalities, and installed skills in a private home at
@@ -102,6 +107,9 @@ The most useful optional settings are:
 ```dotenv
 # Codex and runtime
 THEIA_DEFAULT_MODE=text        # text or voice for new sessions
+THEIA_APPROVAL_LEVEL=high      # high, medium, or low approval handling
+THEIA_SELF_IMPROVEMENT=true    # review completed admin turns for durable updates
+THEIA_SELF_IMPROVEMENT_TIMEOUT=90
 THEIA_CODEX_CLI=
 THEIA_HOME=
 THEIA_STATE=
@@ -141,7 +149,21 @@ Regular users are restricted to read-only/safe Codex tools and uploaded
 attachments by default. Add only explicitly shared, non-sensitive directories
 to `THEIA_SAFE_WORKSPACE_ROOTS`. Server administrators can use the configured
 full tool policy, including approvals and the guarded Discord thread-creation
-tool.
+tool. Approval handling defaults to High (always request). Medium automatically
+accepts safe requests, while Low automatically accepts most requests and keeps
+very dangerous requests manual. File changes, permission changes, and
+out-of-workspace or destructive commands remain manual. Codex approval requests
+are surfaced as Discord embeds; requests that cannot be actionable under the
+current policy are reported visibly and declined. Personality profiles are
+style-only and cannot authorize source or configuration changes. After a
+successful administrator turn, Theia performs a private, read-only review when
+self-improvement is enabled. The review can append or create bounded entries in
+Theia's private `MEMORY.md` and `USER.md`, create or update a direct-child
+`skills/<name>/SKILL.md`, and refine the active personality profile. It cannot
+write source code, configuration, authentication, session state, Git metadata,
+or arbitrary workspace files. Set `THEIA_SELF_IMPROVEMENT=false` to disable it.
+Applied changes are reported in Discord with compact statuses such as `Memory
+created`, `Skill updated`, and `Personality updated`.
 
 ## Development
 
