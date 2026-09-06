@@ -4,7 +4,7 @@ Theia Agent is a Discord bot that brings private, persistent Codex
 conversations to Discord. It runs the Codex App Server locally and keeps each
 user, channel, and thread in an isolated session.
 
-The current release is `1.0.1`.
+The current release is `1.0.2`.
 
 ## Highlights
 
@@ -131,12 +131,12 @@ For a direct engine invocation, use the same image and mount the persistent
 volumes explicitly:
 
 ```bash
-docker build --build-arg THEIA_COMMIT="$(git rev-parse --short=7 HEAD)" -t theia-agent:1.0.1 .
+docker build --build-arg THEIA_COMMIT="$(git rev-parse --short=7 HEAD)" -t theia-agent:1.0.2 .
 docker run -d --name theia-agent --restart unless-stopped \
   --env-file .env \
   -v theia-data:/data \
   -v theia-workspace:/workspace \
-  theia-agent:1.0.1
+  theia-agent:1.0.2
 ```
 
 Replace `docker` with `podman` for a Podman deployment. The image runs as a

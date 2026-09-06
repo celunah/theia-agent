@@ -4,6 +4,9 @@ FROM ghcr.io/astral-sh/uv:0.11.2 AS uv
 FROM python:3.12-slim-bookworm
 
 ARG THEIA_COMMIT=unknown
+ARG THEIA_VERSION=1.0.2
+
+LABEL org.opencontainers.image.version="${THEIA_VERSION}"
 
 ENV HOME=/home/theia \
     PATH=/app/.venv/bin:/app/node_modules/.bin:${PATH} \
