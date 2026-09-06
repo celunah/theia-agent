@@ -57,6 +57,9 @@ Theia also:
 - A bare mention prompts a response using the bounded recent channel context.
 
 Normal answers are plain text. Long messages use Discord buttons, emoji reactions as fallback, and finally message splitting if neither is available.
+Ordinary conversation follows a spoken-first cadence with direct acknowledgment,
+short natural paragraphs, and concrete progress updates. Code, reviews,
+procedures, and explicit detail requests remain complete and can expand as needed.
 
 Command responses, approvals, and choices use embeds. Statuses use compact `-#` text:
 

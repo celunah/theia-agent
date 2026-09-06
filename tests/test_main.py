@@ -324,6 +324,22 @@ class CommandSurfaceTests(unittest.TestCase):
         self.assertNotIn("Codex", main.BASE_PRIORS)
         self.assertNotIn("Theia", main.BASE_PRIORS)
 
+    def test_base_priors_make_ordinary_conversation_spoken_first(self) -> None:
+        self.assertIn("spoken-first delivery", main.BASE_PRIORS)
+        self.assertIn("acknowledge\nthe user's request directly", main.BASE_PRIORS)
+        self.assertIn("one thought at a time", main.BASE_PRIORS)
+        self.assertIn("short,\nnatural paragraphs", main.BASE_PRIORS)
+        self.assertIn("without filler, forced slang", main.BASE_PRIORS)
+        self.assertIn("headings, and lists in ordinary conversation", main.BASE_PRIORS)
+
+    def test_base_priors_keep_technical_answers_complete(self) -> None:
+        self.assertIn("For code,\nreviews, procedures", main.BASE_PRIORS)
+        self.assertIn("explicit requests for detail", main.BASE_PRIORS)
+        self.assertIn("expand as needed", main.BASE_PRIORS)
+        self.assertIn(
+            "preserve\nimportant facts and complete reasoning", main.BASE_PRIORS
+        )
+
     def test_medium_is_the_non_adaptive_default(self) -> None:
         self.assertEqual(main.DEFAULT_REASONING_EFFORT, "medium")
 
