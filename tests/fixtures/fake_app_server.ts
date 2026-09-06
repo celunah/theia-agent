@@ -164,6 +164,9 @@ function streamTurn(turn: ActiveTurn, text: string, malformed = false): void {
 
 function responseText(turn: ActiveTurn): string {
   const lowerPrompt = turn.prompt.toLowerCase();
+  if (scenarioIs("presence")) {
+    return '{"activity_type":"listening","text":"reviewing"}';
+  }
   if (scenarioIs("refusal")) {
     return "I can't help with that request.";
   }

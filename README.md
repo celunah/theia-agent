@@ -17,6 +17,8 @@ The current release is `1.0.1`.
 - Attachments for images, audio, and text-like files.
 - Optional voice mode using OpenAI-compatible speech-to-text and text-to-speech
   services.
+- Model-generated Discord Rich Presence with debounced task updates and slower
+  idle refreshes.
 - Server-scoped Discord presentation customization and administrator controls.
 - Read-only/safe tool access for regular users; administrators receive the
   configured full Codex policy.
@@ -176,6 +178,12 @@ THEIA_APPROVAL_LEVEL=high      # high, medium, or low approval handling
 THEIA_ALWAYS_ADMIN_USERS=      # comma-delimited trusted Discord user IDs
 THEIA_SELF_IMPROVEMENT=true    # review completed admin turns for durable updates
 THEIA_SELF_IMPROVEMENT_TIMEOUT=90
+THEIA_RICH_PRESENCE_ENABLED=true
+THEIA_RICH_PRESENCE_ACTIVE_DEBOUNCE=3
+THEIA_RICH_PRESENCE_IDLE_INTERVAL=900
+THEIA_RICH_PRESENCE_RECENT_IDLE_INTERVAL=600
+THEIA_RICH_PRESENCE_CONTEXT_MAX_AGE=1800
+THEIA_RICH_PRESENCE_TIMEOUT=8
 THEIA_CODEX_CLI=
 THEIA_HOME=
 THEIA_STATE=

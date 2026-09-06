@@ -43,7 +43,7 @@ from .delivery import (
     _reaction_paginators,
     _ResponseDelivery,
 )
-from .presence import PresenceManager
+from .presence import PresenceManager, RichPresenceManager
 from .voice import VoiceModeError, VoiceModeManager, VoiceSession
 from .audio import AudioProtocolError
 
@@ -556,6 +556,7 @@ async def handle_request(
         context=customization_context(channel, user=None, user_id=user_id),
     )
     request_session_key = session_key(channel, user_id)
+    response_for_presence: str | None = None
 
     def on_channel_change(new_channel: Any) -> None:
         if use_webhook_thread:
@@ -577,6 +578,14 @@ async def handle_request(
     presence_request_id = f"request:{id(delivery)}"
     await bot.presence.touch()
     await bot.presence.begin_request(presence_request_id)
+    with contextlib.suppress(Exception):
+        await bot.rich_presence.begin_task(
+            presence_request_id,
+            session_key=request_session_key,
+            guild_id=_guild_id(channel),
+            prompt=prompt,
+            channel_context=context,
+        )
     error_reason: str | None = None
 
     async def on_codex_event(event: str, payload: dict[str, Any]) -> None:
@@ -584,6 +593,10 @@ async def handle_request(
             await delivery.on_event(event, payload)
         finally:
             await bot.presence.observe_event(presence_request_id, event, payload)
+            with contextlib.suppress(Exception):
+                await bot.rich_presence.observe_event(
+                    presence_request_id, event, payload
+                )
 
     prompt_parts = [_request_author_context(user_id, user)]
     if context:
@@ -616,6 +629,7 @@ async def handle_request(
                 failed = True
                 error_reason = str(exc)
                 response = "Codex could not complete this request."
+            response_for_presence = response
             speech = ()
             if not failed and speak_text is None:
                 try:
@@ -638,6 +652,11 @@ async def handle_request(
                 speech=speech,
             )
     finally:
+        with contextlib.suppress(Exception):
+            await bot.rich_presence.finish_task(
+                presence_request_id,
+                response=response_for_presence,
+            )
         await bot.presence.finish_request(presence_request_id)
         if request_id is not None:
             bot.codex.complete_message(request_id)
@@ -1064,7 +1083,12 @@ class TheiaBot(commands.Bot):
         self._request_tasks: set[asyncio.Task[Any]] = set()
         self._restart_task: asyncio.Task[None] | None = None
         self._retention_task: asyncio.Task[None] | None = None
+        self._gateway_presence_lock = asyncio.Lock()
         self.presence = PresenceManager(self._change_presence_when_ready)
+        self.rich_presence = RichPresenceManager(
+            self._change_rich_presence,
+            self.codex.generate_presence,
+        )
         self.voice = VoiceModeManager(
             transcribe=self.codex.transcribe_audio,
             synthesize=self.codex.synthesize_response,
@@ -1103,7 +1127,22 @@ class TheiaBot(commands.Bot):
         """Defer presence changes until Discord has established the gateway."""
         if not self.is_ready():
             return
-        await self.change_presence(**kwargs)
+        if "status" in kwargs and "activity" not in kwargs:
+            kwargs["activity"] = self.rich_presence.current_activity
+        async with self._gateway_presence_lock:
+            await self.change_presence(**kwargs)
+
+    async def _change_rich_presence(
+        self, *, activity: discord.BaseActivity | None
+    ) -> None:
+        """Change activity while preserving the independent online status."""
+        status = self.presence.current_status
+        if status is None:
+            return
+        await self._change_presence_when_ready(
+            status=status,
+            activity=activity,
+        )
 
     async def setup_hook(self) -> None:
         """Start Codex, synchronize slash commands, and begin background services."""
@@ -1111,6 +1150,7 @@ class TheiaBot(commands.Bot):
         await self.codex.start()
         await self.tree.sync()
         await self.presence.start()
+        await self.rich_presence.start()
         self._retention_task = asyncio.create_task(self._retention_loop())
 
     async def close(self) -> None:
@@ -1121,6 +1161,7 @@ class TheiaBot(commands.Bot):
             with contextlib.suppress(asyncio.CancelledError):
                 await self._retention_task
             self._retention_task = None
+        await self.rich_presence.close()
         await self.presence.close()
         await self.voice.close()
         await self.codex.close()

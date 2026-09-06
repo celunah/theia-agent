@@ -207,6 +207,20 @@ class TestLocalCodexBoundary(unittest.IsolatedAsyncioTestCase):
         prompt = "echo preserve this exact prompt: <opaque-value>"
         self.assertEqual(await self._ask(prompt_server, prompt), f"echo: {prompt}")
 
+    async def test_presence_generation_crosses_the_jsonl_boundary(self) -> None:
+        """Verify Rich Presence uses a real ephemeral app-server turn."""
+        server = await self._server(scenario="presence")
+
+        result = await server.generate_presence(
+            "Choose a generic activity line.", session_key="boundary"
+        )
+
+        self.assertEqual(
+            result,
+            {"activity_type": "listening", "text": "reviewing"},
+        )
+        self.assertNotIn("boundary", server._sessions)
+
     async def test_intermediates_and_preambles_are_delivered_before_final_text(
         self,
     ) -> None:

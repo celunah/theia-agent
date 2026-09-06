@@ -74,6 +74,14 @@ design.
 
 Typing indicators are shown while Theia is responding.
 
+Rich Presence activity text is generated in short, low-effort ephemeral Codex
+turns with no tools, self-improvement, or session writes. Active task activity
+overrides idle activity and updates are debounced and deduplicated. Discord
+presences are global rather than guild-scoped, so generated lines are required
+to remain generic and never expose user, guild, channel, message, or file
+context. Idle generation refreshes more often after recent activity and less
+often after the context goes stale.
+
 Server administrators can use `/customize` to change Discord-only embed
 titles, embed content, embed colors, status labels, and interaction button
 labels, including pagination controls, input modal labels, and embed field
@@ -332,6 +340,17 @@ Presence behavior:
 - Idle after inactivity.
 - DND only for genuinely long-running tool-backed tasks.
 - Basic conversation and context compaction do not trigger DND.
+- Rich Presence activity lines are generated in bounded, low-effort ephemeral
+  no-tool turns, with active task lines overriding slower idle refreshes.
+- Active updates are debounced and deduplicated; completed tasks cancel pending
+  activity generation. Idle context is selected from one isolated Discord
+  session at a time and never combines guilds or users.
+- An idle activity line is generated when Rich Presence starts, and the latest
+  valid idle line is restored immediately after the last active task finishes.
+- Starting a task retains the currently published activity until its first
+  replacement line is ready; task acknowledgement never briefly blanks it.
+- Because Discord presences are global, generated activity text is constrained
+  to generic wording without user, guild, channel, message, or file details.
 
 ## Important limitations
 
