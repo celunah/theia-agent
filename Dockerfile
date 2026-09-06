@@ -7,6 +7,7 @@ ARG THEIA_COMMIT=unknown
 ARG THEIA_VERSION=1.0.2
 
 LABEL org.opencontainers.image.version="${THEIA_VERSION}"
+LABEL org.opencontainers.image.revision="${THEIA_COMMIT}"
 
 ENV HOME=/home/theia \
     PATH=/app/.venv/bin:/app/node_modules/.bin:${PATH} \
@@ -46,7 +47,8 @@ RUN npm ci --omit=dev --no-audit --no-fund
 
 COPY --chown=theia:theia main.py ./
 COPY --chown=theia:theia theia ./theia
-RUN uv sync --frozen --no-dev \
+RUN printf '%s\n' "${THEIA_COMMIT}" > ./theia/build-revision.txt \
+    && uv sync --frozen --no-dev \
     && mkdir --parents /data/theia /workspace \
     && chown --recursive theia:theia /data /workspace
 

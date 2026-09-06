@@ -559,6 +559,7 @@ class _Session:
     last_activity_at: float | None = None
     turn_id: str | None = None
     personality_name: str | None = None
+    personality_selected: bool = False
     instruction_fingerprint: str | None = None
     tool_policy: bool | None = None
     lock: asyncio.Lock | None = None

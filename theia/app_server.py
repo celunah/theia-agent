@@ -125,6 +125,9 @@ _SELF_IMPROVEMENT_MAX_UPDATE_BYTES = 4096
 _SELF_IMPROVEMENT_MAX_TOTAL_BYTES = 16 * 1024
 _SELF_IMPROVEMENT_MAX_FILE_BYTES = 512 * 1024
 _SELF_IMPROVEMENT_SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+_PERSONALITY_SESSION_KEY_RE = re.compile(
+    r"^guild:(?P<guild>[^:]+):channel:[^:]+:user:(?P<user>[^:]+)$"
+)
 _SELF_IMPROVEMENT_OUTPUT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -755,6 +758,7 @@ class CodexAppServer:
                         continue
                     thread_id = value.get("thread_id")
                     personality_name = value.get("personality_name")
+                    personality_selected = value.get("personality_selected")
                     instruction_fingerprint = value.get("instruction_fingerprint")
                     tool_policy = value.get("tool_policy")
                     mode = value.get("mode")
@@ -783,6 +787,7 @@ class CodexAppServer:
                     if (
                         thread_id
                         or personality_name
+                        or personality_selected is True
                         or saved_tool_policy is not None
                         or saved_mode != DEFAULT_MODE
                     ):
@@ -792,6 +797,11 @@ class CodexAppServer:
                             thread_id=str(thread_id) if thread_id else None,
                             personality_name=(
                                 str(personality_name) if personality_name else None
+                            ),
+                            personality_selected=(
+                                personality_selected
+                                if isinstance(personality_selected, bool)
+                                else bool(personality_name)
                             ),
                             instruction_fingerprint=(
                                 str(instruction_fingerprint)
@@ -882,6 +892,7 @@ class CodexAppServer:
                     "mode": session.mode,
                     "thread_id": session.thread_id,
                     "personality_name": session.personality_name,
+                    "personality_selected": session.personality_selected,
                     "instruction_fingerprint": session.instruction_fingerprint,
                     "tool_policy": session.tool_policy,
                     "archived": session.archived,
@@ -891,6 +902,7 @@ class CodexAppServer:
                 if session.mode != DEFAULT_MODE
                 or session.thread_id
                 or session.personality_name
+                or session.personality_selected
                 or session.tool_policy is not None
             },
             "session_aliases": dict(self._session_aliases),
@@ -1141,9 +1153,36 @@ class CodexAppServer:
             raise CodexAppServerError("Audio transcription returned no text.")
         return value
 
+    @staticmethod
+    def _personality_scope(session_key: str) -> str | None:
+        match = _PERSONALITY_SESSION_KEY_RE.fullmatch(session_key)
+        if match is None or match.group("user") == "shared":
+            return None
+        return f"guild:{match.group('guild')}:user:{match.group('user')}"
+
+    def _inherited_personality(self, session_key: str) -> str | None:
+        """Return one unambiguous profile selected by this user in this guild."""
+        scope = self._personality_scope(session_key)
+        if scope is None:
+            return None
+        names = {
+            session.personality_name
+            for key, session in self._sessions.items()
+            if self._personality_scope(key) == scope
+            and session.personality_selected
+            and session.personality_name
+        }
+        return next(iter(names)) if len(names) == 1 else None
+
     def active_personality(self, session_key: str) -> str | None:
-        """Return the active personality name for a Discord session, if any."""
-        return self._session(session_key).personality_name
+        """Return the active profile, including an unambiguous guild/user selection."""
+        canonical_key = self._canonical_session_key(session_key)
+        session = self._sessions.get(canonical_key)
+        if session is not None and session.personality_selected:
+            return session.personality_name
+        if session is not None and session.personality_name:
+            return session.personality_name
+        return self._inherited_personality(canonical_key)
 
     async def configure_personality(
         self,
@@ -1164,8 +1203,12 @@ class CodexAppServer:
                 if name is None:
                     raise CodexAppServerError("Provide a personality name or file.")
                 if self._personalities.is_clear_name(name):
-                    changed = session.personality_name is not None
+                    changed = (
+                        session.personality_name is not None
+                        or not session.personality_selected
+                    )
                     session.personality_name = None
+                    session.personality_selected = True
                     if changed:
                         self._reset_session_thread(session)
                     self._persist_state()
@@ -1176,6 +1219,7 @@ class CodexAppServer:
                     raise CodexAppServerError(str(exc)) from exc
                 changed = session.personality_name != selected_name
                 session.personality_name = selected_name
+                session.personality_selected = True
                 if changed:
                     self._reset_session_thread(session)
                 self._persist_state()
@@ -1194,6 +1238,7 @@ class CodexAppServer:
             except PersonalityError as exc:
                 raise CodexAppServerError(str(exc)) from exc
             session.personality_name = selected_name
+            session.personality_selected = True
             self._reset_session_thread(session)
             self._persist_state()
             return selected_name

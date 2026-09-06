@@ -294,6 +294,9 @@ The default is indexed search. Live mode can be explicitly selected when current
 - `/personality name:none` clears it.
 - `/personality` explains usage.
 - Personality-name autocomplete is supported.
+- `/about` retains an unambiguous selected profile for the same user and server
+  when the current session has no local personality metadata; an explicit
+  clear remains authoritative for that session.
 - Changing personality resets the Codex thread so the system instructions remain consistent.
 - The base prior is identity-neutral and personality-independent.
 - When enabled, the private post-turn self-improvement review may append style-only guidance to the active personality profile.

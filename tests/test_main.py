@@ -3483,6 +3483,45 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertIsNone(restarted.active_personality("session"))
 
+    async def test_about_personality_recovers_one_active_profile_for_user_and_guild(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(
+                os.environ,
+                {
+                    "THEIA_HOME": str(root / "theia"),
+                    "THEIA_STATE": str(root / "state.json"),
+                },
+            ):
+                server = main.CodexAppServer()
+                attachment = SimpleNamespace(
+                    filename="cel.md",
+                    size=8,
+                    read=AsyncMock(return_value=b"Be warm."),
+                )
+                await server.configure_personality(
+                    "guild:42:channel:7:user:9",
+                    name="Cel",
+                    attachment=attachment,
+                )
+
+                self.assertEqual(
+                    server.active_personality("guild:42:channel:8:user:9"),
+                    "Cel",
+                )
+                self.assertIsNone(
+                    server.active_personality("guild:43:channel:8:user:9")
+                )
+
+                await server.configure_personality(
+                    "guild:42:channel:8:user:9", name="none"
+                )
+                self.assertIsNone(
+                    server.active_personality("guild:42:channel:8:user:9")
+                )
+
     async def test_personality_requires_a_name_for_upload(self) -> None:
         server = main.CodexAppServer()
         attachment = SimpleNamespace(

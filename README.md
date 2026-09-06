@@ -44,6 +44,8 @@ public conversation or action results.
 `/about` privately shows the running Theia version and revision, selected
 Codex CLI version, invoking Discord account, Codex plan, and current session
 mode and personality.
+When a user invokes it from a session without local personality metadata, it
+retains an unambiguous profile selected by that same user in the same server.
 Independent message, slash-command, and voice turns run as tracked background
 tasks, so a long-running agentic action does not block other Discord requests.
 A bare mention of Theia prompts a response to the bounded recent channel
@@ -104,7 +106,7 @@ cp .env.example .env
 Build and start Theia with Docker Compose:
 
 ```bash
-docker compose up --build -d
+THEIA_COMMIT="$(git rev-parse --short=7 HEAD)" docker compose up --build -d
 docker compose logs -f theia
 ```
 
