@@ -3376,6 +3376,25 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "done")
         review.assert_awaited_once()
 
+    def test_self_improvement_treats_skills_as_a_first_class_update(self) -> None:
+        instructions = main.CodexAppServer._self_improvement_developer_instructions(
+            Path("/tmp/memories"),
+            Path("/tmp/skills"),
+            None,
+        )
+        prompt = main.CodexAppServer._self_improvement_prompt(
+            "Use the release checklist.",
+            "The release checklist is reusable for future deployments.",
+        )
+
+        self.assertIn("skills as a first-class outcome", instructions)
+        self.assertIn("repeatable workflow, procedure, tool-use pattern", instructions)
+        self.assertIn("create a new skill when no existing skill fits", instructions)
+        self.assertIn(
+            "memory, user-profile, skill, and personality updates separately", prompt
+        )
+        self.assertIn("update a matching skill or create a new one", prompt)
+
     async def test_self_improvement_can_create_private_memories_and_skills(
         self,
     ) -> None:
