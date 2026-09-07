@@ -57,6 +57,12 @@ The default Codex model is `gpt-5.6-luna`; `/model` can select another
 available model, and changing it starts the next request in a fresh
 conversation.
 
+At local midnight, Theia privately creates one recap for each user and server
+scope that interacted with her that day. Recaps include major events, local
+times, and users involved, are retained in Theia's private runtime, and are
+provided only to that same user and server scope in future turns. Set
+`THEIA_NIGHTLY_RECAP=false` to disable the scheduler.
+
 ## Installation
 
 Requirements:
@@ -106,7 +112,7 @@ cp .env.example .env
 Build and start Theia with Docker Compose:
 
 ```bash
-THEIA_COMMIT="$(git rev-parse --short=7 HEAD)" docker compose up --build -d
+docker compose up --build -d
 docker compose logs -f theia
 ```
 
@@ -133,7 +139,7 @@ For a direct engine invocation, use the same image and mount the persistent
 volumes explicitly:
 
 ```bash
-docker build --build-arg THEIA_COMMIT="$(git rev-parse --short=7 HEAD)" -t theia-agent:1.0.2 .
+docker build -t theia-agent:1.0.2 .
 docker run -d --name theia-agent --restart unless-stopped \
   --env-file .env \
   -v theia-data:/data \
@@ -183,6 +189,10 @@ THEIA_APPROVAL_LEVEL=high      # high, medium, or low approval handling
 THEIA_ALWAYS_ADMIN_USERS=      # comma-delimited trusted Discord user IDs
 THEIA_SELF_IMPROVEMENT=true    # review completed admin turns for durable updates
 THEIA_SELF_IMPROVEMENT_TIMEOUT=90
+THEIA_NIGHTLY_RECAP=true       # generate private daily recaps at local midnight
+THEIA_NIGHTLY_RECAP_TIMEZONE=  # optional IANA timezone; empty uses host local time
+THEIA_NIGHTLY_RECAP_TIMEOUT=120
+THEIA_NIGHTLY_RECAP_CONTEXT_MAX_CHARACTERS=65536
 THEIA_RICH_PRESENCE_ENABLED=true
 THEIA_RICH_PRESENCE_ACTIVE_DEBOUNCE=3
 THEIA_RICH_PRESENCE_IDLE_INTERVAL=900
@@ -249,6 +259,10 @@ write source code, configuration, authentication, session state, Git metadata,
 or arbitrary workspace files. Set `THEIA_SELF_IMPROVEMENT=false` to disable it.
 Applied changes are reported in Discord with compact statuses such as `Memory
 created`, `Skill updated`, and `Personality updated`.
+Theia also keeps a bounded informational summary of each completed review in
+the owning session and provides it to the next turn, so the user can ask what
+changed. A review that applied nothing is recorded explicitly as such; failed
+reviews do not create a summary.
 Set `THEIA_ALWAYS_ADMIN_USERS` to a comma-delimited list of trusted Discord user
 IDs to grant those users Theia administrator access even without Discord server
 administrator permission. This is a global deployment override and does not

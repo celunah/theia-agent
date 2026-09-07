@@ -1,13 +1,23 @@
 # syntax=docker/dockerfile:1
 
 FROM ghcr.io/astral-sh/uv:0.11.2 AS uv
+
+FROM python:3.12-slim-bookworm AS revision
+
+WORKDIR /source
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY .git .git
+RUN git rev-parse --short=7 HEAD > /theia-build-revision
+
 FROM python:3.12-slim-bookworm
 
-ARG THEIA_COMMIT=unknown
 ARG THEIA_VERSION=1.0.2
 
 LABEL org.opencontainers.image.version="${THEIA_VERSION}"
-LABEL org.opencontainers.image.revision="${THEIA_COMMIT}"
 
 ENV HOME=/home/theia \
     PATH=/app/.venv/bin:/app/node_modules/.bin:${PATH} \
@@ -17,7 +27,6 @@ ENV HOME=/home/theia \
     UV_LINK_MODE=copy \
     UV_NO_DEV=1 \
     UV_PROJECT_ENVIRONMENT=/app/.venv \
-    THEIA_COMMIT=${THEIA_COMMIT} \
     THEIA_HOME=/data/theia \
     THEIA_STATE=/data/theia/sessions.json \
     CODEX_CWD=/workspace \
@@ -47,8 +56,8 @@ RUN npm ci --omit=dev --no-audit --no-fund
 
 COPY --chown=theia:theia main.py ./
 COPY --chown=theia:theia theia ./theia
-RUN printf '%s\n' "${THEIA_COMMIT}" > ./theia/build-revision.txt \
-    && uv sync --frozen --no-dev \
+COPY --from=revision --chown=theia:theia /theia-build-revision ./theia/build-revision.txt
+RUN uv sync --frozen --no-dev \
     && mkdir --parents /data/theia /workspace \
     && chown --recursive theia:theia /data /workspace
 

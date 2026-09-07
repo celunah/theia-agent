@@ -55,6 +55,12 @@ Theia also:
 - Runs independent message, slash-command, and voice turns concurrently; a
   long-running agentic task does not hold up other Discord requests.
 - A bare mention prompts a response using the bounded recent channel context.
+- At local midnight, Theia generates a private daily recap for each user and
+  server scope with an accepted interaction. The recap is generated in a
+  disposable no-tool Codex turn and includes major events, local event times,
+  and the display names and Discord IDs of users present in the captured
+  context. Recaps are retained in Theia's private runtime and only the same
+  user and server scope receives them as future-turn historical context.
 
 Normal answers are plain text. Long messages use Discord buttons, emoji reactions as fallback, and finally message splitting if neither is available.
 Ordinary conversation follows a spoken-first cadence with direct acknowledgment,
@@ -285,7 +291,10 @@ The default is indexed search. Live mode can be explicitly selected when current
 - Memory snapshots are bounded for safety.
 - `Memory created` and `Memory updated` are displayed only after verified file-change/tool events affecting configured memory roots.
 - The private self-improvement review may create or append to Theia’s private `MEMORY.md` and `USER.md` after a completed administrator turn.
+- Nightly recaps are stored separately from general memory so they can be
+  retrieved with per-user and per-server isolation.
 - Applied self-improvement changes are reported in Discord with compact statuses such as `Memory created`, `Memory updated`, `Skill created`, `Skill updated`, and `Personality updated`.
+- Each completed review leaves a bounded informational summary in the owning session for the next turn, including an explicit no-change result when appropriate, so users can ask what changed. Failed reviews do not add a summary.
 
 ### Personalities
 

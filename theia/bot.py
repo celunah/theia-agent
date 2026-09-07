@@ -44,6 +44,7 @@ from .delivery import (
     _ResponseDelivery,
 )
 from .presence import PresenceManager, RichPresenceManager
+from .recaps import NightlyRecapManager
 from .voice import VoiceModeError, VoiceModeManager, VoiceSession
 from .audio import AudioProtocolError
 
@@ -557,6 +558,7 @@ async def handle_request(
     )
     request_session_key = session_key(channel, user_id)
     response_for_presence: str | None = None
+    recap_started_at = bot.recaps.now()
 
     def on_channel_change(new_channel: Any) -> None:
         if use_webhook_thread:
@@ -599,6 +601,14 @@ async def handle_request(
                 )
 
     prompt_parts = [_request_author_context(user_id, user)]
+    recap_context = bot.recaps.context_for(
+        user_id=user_id,
+        guild_id=_guild_id(channel),
+    )
+    if recap_context:
+        prompt_parts.append(
+            "<theia_nightly_recaps>\n" + recap_context + "\n</theia_nightly_recaps>"
+        )
     if context:
         prompt_parts.append("<discord_context>\n" + context + "\n</discord_context>")
     prompt_parts.append(prompt)
@@ -651,6 +661,21 @@ async def handle_request(
                 error_reason=error_reason if failed else None,
                 speech=speech,
             )
+            with contextlib.suppress(Exception):
+                bot.recaps.record_exchange(
+                    user_id=user_id,
+                    user_name=getattr(user, "display_name", None)
+                    or getattr(user, "name", None),
+                    guild_id=_guild_id(channel),
+                    channel_id=_channel_id(channel),
+                    session_key=session_key(channel, user_id),
+                    prompt=prompt,
+                    context=context,
+                    response=response,
+                    completed=not failed,
+                    occurred_at=recap_started_at,
+                    request_id=request_id,
+                )
     finally:
         with contextlib.suppress(Exception):
             await bot.rich_presence.finish_task(
@@ -1083,12 +1108,14 @@ class TheiaBot(commands.Bot):
         self._request_tasks: set[asyncio.Task[Any]] = set()
         self._restart_task: asyncio.Task[None] | None = None
         self._retention_task: asyncio.Task[None] | None = None
+        self._nightly_recap_task: asyncio.Task[None] | None = None
         self._gateway_presence_lock = asyncio.Lock()
         self.presence = PresenceManager(self._change_presence_when_ready)
         self.rich_presence = RichPresenceManager(
             self._change_rich_presence,
             self.codex.generate_presence,
         )
+        self.recaps = NightlyRecapManager(self.codex.runtime_home())
         self.voice = VoiceModeManager(
             transcribe=self.codex.transcribe_audio,
             synthesize=self.codex.synthesize_response,
@@ -1152,6 +1179,8 @@ class TheiaBot(commands.Bot):
         await self.presence.start()
         await self.rich_presence.start()
         self._retention_task = asyncio.create_task(self._retention_loop())
+        if self.recaps.enabled:
+            self._nightly_recap_task = asyncio.create_task(self._nightly_recap_loop())
 
     async def close(self) -> None:
         """Stop background services and close Discord and Codex resources in order."""
@@ -1161,6 +1190,11 @@ class TheiaBot(commands.Bot):
             with contextlib.suppress(asyncio.CancelledError):
                 await self._retention_task
             self._retention_task = None
+        if self._nightly_recap_task is not None:
+            self._nightly_recap_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._nightly_recap_task
+            self._nightly_recap_task = None
         await self.rich_presence.close()
         await self.presence.close()
         await self.voice.close()
@@ -1181,6 +1215,26 @@ class TheiaBot(commands.Bot):
                     type(exc).__name__,
                 )
             await asyncio.sleep(60 * 60)
+
+    async def _generate_nightly_recap(
+        self, prompt: str, source_session_key: str | None
+    ) -> str | None:
+        """Run one private recap generation turn through the Codex boundary."""
+        return await self.codex.generate_nightly_recap(
+            prompt,
+            session_key=source_session_key,
+        )
+
+    async def _nightly_recap_loop(self) -> None:
+        """Generate pending recaps at local midnight and after missed wakeups."""
+        while True:
+            try:
+                await self.recaps.process_due(self._generate_nightly_recap)
+            except Exception as exc:  # noqa: BLE001 - scheduler must stay alive
+                logger.warning(
+                    "Nightly recap pass failed (error=%s)", type(exc).__name__
+                )
+            await asyncio.sleep(self.recaps.seconds_until_midnight())
 
     async def backfill_after_resume(self) -> None:
         """Replay bounded messages missed while the Discord gateway was disconnected."""

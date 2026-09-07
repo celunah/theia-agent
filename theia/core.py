@@ -69,6 +69,8 @@ SELF_IMPROVEMENT_ENV = "THEIA_SELF_IMPROVEMENT"
 SELF_IMPROVEMENT_TIMEOUT_ENV = "THEIA_SELF_IMPROVEMENT_TIMEOUT"
 DEFAULT_SELF_IMPROVEMENT = True
 DEFAULT_SELF_IMPROVEMENT_TIMEOUT = 90.0
+NIGHTLY_RECAP_TIMEOUT_ENV = "THEIA_NIGHTLY_RECAP_TIMEOUT"
+DEFAULT_NIGHTLY_RECAP_TIMEOUT = 120.0
 TEXT_MODE = "text"
 VOICE_MODE = "voice"
 _configured_mode = os.getenv("THEIA_DEFAULT_MODE", TEXT_MODE).strip().casefold()
@@ -114,10 +116,6 @@ def _is_always_admin_user(user_id: int | None) -> bool:
 
 def _theia_revision() -> str:
     """Return the short source revision included in the About embed."""
-    configured = os.getenv("THEIA_COMMIT", "").strip()
-    if _REVISION_RE.fullmatch(configured):
-        return configured[:7]
-
     embedded_path = Path(__file__).resolve().with_name(_BUILD_REVISION_FILENAME)
     try:
         embedded = embedded_path.read_text(encoding="ascii").strip()
@@ -125,6 +123,10 @@ def _theia_revision() -> str:
         embedded = ""
     if _REVISION_RE.fullmatch(embedded):
         return embedded[:7]
+
+    configured = os.getenv("THEIA_COMMIT", "").strip()
+    if _REVISION_RE.fullmatch(configured):
+        return configured[:7]
 
     project_root = Path(__file__).resolve().parent.parent
     try:
@@ -560,6 +562,7 @@ class _Session:
     turn_id: str | None = None
     personality_name: str | None = None
     personality_selected: bool = False
+    pending_self_improvement_summary: str | None = None
     instruction_fingerprint: str | None = None
     tool_policy: bool | None = None
     lock: asyncio.Lock | None = None

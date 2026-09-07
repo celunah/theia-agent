@@ -5,6 +5,7 @@ import os
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -230,7 +231,7 @@ class CommandSurfaceTests(unittest.TestCase):
             (package / "build-revision.txt").write_text("a1b2c3d\n", encoding="ascii")
             with (
                 patch.object(core_module, "__file__", str(package / "core.py")),
-                patch.dict(os.environ, {"THEIA_COMMIT": ""}),
+                patch.dict(os.environ, {"THEIA_COMMIT": "stale00"}),
             ):
                 self.assertEqual(core_module._theia_revision(), "a1b2c3d")
 
@@ -2531,6 +2532,179 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(hermes / "skills", server._skill_roots)
             self.assertIn("Remember the project context.", instructions)
 
+    async def test_nightly_recaps_are_unique_and_isolated_by_user_and_server(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(os.environ, {"THEIA_NIGHTLY_RECAP": "true"}):
+                manager = main.NightlyRecapManager(root, timezone_name="UTC")
+                occurred_at = datetime(2026, 9, 6, 18, 30, tzinfo=timezone.utc)
+                manager.record_exchange(
+                    user_id=7,
+                    user_name="Alice",
+                    guild_id=42,
+                    channel_id=100,
+                    session_key="guild:42:channel:100:user:7",
+                    prompt="Plan the release.",
+                    context=(
+                        "Recent messages from this Discord channel:\n"
+                        "Bob [Discord user id: 8]: The release is ready."
+                    ),
+                    response="I recorded the release plan.",
+                    completed=True,
+                    occurred_at=occurred_at,
+                    request_id="alice-42",
+                )
+                manager.record_exchange(
+                    user_id=7,
+                    user_name="Alice",
+                    guild_id=99,
+                    channel_id=200,
+                    session_key="guild:99:channel:200:user:7",
+                    prompt="Check the other server.",
+                    context="Carol [Discord user id: 9]: Server-specific context.",
+                    response="I checked it.",
+                    completed=True,
+                    occurred_at=occurred_at,
+                    request_id="alice-99",
+                )
+                manager.record_exchange(
+                    user_id=10,
+                    user_name="Dana",
+                    guild_id=42,
+                    channel_id=100,
+                    session_key="guild:42:channel:100:user:10",
+                    prompt="Review the incident.",
+                    context="Alice [Discord user id: 7]: The incident is resolved.",
+                    response="The incident is recorded.",
+                    completed=True,
+                    occurred_at=occurred_at,
+                    request_id="dana-42",
+                )
+                prompts: list[tuple[str, str | None]] = []
+
+                async def generate(prompt: str, session_key: str | None) -> str:
+                    prompts.append((prompt, session_key))
+                    return "The primary user worked through the day's major task."
+
+                generated = await manager.process_due(
+                    generate,
+                    now=datetime(2026, 9, 7, tzinfo=timezone.utc),
+                )
+                restarted = main.NightlyRecapManager(root, timezone_name="UTC")
+
+            self.assertEqual(generated, 3)
+            self.assertEqual(len(prompts), 3)
+            self.assertTrue(any("guild:42:user:7" in prompt for prompt, _ in prompts))
+            alice_recap = restarted.context_for(user_id=7, guild_id=42)
+            other_server_recap = restarted.context_for(user_id=7, guild_id=99)
+            dana_recap = restarted.context_for(user_id=10, guild_id=42)
+            self.assertIsNotNone(alice_recap)
+            self.assertIsNotNone(other_server_recap)
+            self.assertIsNotNone(dana_recap)
+            assert alice_recap is not None
+            assert other_server_recap is not None
+            self.assertIn("2026-09-06", alice_recap)
+            self.assertIn("18:30:00", alice_recap)
+            self.assertIn("Bob (Discord user id: 8)", alice_recap)
+            self.assertNotIn("Carol (Discord user id: 9)", alice_recap)
+            self.assertIn("Carol (Discord user id: 9)", other_server_recap)
+            self.assertNotIn("Dana (Discord user id: 10)", alice_recap)
+
+    async def test_nightly_recap_failure_keeps_journal_for_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(os.environ, {"THEIA_NIGHTLY_RECAP": "true"}):
+                manager = main.NightlyRecapManager(root, timezone_name="UTC")
+                manager.record_exchange(
+                    user_id=7,
+                    user_name="Alice",
+                    guild_id=42,
+                    channel_id=100,
+                    session_key="session",
+                    prompt="Remember this.",
+                    context=None,
+                    response="Done.",
+                    completed=True,
+                    occurred_at=datetime(2026, 9, 6, tzinfo=timezone.utc),
+                    request_id="retry-me",
+                )
+
+                async def fail(_prompt: str, _session_key: str | None) -> str:
+                    raise RuntimeError("temporary failure")
+
+                self.assertEqual(
+                    await manager.process_due(
+                        fail,
+                        now=datetime(2026, 9, 7, tzinfo=timezone.utc),
+                    ),
+                    0,
+                )
+                self.assertEqual(len(manager._journal), 1)
+
+                async def succeed(_prompt: str, _session_key: str | None) -> str:
+                    return "The user made a durable decision."
+
+                self.assertEqual(
+                    await manager.process_due(
+                        succeed,
+                        now=datetime(2026, 9, 7, tzinfo=timezone.utc),
+                    ),
+                    1,
+                )
+                self.assertEqual(manager._journal, [])
+
+    def test_nightly_recap_scheduler_uses_local_midnight(self) -> None:
+        manager = main.NightlyRecapManager(
+            Path(tempfile.mkdtemp()), timezone_name="UTC"
+        )
+        try:
+            self.assertEqual(
+                manager.seconds_until_midnight(
+                    datetime(2026, 9, 6, 23, 59, 30, tzinfo=timezone.utc)
+                ),
+                30,
+            )
+        finally:
+            manager.state_path.unlink(missing_ok=True)
+
+    async def test_nightly_recap_generation_is_ephemeral_and_has_no_tools(
+        self,
+    ) -> None:
+        server = main.CodexAppServer()
+        requests: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+
+        async def request(method: str, params: dict[str, Any], **kwargs: Any) -> dict:
+            requests.append((method, params, kwargs))
+            if method == "thread/start":
+                return {"thread": {"id": "recap-thread"}}
+            return {"turn": {"id": "recap-turn"}}
+
+        server._request = AsyncMock(side_effect=request)
+        server._ensure_running = AsyncMock()
+        server._wait_for_turn = AsyncMock(
+            return_value='{"recap":"The release was completed."}'
+        )
+        result = await server.generate_nightly_recap(
+            "Summarize this private journal.",
+            session_key="guild:42:channel:100:user:7",
+        )
+
+        self.assertEqual(result, "The release was completed.")
+        self.assertEqual(
+            [method for method, _, _ in requests], ["thread/start", "turn/start"]
+        )
+        thread_params = requests[0][1]
+        self.assertTrue(thread_params["ephemeral"])
+        self.assertEqual(thread_params["approvalPolicy"], "never")
+        self.assertEqual(thread_params["sandbox"], "read-only")
+        self.assertEqual(thread_params["runtimeWorkspaceRoots"], [])
+        self.assertNotIn("dynamicTools", thread_params)
+        self.assertEqual(requests[1][1]["effort"], "low")
+        self.assertIn("outputSchema", requests[1][1])
+        self.assertNotIn("recap-thread", server._sessions)
+
     async def test_approval_request_includes_owner_checked_buttons(self) -> None:
         server = main.CodexAppServer()
         channel = _Channel()
@@ -3364,6 +3538,17 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             self.assertEqual(applied, 4)
+            self.assertIsNotNone(session.pending_self_improvement_summary)
+            assert session.pending_self_improvement_summary is not None
+            self.assertIn("Memory created", session.pending_self_improvement_summary)
+            self.assertIn("Skill created", session.pending_self_improvement_summary)
+            self.assertIn(
+                "Personality updated", session.pending_self_improvement_summary
+            )
+            self.assertIn(
+                "Keep release summaries concise.",
+                session.pending_self_improvement_summary,
+            )
             thread_params = cast(Any, server._request.await_args_list[0]).args[1]
             self.assertEqual(thread_params["sandbox"], "read-only")
             self.assertEqual(thread_params["approvalPolicy"], "never")
@@ -3392,6 +3577,129 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(
                 "warm and direct", personality_path.read_text(encoding="utf-8")
             )
+
+    async def test_self_improvement_no_change_is_recorded_in_session_context(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(
+                os.environ,
+                {
+                    "THEIA_HOME": str(root / "theia"),
+                    "THEIA_STATE": str(root / "state.json"),
+                },
+            ):
+                server = main.CodexAppServer()
+                session = server._session("session")
+                server._request = AsyncMock(
+                    side_effect=(
+                        {"thread": {"id": "review-thread"}},
+                        {"turn": {"id": "review-turn"}},
+                    )
+                )
+                server._wait_for_turn = AsyncMock(return_value='{"updates": []}')
+                channel = _Channel()
+                channel.guild = _admin_guild()
+
+                applied = await server._run_self_improvement_review(
+                    session,
+                    "Request",
+                    "Response",
+                    channel=cast(Any, channel),
+                    user_id=7,
+                    user=None,
+                    allow_tools=True,
+                )
+
+                self.assertEqual(applied, 0)
+                self.assertEqual(
+                    session.pending_self_improvement_summary,
+                    "Self-improvement review completed. No durable updates were applied.",
+                )
+
+    async def test_self_improvement_summary_survives_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(
+                os.environ,
+                {
+                    "THEIA_HOME": str(root / "theia"),
+                    "THEIA_STATE": str(root / "state.json"),
+                },
+            ):
+                server = main.CodexAppServer()
+                summary = "Self-improvement review completed. No durable updates were applied."
+                server._session("session").pending_self_improvement_summary = summary
+                server._persist_state()
+
+                restarted = main.CodexAppServer()
+
+            self.assertEqual(
+                restarted._session("session").pending_self_improvement_summary,
+                "Self-improvement review completed. No durable updates were applied.",
+            )
+
+    async def test_self_improvement_summary_is_injected_once_into_next_turn(
+        self,
+    ) -> None:
+        server = main.CodexAppServer()
+        server.account = {"type": "chatgpt"}
+        server.requires_openai_auth = True
+        server._ensure_running = AsyncMock()
+        server.refresh_account = AsyncMock()
+        server._select_reasoning_effort = AsyncMock(return_value="low")
+        server._ensure_thread = AsyncMock()
+        server._request = AsyncMock(return_value={"turn": {"id": "turn"}})
+        server._wait_for_turn = AsyncMock(return_value="done")
+        session = server._session("session")
+        session.pending_self_improvement_summary = (
+            "Self-improvement review completed. Applied durable updates:\n"
+            "- Memory created: User prefers concise release notes."
+        )
+
+        result = await server.ask(
+            "What changed?",
+            session_key="session",
+            channel=None,
+            user_id=7,
+            allow_tools=False,
+        )
+
+        self.assertEqual(result, "done")
+        turn_params = cast(Any, server._request.await_args).args[1]
+        turn_text = turn_params["input"][0]["text"]
+        self.assertIn("Memory created: User prefers concise release notes.", turn_text)
+        self.assertIn("What changed?", turn_text)
+        self.assertLess(
+            turn_text.index("Memory created"), turn_text.index("What changed?")
+        )
+        self.assertIsNone(session.pending_self_improvement_summary)
+
+    async def test_self_improvement_summary_survives_failed_turn_start(self) -> None:
+        server = main.CodexAppServer()
+        server.account = {"type": "chatgpt"}
+        server.requires_openai_auth = True
+        server._ensure_running = AsyncMock()
+        server.refresh_account = AsyncMock()
+        server._select_reasoning_effort = AsyncMock(return_value="low")
+        server._ensure_thread = AsyncMock()
+        server._request = AsyncMock(
+            side_effect=main.CodexAppServerError("turn unavailable")
+        )
+        session = server._session("session")
+        session.pending_self_improvement_summary = "review summary"
+
+        with self.assertRaises(main.CodexAppServerError):
+            await server.ask(
+                "What changed?",
+                session_key="session",
+                channel=None,
+                user_id=7,
+                allow_tools=False,
+            )
+
+        self.assertEqual(session.pending_self_improvement_summary, "review summary")
 
     async def test_self_improvement_failure_never_fails_the_completed_turn(
         self,
