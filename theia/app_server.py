@@ -393,6 +393,7 @@ class CodexAppServer:
         self._login_channel: discord.abc.Messageable | None = None
         self._login_user_id: int | None = None
         self._login_guild_id: int | None = None
+        self._login_sender: Callable[..., Awaitable[Any]] | None = None
         self._stderr_tail: list[str] = []
         self._request_timeout = _env_float("CODEX_REQUEST_TIMEOUT", 60)
         self._turn_timeout = _env_float("CODEX_TURN_TIMEOUT", 1800)
@@ -1386,8 +1387,17 @@ class CodexAppServer:
         return instructions
 
     def _instruction_fingerprint(
-        self, session: _Session, allow_tools: bool = True
+        self,
+        session: _Session,
+        allow_tools: bool = True,
+        *,
+        include_dynamic_tools: bool = True,
     ) -> str:
+        dynamic_tools_marker = (
+            ""
+            if allow_tools and include_dynamic_tools
+            else "\n\ndiscord_dynamic_tools=disabled"
+        )
         return hashlib.sha256(
             (
                 self._system_instructions(session, allow_tools=allow_tools)
@@ -1395,6 +1405,7 @@ class CodexAppServer:
                 + self._tool_instructions(allow_tools)
                 + "\n\nmodel="
                 + (self._model or DEFAULT_CODEX_MODEL)
+                + dynamic_tools_marker
             ).encode("utf-8")
         ).hexdigest()
 
@@ -1773,6 +1784,7 @@ class CodexAppServer:
         *,
         guild_id: int | None = None,
         grant_server: bool = False,
+        on_complete_send: Callable[..., Awaitable[Any]] | None = None,
     ) -> dict[str, Any]:
         """Start or reuse device-code login and record the requested access scope."""
         await self._ensure_running()
@@ -1801,6 +1813,7 @@ class CodexAppServer:
         self._login_channel = channel
         self._login_user_id = user_id
         self._login_guild_id = guild_id if grant_server else None
+        self._login_sender = on_complete_send
         logger.info("Codex login flow started")
         return result
 
@@ -2151,6 +2164,8 @@ class CodexAppServer:
         user_prompt: str | None = None,
         on_channel_change: Callable[[discord.abc.Messageable], None] | None = None,
         on_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
+        interaction_sender: Callable[..., Awaitable[Any]] | None = None,
+        allow_discord_tools: bool = True,
     ) -> str:
         """Run a user request in a session and return its completed response text."""
         await self._ensure_running()
@@ -2179,7 +2194,11 @@ class CodexAppServer:
                 len(attachment_list),
             )
             previous_thread_id = session.thread_id
-            await self._ensure_thread(session, allow_tools=allow_tools)
+            await self._ensure_thread(
+                session,
+                allow_tools=allow_tools,
+                include_dynamic_tools=allow_discord_tools,
+            )
             if (
                 isinstance(channel, discord.Thread)
                 and session.thread_id
@@ -2232,6 +2251,8 @@ class CodexAppServer:
                     user_prompt=user_prompt or prompt,
                     on_channel_change=on_channel_change,
                     on_event=on_event,
+                    interaction_sender=interaction_sender,
+                    allow_discord_tools=allow_discord_tools,
                 ),
             )
             state.thread_id = session.thread_id
@@ -2244,6 +2265,8 @@ class CodexAppServer:
             state.user_prompt = user_prompt or prompt
             state.on_channel_change = on_channel_change
             state.on_event = on_event
+            state.interaction_sender = interaction_sender
+            state.allow_discord_tools = allow_discord_tools
             session.turn_id = str(turn_id)
             response = await self._wait_for_turn(
                 session_key, session, state, str(turn_id)
@@ -3401,10 +3424,18 @@ class CodexAppServer:
         return result
 
     async def _ensure_thread(
-        self, session: _Session, *, allow_tools: bool = True
+        self,
+        session: _Session,
+        *,
+        allow_tools: bool = True,
+        include_dynamic_tools: bool = True,
     ) -> None:
         await self._ensure_running()
-        instruction_fingerprint = self._instruction_fingerprint(session, allow_tools)
+        instruction_fingerprint = self._instruction_fingerprint(
+            session,
+            allow_tools,
+            include_dynamic_tools=include_dynamic_tools,
+        )
         if session.thread_id is not None and (
             session.instruction_fingerprint != instruction_fingerprint
             or session.tool_policy != allow_tools
@@ -3459,7 +3490,13 @@ class CodexAppServer:
                     str(path) for path in self._workspace_roots(allow_tools)
                 ],
             }
-            params.update(self._thread_instruction_params(session, allow_tools))
+            params.update(
+                self._thread_instruction_params(
+                    session,
+                    allow_tools,
+                    include_dynamic_tools=include_dynamic_tools,
+                )
+            )
             if self._model is not None:
                 params["model"] = self._model
             result = await self._request("thread/start", params)
@@ -4232,12 +4269,29 @@ class CodexAppServer:
                 request_id=request_id,
             )
         if method == "item/tool/requestUserInput":
-            return await self._request_user_input(channel, user_id, params)
+            return await self._request_user_input(channel, user_id, params, state=state)
         if method == "mcpServer/elicitation/request":
-            return await self._mcp_elicitation(channel, user_id, params)
+            return await self._mcp_elicitation(channel, user_id, params, state=state)
         if method == "item/tool/call":
             return await self._dynamic_tool_call(state, params)
         raise CodexAppServerError(f"Unsupported server request: {method}")
+
+    async def _send_turn_message(
+        self,
+        state: _TurnState | None,
+        *,
+        channel: discord.abc.Messageable | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Send through an interaction webhook when a turn has no bot channel."""
+        if state is not None and state.interaction_sender is not None:
+            return await state.interaction_sender(**kwargs)
+        target = channel or (state.channel if state is not None else None)
+        if target is None:
+            raise discord.DiscordException(
+                "No Discord message destination is available."
+            )
+        return await target.send(**kwargs)
 
     async def _approval_request(
         self,
@@ -4274,6 +4328,7 @@ class CodexAppServer:
         if not state.allow_tools:
             logger.info("Codex approval request is unavailable for this turn")
             await self._announce_unavailable_approval(
+                state,
                 channel,
                 kind,
                 params,
@@ -4287,6 +4342,7 @@ class CodexAppServer:
                 "changed"
             )
             await self._announce_unavailable_approval(
+                state,
                 channel,
                 kind,
                 params,
@@ -4373,7 +4429,9 @@ class CodexAppServer:
                 color=discord.Color.orange(),
             )
             embed.set_footer(text="You can also use /approve or /deny.")
-            await channel.send(
+            await self._send_turn_message(
+                state,
+                channel=channel,
                 embed=embed,
                 view=view,
                 allowed_mentions=discord.AllowedMentions.none(),
@@ -4471,6 +4529,7 @@ class CodexAppServer:
 
     async def _announce_unavailable_approval(
         self,
+        state: _TurnState,
         channel: discord.abc.Messageable,
         kind: str,
         params: dict[str, Any],
@@ -4483,7 +4542,9 @@ class CodexAppServer:
             f"because {reason}."
         )
         try:
-            await channel.send(
+            await self._send_turn_message(
+                state,
+                channel=channel,
                 embed=self._frontend_embed(
                     channel,
                     "label:approval_needed",
@@ -4525,6 +4586,7 @@ class CodexAppServer:
 
     async def _decision(
         self,
+        state: _TurnState | None,
         channel: discord.abc.Messageable | None,
         user_id: int | None,
         content: str,
@@ -4555,7 +4617,9 @@ class CodexAppServer:
             ],
         )
         try:
-            await channel.send(
+            await self._send_turn_message(
+                state,
+                channel=channel,
                 content=_subtext(
                     "Confirmation needed. "
                     + (
@@ -4580,6 +4644,8 @@ class CodexAppServer:
         channel: Any | None,
         user_id: int | None,
         params: dict[str, Any],
+        *,
+        state: _TurnState | None = None,
     ) -> dict[str, Any]:
         questions = [
             item for item in params.get("questions", []) if isinstance(item, dict)
@@ -4601,7 +4667,7 @@ class CodexAppServer:
         try:
             message = view.message_kwargs()
             message["allowed_mentions"] = discord.AllowedMentions.none()
-            await channel.send(**message)
+            await self._send_turn_message(state, channel=channel, **message)
             await view.wait()
         except discord.DiscordException:
             logger.warning("Codex user-input request could not be delivered")
@@ -4614,6 +4680,8 @@ class CodexAppServer:
         channel: discord.abc.Messageable | None,
         user_id: int | None,
         params: dict[str, Any],
+        *,
+        state: _TurnState | None = None,
     ) -> dict[str, Any]:
         if channel is None:
             logger.warning("Codex elicitation request has no Discord channel")
@@ -4627,6 +4695,7 @@ class CodexAppServer:
         )
         if params.get("mode") == "url":
             decision = await self._decision(
+                state,
                 channel,
                 user_id,
                 f"{message}\n{params.get('url', '')}",
@@ -4647,7 +4716,9 @@ class CodexAppServer:
             customizer=self._frontend_customizer,
         )
         try:
-            await channel.send(
+            await self._send_turn_message(
+                state,
+                channel=channel,
                 content=_subtext(
                     f"{_safe_intermediate_text(message) or 'Codex needs your input.'}\n"
                     f"Reply with a JSON object containing: {names}"
@@ -4805,6 +4876,11 @@ class CodexAppServer:
         try:
             if state.on_event is not None:
                 await state.on_event("thread_opening", payload)
+            elif state.interaction_sender is not None:
+                await state.interaction_sender(
+                    content=_subtext(opening_message),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
             elif state.channel is not None:
                 # This fallback is used only by direct callers without a
                 # Discord delivery callback; normal turns use the callback.
@@ -4847,6 +4923,17 @@ class CodexAppServer:
             return {
                 "contentItems": [
                     {"type": "inputText", "text": "No Discord channel is available."}
+                ],
+                "success": False,
+            }
+        if not state.allow_discord_tools:
+            logger.info("Rejected Discord tool request for an account-installed turn")
+            return {
+                "contentItems": [
+                    {
+                        "type": "inputText",
+                        "text": "Discord tools are unavailable for this installation.",
+                    }
                 ],
                 "success": False,
             }
@@ -5002,10 +5089,12 @@ class CodexAppServer:
                 channel = self._login_channel
                 user_id = self._login_user_id
                 guild_id = self._login_guild_id
+                login_sender = self._login_sender
                 self._login_channel = None
                 self._login_id = None
                 self._login_user_id = None
                 self._login_guild_id = None
+                self._login_sender = None
                 if params.get("success"):
                     self.account = {"type": "chatgpt"}
                     if user_id is not None:
@@ -5016,28 +5105,30 @@ class CodexAppServer:
                         if guild_id is not None
                         else "Codex is ready. You can now use `/btw` or `/skill`."
                     )
-                    self._background_send(
+                    embed = self._frontend_embed(
                         channel,
-                        self._frontend_embed(
-                            channel,
-                            "command:login",
-                            "Authentication completed",
-                            access_message,
-                            color=discord.Color.green(),
-                        ),
+                        "command:login",
+                        "Authentication completed",
+                        access_message,
+                        color=discord.Color.green(),
                     )
+                    if login_sender is not None:
+                        self._background_send_callback(login_sender, embed)
+                    else:
+                        self._background_send(channel, embed)
                     logger.info("Codex login completed successfully")
                 else:
-                    self._background_send(
+                    embed = self._frontend_embed(
                         channel,
-                        self._frontend_embed(
-                            channel,
-                            "command:login",
-                            "Login failed",
-                            "Codex login did not complete. Please try `/login` again.",
-                            color=discord.Color.red(),
-                        ),
+                        "command:login",
+                        "Login failed",
+                        "Codex login did not complete. Please try `/login` again.",
+                        color=discord.Color.red(),
                     )
+                    if login_sender is not None:
+                        self._background_send_callback(login_sender, embed)
+                    else:
+                        self._background_send(channel, embed)
                     logger.warning("Codex login completed unsuccessfully")
             return
 
@@ -5221,6 +5312,11 @@ class CodexAppServer:
     def _background_send(
         self, channel: discord.abc.Messageable, content: discord.Embed
     ) -> None:
-        task = asyncio.create_task(channel.send(embed=content))
+        self._background_send_callback(channel.send, content)
+
+    def _background_send_callback(
+        self, send: Callable[..., Awaitable[Any]], content: discord.Embed
+    ) -> None:
+        task = asyncio.create_task(cast(Coroutine[Any, Any, Any], send(embed=content)))
         self._server_tasks.add(task)
         task.add_done_callback(self._server_task_done)

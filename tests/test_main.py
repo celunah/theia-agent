@@ -294,6 +294,38 @@ class CommandSurfaceTests(unittest.TestCase):
         for command in main.bot.tree.get_commands():
             self.assertNotIn("Theia", getattr(command, "description", ""))
 
+    def test_commands_support_guild_and_account_installations(self) -> None:
+        for command in main.bot.tree.get_commands():
+            payload = command.to_dict(main.bot.tree)
+            self.assertEqual(payload["integration_types"], [0, 1])
+            self.assertEqual(payload["contexts"], [0, 1, 2])
+
+    def test_user_only_install_keeps_regular_users_on_safe_policy(self) -> None:
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=7),
+            guild=SimpleNamespace(id=42),
+            is_user_integration=lambda: True,
+            is_guild_integration=lambda: False,
+        )
+        self.assertTrue(main._is_user_only_install(cast(Any, interaction)))
+        with patch.dict(os.environ, {main.ALWAYS_ADMIN_USERS_ENV: ""}):
+            self.assertFalse(main._interaction_allows_tools(cast(Any, interaction)))
+
+    def test_guild_install_keeps_server_admin_tool_policy(self) -> None:
+        user = SimpleNamespace(
+            id=7,
+            guild_permissions=SimpleNamespace(administrator=True),
+        )
+        interaction = SimpleNamespace(
+            user=user,
+            channel=SimpleNamespace(guild=SimpleNamespace(id=42)),
+            guild=SimpleNamespace(id=42),
+            is_user_integration=lambda: False,
+            is_guild_integration=lambda: True,
+        )
+        self.assertFalse(main._is_user_only_install(cast(Any, interaction)))
+        self.assertTrue(main._interaction_allows_tools(cast(Any, interaction)))
+
     def test_codex_logger_is_concise_colored_and_namespaced(self) -> None:
         logger = logging.getLogger("theia.codex")
         self.assertEqual(logger.name, "theia.codex")
@@ -1719,6 +1751,66 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(await_args.kwargs["thread"], thread)
         main.bot._participating_threads.discard(thread.id)
         main.bot.codex._discord_threads.discard(thread.id)
+
+    async def test_account_install_btw_starts_a_normal_turn_without_threads(
+        self,
+    ) -> None:
+        source = _Channel()
+        source.id = 42
+        source.guild = SimpleNamespace(id=99)
+        response = SimpleNamespace(defer=AsyncMock())
+        edit_original = AsyncMock(return_value=SimpleNamespace(id=1))
+        interaction = SimpleNamespace(
+            id=57,
+            channel=source,
+            response=response,
+            followup=SimpleNamespace(send=AsyncMock()),
+            edit_original_response=edit_original,
+            user=SimpleNamespace(
+                id=7,
+                guild_permissions=SimpleNamespace(administrator=True),
+            ),
+            is_user_integration=lambda: True,
+            is_guild_integration=lambda: False,
+        )
+        with (
+            patch("theia.bot._require_login", new=AsyncMock(return_value=True)),
+            patch(
+                "theia.bot._maybe_create_response_thread", new=AsyncMock()
+            ) as create_thread,
+            patch("theia.bot.handle_request", new=AsyncMock()) as handle,
+        ):
+            await cast(Any, main.codex_btw.callback)(interaction, "start this session")
+            await asyncio.sleep(0.05)
+
+        create_thread.assert_not_awaited()
+        request = cast(Any, handle.await_args).kwargs
+        self.assertFalse(request["allow_tools"])
+        self.assertFalse(request["allow_discord_tools"])
+        self.assertIs(request["channel"], source)
+        sender = request["interaction_sender"]
+        await sender(content="normal turn response")
+        edit_original.assert_awaited_once_with(content="normal turn response")
+
+    async def test_account_install_login_does_not_grant_server_access(self) -> None:
+        guild = SimpleNamespace(id=99)
+        interaction = SimpleNamespace(
+            channel=_Channel(),
+            guild=guild,
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+            user=SimpleNamespace(
+                id=7,
+                guild_permissions=SimpleNamespace(administrator=True),
+            ),
+            is_user_integration=lambda: True,
+            is_guild_integration=lambda: False,
+        )
+        with patch("theia.bot.handle_login", new=AsyncMock()) as login:
+            await cast(Any, main.codex_login.callback)(interaction)
+
+        self.assertFalse(cast(Any, login.await_args).kwargs["grant_server"])
+        self.assertIsNotNone(cast(Any, login.await_args).kwargs["on_complete_send"])
 
     async def test_auto_thread_creation_failure_falls_back_to_source_channel(
         self,
@@ -3343,6 +3435,7 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result, "done")
+        self.assertEqual(cast(Any, server._request.await_args).args[0], "turn/start")
         turn_params = cast(Any, server._request.await_args).args[1]
         self.assertEqual(turn_params["effort"], "high")
         self.assertEqual(turn_params["model"], main.DEFAULT_CODEX_MODEL)
@@ -3982,6 +4075,47 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await request, {"decision": "accept"})
         self.assertFalse(server.resolve_approval(7, False, channel))
         self.assertFalse(server._pending_approvals)
+
+    async def test_account_install_approval_uses_interaction_sender(self) -> None:
+        sender = AsyncMock(return_value=SimpleNamespace(id=1))
+        with patch.dict(
+            os.environ,
+            {
+                main.ALWAYS_ADMIN_USERS_ENV: "7",
+                "THEIA_APPROVAL_LEVEL": "high",
+            },
+        ):
+            server = main.CodexAppServer()
+            channel = _Channel()
+            channel.id = 123
+            state = main._TurnState(
+                thread_id="thread",
+                channel=channel,
+                user_id=7,
+                interaction_sender=sender,
+                allow_tools=True,
+                allow_discord_tools=False,
+            )
+            server._turns["turn"] = state
+            request = asyncio.create_task(
+                server._server_request_result(
+                    "item/commandExecution/requestApproval",
+                    {
+                        "threadId": "thread",
+                        "turnId": "turn",
+                        "itemId": "item",
+                        "command": "git status",
+                    },
+                )
+            )
+            await asyncio.sleep(0)
+
+            sender.assert_awaited_once()
+            self.assertEqual(channel.sent, [])
+            sender_args = cast(Any, sender.await_args)
+            self.assertEqual(sender_args.kwargs["embed"].title, "Approval needed")
+            self.assertTrue(server.resolve_approval(7, False, channel))
+            self.assertEqual(await request, {"decision": "decline"})
 
     async def test_multiple_choice_request_uses_embed_and_buttons(self) -> None:
         server = main.CodexAppServer()

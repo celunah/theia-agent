@@ -12,6 +12,11 @@ preferences that matter to you.
 - Background work, progress updates, daily recaps, and optional self-improvement.
 - Discord Rich Presence and server-specific presentation customization.
 
+Theia can be installed to a Discord account as well as a server. Account
+installations provide slash-command conversations in DMs, group DMs, and
+servers; installing her to a server additionally enables message listening,
+threads, and voice.
+
 ## Commands
 
 ```text
@@ -38,6 +43,10 @@ uv run python main.py
 
 The setup wizard creates the local `.env` file and can configure text or voice
 mode. Keep `.env` private.
+
+To use account installation, enable User Install for the Discord application
+and use its account-install link. Install Theia to a server when you want
+message listening, threads, or voice.
 
 ### Docker
 

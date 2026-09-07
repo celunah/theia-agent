@@ -596,6 +596,8 @@ class _TurnState:
         user_prompt: str | None = None,
         on_channel_change: Callable[[Any], None] | None = None,
         on_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
+        interaction_sender: Callable[..., Awaitable[Any]] | None = None,
+        allow_discord_tools: bool = True,
     ) -> None:
         self.thread_id = thread_id
         self.session = session
@@ -607,6 +609,8 @@ class _TurnState:
         self.user_prompt = user_prompt
         self.on_channel_change = on_channel_change
         self.on_event = on_event
+        self.interaction_sender = interaction_sender
+        self.allow_discord_tools = allow_discord_tools
         # The dynamic Discord thread tool can be called more than once by a
         # model in the same turn. Keep the created channel here so a repeated
         # call is idempotent and cannot replace the real opening response with

@@ -130,6 +130,59 @@ def _is_server_admin(user: discord.abc.User, channel: Any | None) -> bool:
     return bool(permissions and getattr(permissions, "administrator", False))
 
 
+def _interaction_install_flag(interaction: Any, name: str) -> bool | None:
+    checker = getattr(interaction, name, None)
+    if not callable(checker):
+        return None
+    try:
+        return bool(checker())
+    except (AttributeError, TypeError):
+        return None
+
+
+def _is_guild_install(interaction: Any) -> bool:
+    """Return whether this interaction was authorized by a guild install."""
+    flag = _interaction_install_flag(interaction, "is_guild_integration")
+    if flag is not None:
+        return flag
+    return getattr(interaction, "guild", None) is not None
+
+
+def _is_user_only_install(interaction: Any) -> bool:
+    """Return whether this interaction comes only from a user installation."""
+    user_flag = _interaction_install_flag(interaction, "is_user_integration")
+    guild_flag = _interaction_install_flag(interaction, "is_guild_integration")
+    if user_flag is None and guild_flag is None:
+        return False
+    return user_flag is True and guild_flag is not True
+
+
+def _interaction_allows_tools(interaction: Any) -> bool:
+    """Apply the existing tool boundary to both guild and user installations."""
+    if _is_user_only_install(interaction):
+        return _is_always_admin_user(getattr(interaction.user, "id", None))
+    return _is_server_admin(interaction.user, interaction.channel)
+
+
+def _interaction_can_manage_server(interaction: discord.Interaction) -> bool:
+    """Require a guild install for server admins, while honoring trusted users."""
+    if _is_always_admin_user(getattr(interaction.user, "id", None)):
+        return True
+    return _is_guild_install(interaction) and _is_server_admin(
+        interaction.user, interaction.channel
+    )
+
+
+def _user_installable_command(command: Any) -> Any:
+    """Expose a command to guild and account installs in every Discord context."""
+    command = app_commands.allowed_contexts(
+        guilds=True,
+        dms=True,
+        private_channels=True,
+    )(command)
+    return app_commands.allowed_installs(guilds=True, users=True)(command)
+
+
 def _voice_session_allows_tools(session: VoiceSession) -> bool:
     """Re-check the voice session owner's current guild permissions."""
     guild = getattr(session.text_channel, "guild", None)
@@ -417,6 +470,7 @@ async def handle_login(
     guild_id: int | None = None,
     grant_server: bool = False,
     ephemeral: bool = False,
+    on_complete_send: SendMessage | None = None,
 ) -> None:
     """Run the Codex login flow and deliver a safe Discord status embed."""
     await bot.presence.touch()
@@ -426,6 +480,7 @@ async def handle_login(
             user_id,
             guild_id=guild_id,
             grant_server=grant_server,
+            on_complete_send=on_complete_send,
         )
     except CodexAppServerError:
         await send(
@@ -527,6 +582,30 @@ async def handle_login(
     await send(embed=embed, ephemeral=ephemeral)
 
 
+def _interaction_request_sender(interaction: discord.Interaction) -> SendMessage:
+    """Use the deferred interaction response before consuming webhook followups."""
+    original_available = True
+
+    async def send(**kwargs: Any) -> Any:
+        nonlocal original_available
+        if original_available:
+            original_available = False
+            edit_original = getattr(interaction, "edit_original_response", None)
+            if callable(edit_original):
+                original_kwargs = dict(kwargs)
+                # The visibility of a deferred response is fixed at defer time.
+                original_kwargs.pop("ephemeral", None)
+                try:
+                    return await cast(
+                        Coroutine[Any, Any, Any], edit_original(**original_kwargs)
+                    )
+                except discord.DiscordException:
+                    pass
+        return await interaction.followup.send(**kwargs)
+
+    return send
+
+
 async def handle_request(
     send: SendMessage,
     prompt: str,
@@ -541,6 +620,8 @@ async def handle_request(
     speak_text: Callable[[str], Awaitable[None]] | None = None,
     use_webhook_thread: bool = False,
     thread_source: discord.Message | None = None,
+    interaction_sender: SendMessage | None = None,
+    allow_discord_tools: bool = True,
     **kwargs: Any,
 ) -> None:
     """Route one Discord request through Codex and stream its user-facing result."""
@@ -630,6 +711,8 @@ async def handle_request(
                     user_prompt=prompt,
                     on_channel_change=on_channel_change,
                     on_event=on_codex_event,
+                    interaction_sender=interaction_sender,
+                    allow_discord_tools=allow_discord_tools,
                 )
             except CodexAppServerError as exc:
                 failed = True
@@ -1021,17 +1104,18 @@ def _login_required_embed(
 async def _require_login(interaction: discord.Interaction) -> bool:
     await bot.presence.touch()
     guild_id = getattr(interaction.guild, "id", None)
-    if bot.codex.is_authenticated(interaction.user.id, guild_id):
+    auth_guild_id = guild_id if _is_guild_install(interaction) else None
+    if bot.codex.is_authenticated(interaction.user.id, auth_guild_id):
         return True
     # Upgrade an administrator who authenticated before server-scoped grants
     # were introduced. This also lets an already-authenticated admin opt a
     # server in without needing to repeat the device-code flow.
     if (
-        guild_id is not None
-        and _is_server_admin(interaction.user, interaction.channel)
+        auth_guild_id is not None
+        and _interaction_can_manage_server(interaction)
         and bot.codex.is_authenticated(interaction.user.id)
     ):
-        bot.codex.mark_server_authenticated(guild_id)
+        bot.codex.mark_server_authenticated(auth_guild_id)
         logger.info("Granted cached Codex access to a server")
         return True
     embed = _login_required_embed(channel=interaction.channel, user=interaction.user)
@@ -1047,7 +1131,7 @@ async def _require_server_admin(
     *,
     message: str = "Only server administrators can approve or deny tool actions.",
 ) -> bool:
-    if _is_server_admin(interaction.user, interaction.channel):
+    if _interaction_can_manage_server(interaction):
         return True
     embed = _frontend_embed(
         "label:administrator_access_required",
@@ -1382,14 +1466,22 @@ async def _run_voice_request(
     )
 
 
+@_user_installable_command
 @bot.tree.command(name="login", description="Authenticate this Discord user with Codex")
 async def codex_login(interaction: discord.Interaction) -> None:
     """Authenticate the invoking Discord user, optionally authorizing their server."""
     await interaction.response.defer(ephemeral=True)
     channel = interaction.channel or interaction.user
     guild_id = getattr(interaction.guild, "id", None)
-    grant_server = guild_id is not None and _is_server_admin(
-        interaction.user, interaction.channel
+    grant_server = (
+        _is_guild_install(interaction)
+        and guild_id is not None
+        and _is_server_admin(interaction.user, interaction.channel)
+    )
+    complete_sender = (
+        _interaction_request_sender(interaction)
+        if _is_user_only_install(interaction)
+        else None
     )
     await handle_login(
         channel,
@@ -1398,9 +1490,11 @@ async def codex_login(interaction: discord.Interaction) -> None:
         guild_id=guild_id,
         grant_server=grant_server,
         ephemeral=True,
+        on_complete_send=complete_sender,
     )
 
 
+@_user_installable_command
 @bot.tree.command(name="restart", description="Restart the Discord bot in place")
 async def codex_restart(interaction: discord.Interaction) -> None:
     """Schedule an administrator-only in-place bot restart."""
@@ -1438,6 +1532,7 @@ async def codex_restart(interaction: discord.Interaction) -> None:
     bot._restart_task = asyncio.create_task(_restart_in_place())
 
 
+@_user_installable_command
 @bot.tree.command(name="usage", description="Show Codex account usage")
 async def codex_usage(interaction: discord.Interaction) -> None:
     """Display the authenticated Codex account's current usage privately."""
@@ -1456,6 +1551,7 @@ async def codex_usage(interaction: discord.Interaction) -> None:
         await _send_command_failure(interaction, "Usage unavailable", exc)
 
 
+@_user_installable_command
 @bot.tree.command(name="credits", description="Show Codex credits and limits")
 async def codex_credits(interaction: discord.Interaction) -> None:
     """Display the authenticated Codex account's rate limits privately."""
@@ -1474,6 +1570,7 @@ async def codex_credits(interaction: discord.Interaction) -> None:
         await _send_command_failure(interaction, "Credits unavailable", exc)
 
 
+@_user_installable_command
 @bot.tree.command(name="about", description="Show Codex and session details")
 async def codex_about(interaction: discord.Interaction) -> None:
     """Display the current Theia, Codex, account, and session details privately."""
@@ -1503,6 +1600,7 @@ async def codex_about(interaction: discord.Interaction) -> None:
     )
 
 
+@_user_installable_command
 @bot.tree.command(name="mode", description="Choose text or voice interaction mode")
 @app_commands.describe(mode="The interaction mode to use")
 @app_commands.choices(
@@ -1521,6 +1619,19 @@ async def codex_mode(
     selected = mode.value if isinstance(mode, app_commands.Choice) else str(mode)
     key = session_key(interaction.channel, interaction.user.id)
     if selected == VOICE_MODE:
+        if _is_user_only_install(interaction):
+            await interaction.followup.send(
+                embed=_frontend_embed(
+                    "command:mode",
+                    "Voice unavailable",
+                    "Voice mode requires Theia to be installed in the server.",
+                    channel=interaction.channel,
+                    user=interaction.user,
+                    color=discord.Color.orange(),
+                ),
+                ephemeral=True,
+            )
+            return
         if not bot.codex.voice_mode_available or not bot.voice.available:
             reason = (
                 "Voice mode requires configured STT_BASE_URL and TTS_BASE_URL."
@@ -1633,6 +1744,7 @@ async def model_autocomplete(
     return choices[:25]
 
 
+@_user_installable_command
 @bot.tree.command(name="model", description="Select the Codex model for this bot")
 @app_commands.describe(model="The Codex model to use")
 @app_commands.autocomplete(model=model_autocomplete)
@@ -1677,6 +1789,7 @@ async def personality_autocomplete(
     return choices[:25]
 
 
+@_user_installable_command
 @bot.tree.command(name="personality", description="Manage Codex personality profiles")
 @app_commands.describe(
     file="A Markdown or plain-text personality prompt",
@@ -1748,6 +1861,7 @@ async def codex_personality(
     )
 
 
+@_user_installable_command
 @bot.tree.command(name="approve", description="Approve the active Codex request")
 async def codex_approve(interaction: discord.Interaction) -> None:
     """Approve the invoking administrator's pending Codex request."""
@@ -1777,6 +1891,7 @@ async def codex_approve(interaction: discord.Interaction) -> None:
     )
 
 
+@_user_installable_command
 @bot.tree.command(name="deny", description="Deny the active Codex request")
 async def codex_deny(interaction: discord.Interaction) -> None:
     """Deny the invoking administrator's pending Codex request."""
@@ -1806,6 +1921,7 @@ async def codex_deny(interaction: discord.Interaction) -> None:
     )
 
 
+@_user_installable_command
 @bot.tree.command(name="stop", description="Stop your active Codex request")
 async def codex_stop(interaction: discord.Interaction) -> None:
     """Interrupt the invoking user's active Codex request."""
@@ -1832,6 +1948,7 @@ async def codex_stop(interaction: discord.Interaction) -> None:
         await _send_command_failure(interaction, "Stop unavailable", exc)
 
 
+@_user_installable_command
 @bot.tree.command(name="undo", description="Undo your last Codex response")
 async def codex_undo(interaction: discord.Interaction) -> None:
     """Roll back the most recent completed Codex turn for this session."""
@@ -1856,6 +1973,7 @@ async def codex_undo(interaction: discord.Interaction) -> None:
     )
 
 
+@_user_installable_command
 @bot.tree.command(name="btw", description="Send a request to Codex")
 @app_commands.describe(
     prompt="The request to send to Codex",
@@ -1881,7 +1999,12 @@ async def _run_btw_request(
     """Prepare and run a slash-command request outside Discord's callback task."""
     try:
         source_channel = interaction.channel
-        response_channel = await _maybe_create_response_thread(source_channel, prompt)
+        user_only = _is_user_only_install(interaction)
+        response_channel = (
+            source_channel
+            if user_only
+            else await _maybe_create_response_thread(source_channel, prompt)
+        )
         if response_channel is None:
             response_channel = source_channel
         if _is_thread(response_channel):
@@ -1895,18 +2018,25 @@ async def _run_btw_request(
             # Webhook follow-ups can target the newly-created thread while keeping
             # the interaction acknowledgement valid.
             send_kwargs["thread"] = response_channel
+        request_sender = (
+            _interaction_request_sender(interaction)
+            if user_only
+            else interaction.followup.send
+        )
         await handle_request(
-            interaction.followup.send,
+            request_sender,
             prompt,
             channel=response_channel,
             user_id=interaction.user.id,
             user=interaction.user,
             attachments=(file,) if file is not None else (),
-            allow_tools=_is_server_admin(interaction.user, response_channel),
+            allow_tools=_interaction_allows_tools(interaction),
             context=context,
             request_id=f"interaction:{interaction.id}",
             speak_text=_voice_speak_callback(key),
             use_webhook_thread=True,
+            interaction_sender=request_sender if user_only else None,
+            allow_discord_tools=not user_only,
             **send_kwargs,
         )
     except Exception as exc:  # noqa: BLE001 - a deferred interaction must resolve
@@ -1937,6 +2067,7 @@ async def skill_autocomplete(
     return choices[:25]
 
 
+@_user_installable_command
 @bot.tree.command(name="skill", description="Invoke an available Codex skill")
 @app_commands.describe(skill_name="The skill to invoke")
 @app_commands.autocomplete(skill_name=skill_autocomplete)
@@ -1994,16 +2125,24 @@ async def _run_skill_request(
     """Run a skill invocation outside the slash-command callback task."""
     try:
         context = await _channel_context(interaction.channel)
+        user_only = _is_user_only_install(interaction)
+        request_sender = (
+            _interaction_request_sender(interaction)
+            if user_only
+            else interaction.followup.send
+        )
         await handle_request(
-            interaction.followup.send,
+            request_sender,
             f"${skill_name}",
             channel=interaction.channel,
             user_id=interaction.user.id,
             user=interaction.user,
-            allow_tools=_is_server_admin(interaction.user, interaction.channel),
+            allow_tools=_interaction_allows_tools(interaction),
             context=context,
             request_id=f"interaction:{interaction.id}",
             speak_text=_voice_speak_callback(session_key_value),
+            interaction_sender=request_sender if user_only else None,
+            allow_discord_tools=not user_only,
         )
     except Exception as exc:  # noqa: BLE001 - a deferred interaction must resolve
         logger.error(
@@ -2036,6 +2175,7 @@ async def customization_element_autocomplete(
     ]
 
 
+@_user_installable_command
 @bot.tree.command(name="customize", description="Customize the Discord frontend")
 @app_commands.describe(
     target="A command such as /usage, or a frontend label such as Thinking",

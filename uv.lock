@@ -1481,7 +1481,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "discord-ext-voice-recv", specifier = ">=0.5.2a179" },
-    { name = "discord-py" },
+    { name = "discord-py", specifier = ">=2.4" },
     { name = "python-dotenv" },
     { name = "tomli", specifier = ">=2.0.1" },
 ]

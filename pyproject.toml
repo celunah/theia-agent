@@ -4,7 +4,7 @@ version = "1.0.2"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = [
-    "discord.py",
+    "discord.py>=2.4",
     "discord-ext-voice-recv>=0.5.2a179",
     "python-dotenv",
     "tomli>=2.0.1",

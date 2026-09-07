@@ -24,6 +24,18 @@ The current commands are:
 - `/restart`
 - `/customize [target] [element] [value]`
 
+Core commands are available to both guild-installed and account-installed apps.
+Account-installed slash requests use the interaction webhook, so `/btw` and
+`/skill` can start normal `turn/start` conversations without requiring Theia to
+be a member of the server. Account installations do not receive ordinary
+message events, create Discord threads, or join voice channels. Their ordinary
+users remain on the safe/read-only Codex policy; trusted
+`THEIA_ALWAYS_ADMIN_USERS` can still use Theia's administrative controls.
+Server-scoped administrative commands still require a guild installation and
+the appropriate administrator access, unless the trusted-user setting applies.
+Guild-installed operation retains message listening, thread delivery, voice,
+and the existing server administrator policy.
+
 Prefix commands are disabled.
 
 `/about` privately displays the running Theia version and short source
