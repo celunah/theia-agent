@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import time
 from collections.abc import Awaitable, Callable, Coroutine, Iterable
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
 
@@ -140,6 +141,15 @@ _PERSONALITY_SESSION_KEY_RE = re.compile(
 _MOOD_MAX_CAUSES = 3
 _MOOD_CAUSE_MAX_CHARACTERS = 180
 _MOOD_TRAITS_MAX_CHARACTERS = 180
+_USAGE_DAILY_LIMIT = 400
+_TOKEN_USAGE_KEYS = (
+    "cacheWriteInputTokens",
+    "cachedInputTokens",
+    "inputTokens",
+    "outputTokens",
+    "reasoningOutputTokens",
+    "totalTokens",
+)
 _MOOD_EVENT_STRENGTHS = {
     "engaged": 0.58,
     "pleased": 0.62,
@@ -603,6 +613,10 @@ class CodexAppServer:
         self._message_ledger: dict[str, dict[str, Any]] = {}
         self._discord_threads: set[int] = set()
         self._channel_checkpoints: dict[int, int] = {}
+        self._usage_threads: dict[str, dict[str, int]] = {}
+        self._usage_daily: dict[str, int] = {}
+        self._usage_tracked_since: float | None = None
+        self._usage_longest_running_turn_sec = 0.0
         self._state_dirty = False
         self._state_recovery_blocked = False
         self._skills_cache: tuple[dict[str, Any], ...] = ()
@@ -892,6 +906,125 @@ class CodexAppServer:
         mood.updated_at = None
         mood.transient = False
 
+    @staticmethod
+    def _token_usage_breakdown(value: Any) -> dict[str, int]:
+        """Normalize one Codex per-thread token snapshot for local accounting."""
+        result = {key: 0 for key in _TOKEN_USAGE_KEYS}
+        if not isinstance(value, dict):
+            return result
+        for key in _TOKEN_USAGE_KEYS:
+            number = value.get(key)
+            if isinstance(number, bool) or not isinstance(number, int):
+                continue
+            result[key] = max(0, number)
+        return result
+
+    @staticmethod
+    def _is_internal_usage_session(session: _Session) -> bool:
+        """Exclude disposable assessment and background Codex sessions."""
+        return session.key.startswith("__")
+
+    def _usage_thread_is_owned(self, thread_id: str) -> bool:
+        if thread_id in self._usage_threads:
+            return True
+        return any(
+            session.thread_id == thread_id
+            and not self._is_internal_usage_session(session)
+            for session in self._sessions.values()
+        )
+
+    def _claim_usage_thread(self, thread_id: str) -> None:
+        """Mark a normal Theia thread as eligible for local usage accounting."""
+        if not thread_id or thread_id in self._usage_threads:
+            return
+        self._usage_threads[thread_id] = self._token_usage_breakdown(None)
+        if self._usage_tracked_since is None:
+            self._usage_tracked_since = time.time()
+
+    def _record_token_usage(self, params: dict[str, Any]) -> None:
+        """Record a cumulative per-thread snapshot without reading account totals."""
+        thread_id = params.get("threadId")
+        if not isinstance(thread_id, str) or not thread_id:
+            return
+        if not self._usage_thread_is_owned(thread_id):
+            return
+        token_usage = params.get("tokenUsage")
+        if not isinstance(token_usage, dict):
+            return
+        current = self._token_usage_breakdown(token_usage.get("total"))
+        previous = self._usage_threads.setdefault(
+            thread_id, self._token_usage_breakdown(None)
+        )
+        delta = max(0, current["totalTokens"] - previous["totalTokens"])
+        self._usage_threads[thread_id] = current
+        if delta:
+            day = time.strftime("%Y-%m-%d", time.gmtime())
+            self._usage_daily[day] = self._usage_daily.get(day, 0) + delta
+            self._usage_daily = dict(
+                sorted(self._usage_daily.items())[-_USAGE_DAILY_LIMIT:]
+            )
+        if self._usage_tracked_since is None:
+            self._usage_tracked_since = time.time()
+        self._persist_state()
+
+    def _record_usage_turn_duration(self, duration: float, session: _Session) -> None:
+        if self._is_internal_usage_session(session):
+            return
+        if math.isfinite(duration) and duration >= 0:
+            self._usage_longest_running_turn_sec = max(
+                self._usage_longest_running_turn_sec, duration
+            )
+            self._persist_state()
+
+    def theia_usage(self, *, now: float | None = None) -> dict[str, Any]:
+        """Return token activity measured only from Theia-owned threads."""
+        totals = self._token_usage_breakdown(None)
+        for snapshot in self._usage_threads.values():
+            for key in _TOKEN_USAGE_KEYS:
+                totals[key] += snapshot.get(key, 0)
+        daily = {
+            day: value
+            for day, value in self._usage_daily.items()
+            if isinstance(value, int) and value > 0
+        }
+        active_days = set(daily)
+        current_streak = 0
+        longest_streak = 0
+        if active_days:
+            today = datetime.fromtimestamp(
+                now if now is not None else time.time(), tz=timezone.utc
+            ).date()
+            cursor = today
+            while cursor.isoformat() in active_days:
+                current_streak += 1
+                cursor -= timedelta(days=1)
+            ordered_days: list[date] = []
+            for day in active_days:
+                try:
+                    ordered_days.append(date.fromisoformat(day))
+                except ValueError:
+                    continue
+            ordered_days.sort()
+            streak = 0
+            previous: date | None = None
+            for active_day in ordered_days:
+                if previous is not None and active_day == previous + timedelta(days=1):
+                    streak += 1
+                else:
+                    streak = 1
+                longest_streak = max(longest_streak, streak)
+                previous = active_day
+        return {
+            "scope": "theia",
+            "summary": {
+                "lifetimeTokens": totals["totalTokens"],
+                "peakDailyTokens": max(daily.values(), default=0),
+                "currentStreakDays": current_streak,
+                "longestStreakDays": longest_streak,
+                "longestRunningTurnSec": self._usage_longest_running_turn_sec,
+            },
+        }
+
     def _load_state(self) -> None:
         try:
             raw = self._state_path.read_text(encoding="utf-8")
@@ -1046,6 +1179,43 @@ class CodexAppServer:
                 for channel_id, message_id in checkpoints.items():
                     if str(channel_id).isdigit() and isinstance(message_id, int):
                         self._channel_checkpoints[int(channel_id)] = message_id
+            usage = data.get("theia_usage")
+            if isinstance(usage, dict):
+                usage_threads = usage.get("threads")
+                if isinstance(usage_threads, dict):
+                    for thread_id, snapshot in usage_threads.items():
+                        if isinstance(thread_id, str) and isinstance(snapshot, dict):
+                            self._usage_threads[thread_id] = (
+                                self._token_usage_breakdown(snapshot)
+                            )
+                usage_daily = usage.get("daily_tokens")
+                if isinstance(usage_daily, dict):
+                    self._usage_daily = {
+                        str(day): value
+                        for day, value in usage_daily.items()
+                        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(day))
+                        and isinstance(value, int)
+                        and not isinstance(value, bool)
+                        and value > 0
+                    }
+                    self._usage_daily = dict(
+                        sorted(self._usage_daily.items())[-_USAGE_DAILY_LIMIT:]
+                    )
+                tracked_since = usage.get("tracked_since")
+                if (
+                    isinstance(tracked_since, (int, float))
+                    and not isinstance(tracked_since, bool)
+                    and math.isfinite(float(tracked_since))
+                    and tracked_since > 0
+                ):
+                    self._usage_tracked_since = float(tracked_since)
+                longest_turn = usage.get("longest_running_turn_sec")
+                if (
+                    isinstance(longest_turn, (int, float))
+                    and not isinstance(longest_turn, bool)
+                    and math.isfinite(float(longest_turn))
+                ):
+                    self._usage_longest_running_turn_sec = max(0.0, float(longest_turn))
 
     def _quarantine_state(self, reason: str) -> None:
         """Preserve an unreadable state file before allowing recovery writes."""
@@ -1122,6 +1292,15 @@ class CodexAppServer:
                     reverse=True,
                 )[:CHANNEL_CHECKPOINT_LIMIT]
             ),
+            "theia_usage": {
+                "threads": {
+                    thread_id: dict(snapshot)
+                    for thread_id, snapshot in self._usage_threads.items()
+                },
+                "daily_tokens": dict(self._usage_daily),
+                "tracked_since": self._usage_tracked_since,
+                "longest_running_turn_sec": self._usage_longest_running_turn_sec,
+            },
         }
         temporary = self._state_path.with_suffix(".tmp")
         try:
@@ -2279,14 +2458,8 @@ class CodexAppServer:
         return result
 
     async def usage(self) -> dict[str, Any]:
-        """Return account usage, or an empty result when login is required."""
-        await self._ensure_running()
-        await self.refresh_account()
-        if self.account is None and self.requires_openai_auth:
-            logger.info("Codex usage requested without an authenticated account")
-            return {}
-        logger.debug("Reading Codex account usage")
-        return await self._request("account/usage/read", {"threadId": None})
+        """Return token activity recorded from Theia-owned conversation threads."""
+        return self.theia_usage()
 
     async def credits(self) -> dict[str, Any]:
         """Return account rate limits, or an empty result when login is required."""
@@ -3910,6 +4083,7 @@ class CodexAppServer:
             self._persist_state()
 
         if session.thread_id and not session.loaded:
+            self._claim_usage_thread(session.thread_id)
             params: dict[str, Any] = {
                 "threadId": session.thread_id,
                 "runtimeWorkspaceRoots": [
@@ -3970,6 +4144,7 @@ class CodexAppServer:
             session.thread_id = thread.get("id")
             if not session.thread_id:
                 raise CodexAppServerError("Codex did not return a thread id.")
+            self._claim_usage_thread(session.thread_id)
             session.loaded = True
             session.instruction_fingerprint = instruction_fingerprint
             session.tool_policy = allow_tools
@@ -4060,6 +4235,7 @@ class CodexAppServer:
         finally:
             if state.event_tasks:
                 await asyncio.gather(*state.event_tasks, return_exceptions=True)
+            self._record_usage_turn_duration(time.monotonic() - started_at, session)
             if session.thread_id:
                 self._clear_pending_for_turn(session.thread_id, turn_id)
             session.turn_id = None
@@ -5596,6 +5772,10 @@ class CodexAppServer:
                     else:
                         self._background_send(channel, embed)
                     logger.warning("Codex login completed unsuccessfully")
+            return
+
+        if method == "thread/tokenUsage/updated":
+            self._record_token_usage(params)
             return
 
         state = self._find_turn(params)

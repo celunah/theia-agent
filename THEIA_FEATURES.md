@@ -43,6 +43,9 @@ revision, selected Codex CLI version, invoking Discord account, Codex plan,
 and current session mode and personality. One-file builds embed the short Git
 revision used to produce them.
 
+`/usage` privately displays token activity tracked from Theia's own conversation
+threads. It does not display the authenticated account's lifetime Codex activity.
+
 Each isolated conversation also has a temporary simulated mood. It derives a
 resting affect from the active personality, responds only to meaningful user
 turns, decays with real elapsed time, and is never written to permanent
@@ -176,7 +179,6 @@ Theia currently calls or wraps these app-server methods.
 initialize
 account/read
 account/login/start
-account/usage/read
 account/rateLimits/read
 model/list
 modelProvider/capabilities/read
@@ -236,6 +238,7 @@ item/started
 item/completed
 item/agentMessage/delta
 item/commandExecution/outputDelta
+thread/tokenUsage/updated
 turn/completed
 context/compacted
 thread/compacted

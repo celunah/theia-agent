@@ -774,6 +774,63 @@ class CommandSurfaceTests(unittest.TestCase):
             ["Credits", "State", "Five hour", "Seven day"],
         )
 
+    def test_usage_reports_only_claimed_theia_thread_tokens(self) -> None:
+        server = main.CodexAppServer()
+        server._persist_state = lambda: None
+        session = server._session("discord-user")
+        session.thread_id = "theia-thread"
+        server._claim_usage_thread("theia-thread")
+
+        server._handle_notification(
+            {
+                "method": "thread/tokenUsage/updated",
+                "params": {
+                    "threadId": "theia-thread",
+                    "tokenUsage": {
+                        "total": {
+                            "inputTokens": 30,
+                            "outputTokens": 12,
+                            "totalTokens": 42,
+                        }
+                    },
+                },
+            }
+        )
+        server._handle_notification(
+            {
+                "method": "thread/tokenUsage/updated",
+                "params": {
+                    "threadId": "account-wide-thread",
+                    "tokenUsage": {"total": {"totalTokens": 9_900_000_000}},
+                },
+            }
+        )
+
+        usage = asyncio.run(server.usage())
+
+        self.assertEqual(usage["scope"], "theia")
+        self.assertEqual(usage["summary"]["lifetimeTokens"], 42)
+        self.assertEqual(usage["summary"]["peakDailyTokens"], 42)
+
+    def test_usage_embed_labels_theia_scope(self) -> None:
+        embed = main._usage_embed(
+            {
+                "scope": "theia",
+                "summary": {
+                    "lifetimeTokens": 42,
+                    "peakDailyTokens": 42,
+                    "currentStreakDays": 1,
+                    "longestStreakDays": 1,
+                    "longestRunningTurnSec": 2,
+                },
+            }
+        )
+
+        self.assertEqual(
+            embed.description, "Usage tracked from Theia's conversation threads."
+        )
+        self.assertEqual(embed.fields[0].name, "Theia tokens")
+
     def test_personality_autocomplete_uses_available_profiles(self) -> None:
         with patch.object(
             main.bot.codex, "personality_names", return_value=("calm", "formal")
@@ -828,10 +885,10 @@ class CommandSurfaceTests(unittest.TestCase):
                     42,
                     "usage",
                     "content",
-                    "Account usage reported by Codex.",
+                    "Usage tracked from Theia's conversation threads.",
                     context={"server": "Example", "user": "Alice"},
                 ),
-                "Balance for Alice: Account usage reported by Codex.",
+                "Balance for Alice: Usage tracked from Theia's conversation threads.",
             )
             self.assertEqual(
                 store.render(7, "usage", "title", "Usage"),
@@ -952,14 +1009,14 @@ class CommandSurfaceTests(unittest.TestCase):
             store.set(42, "usage", "title", "Custom usage")
             default = main._command_embed(
                 "Usage",
-                "Account usage reported by Codex.",
+                "Usage tracked from Theia's conversation threads.",
                 target="command:usage",
                 guild_id=7,
                 customizer=store,
             )
             customized = main._command_embed(
                 "Usage",
-                "Account usage reported by Codex.",
+                "Usage tracked from Theia's conversation threads.",
                 target="command:usage",
                 guild_id=42,
                 customizer=store,

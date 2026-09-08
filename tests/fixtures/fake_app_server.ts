@@ -19,6 +19,10 @@ const scenario = (process.env.FAKE_APP_SERVER_SCENARIO || "").toLowerCase();
 let nextThreadId = 1;
 let nextTurnId = 1;
 const activeTurns = new Map<string, ActiveTurn>();
+const threadTotalTokens = new Map<
+  string,
+  { inputTokens: number; outputTokens: number; totalTokens: number }
+>();
 const pendingApprovals = new Map<string, ActiveTurn>();
 const pendingQuestions = new Map<string, ActiveTurn>();
 
@@ -89,6 +93,43 @@ function completeTurn(
   text = "",
   error?: JsonObject,
 ): void {
+  const inputTokens = turn.prompt.length;
+  const outputTokens = text.length;
+  const totalTokens = inputTokens + outputTokens;
+  const previous = threadTotalTokens.get(turn.threadId) || {
+    inputTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+  };
+  const cumulative = {
+    inputTokens: previous.inputTokens + inputTokens,
+    outputTokens: previous.outputTokens + outputTokens,
+    totalTokens: previous.totalTokens + totalTokens,
+  };
+  threadTotalTokens.set(turn.threadId, cumulative);
+  notify("thread/tokenUsage/updated", {
+    threadId: turn.threadId,
+    turnId: turn.turnId,
+    tokenUsage: {
+      last: {
+        cacheWriteInputTokens: 0,
+        cachedInputTokens: 0,
+        inputTokens,
+        outputTokens,
+        reasoningOutputTokens: 0,
+        totalTokens,
+      },
+      total: {
+        cacheWriteInputTokens: 0,
+        cachedInputTokens: 0,
+        inputTokens: cumulative.inputTokens,
+        outputTokens: cumulative.outputTokens,
+        reasoningOutputTokens: 0,
+        totalTokens: cumulative.totalTokens,
+      },
+      modelContextWindow: null,
+    },
+  });
   const item = text
     ? {
         type: "agentMessage",
@@ -358,15 +399,6 @@ function handleRequest(request: RpcRequest): void {
             resetsAt: 4102444800,
           },
         },
-      });
-      return;
-    case "account/usage/read":
-      respond(request, {
-        usage: {
-          limit: 100,
-          remaining: scenarioIs("usage-exhausted") ? 0 : 84,
-        },
-        exhausted: scenarioIs("usage-exhausted"),
       });
       return;
     case "thread/loaded/list":

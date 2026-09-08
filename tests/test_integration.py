@@ -321,16 +321,17 @@ class TestLocalCodexBoundary(unittest.IsolatedAsyncioTestCase):
                 process.kill()
                 await asyncio.wait_for(process.wait(), timeout=3)
 
-    async def test_rate_limits_and_exhausted_usage_are_returned(self) -> None:
-        """Verify account limit snapshots cross the same request/response boundary."""
+    async def test_rate_limits_and_theia_usage_are_returned(self) -> None:
+        """Verify limits and Theia-local usage cross the same request boundary."""
         rate_server = await self._server(scenario="rate-limit")
         credit_snapshot = await rate_server.credits()
         self.assertEqual(credit_snapshot["rateLimits"]["primary"]["usedPercent"], 100)
 
-        usage_server = await self._server(scenario="usage-exhausted")
+        usage_server = await self._server(scenario="normal")
+        await self._ask(usage_server, "count this turn")
         usage = await usage_server.usage()
-        self.assertTrue(usage["exhausted"])
-        self.assertEqual(usage["usage"]["remaining"], 0)
+        self.assertEqual(usage["scope"], "theia")
+        self.assertGreater(usage["summary"]["lifetimeTokens"], 0)
 
     async def test_outage_and_authentication_failures_are_distinguishable(self) -> None:
         """Verify service outages and login-required responses retain their causes."""

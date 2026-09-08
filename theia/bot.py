@@ -816,7 +816,7 @@ def _usage_embed(
     embed = _frontend_embed(
         "command:usage",
         "Usage",
-        "Account usage reported by Codex.",
+        "Usage tracked from Theia's conversation threads.",
         channel=channel,
         user=user,
         context={
@@ -830,7 +830,7 @@ def _usage_embed(
     fields = (
         (
             "label:usage_lifetime_tokens",
-            "Lifetime tokens",
+            "Theia tokens",
             _format_count(summary.get("lifetimeTokens")),
         ),
         (
@@ -1533,9 +1533,9 @@ async def codex_restart(interaction: discord.Interaction) -> None:
 
 
 @_user_installable_command
-@bot.tree.command(name="usage", description="Show Codex account usage")
+@bot.tree.command(name="usage", description="Show local conversation usage")
 async def codex_usage(interaction: discord.Interaction) -> None:
-    """Display the authenticated Codex account's current usage privately."""
+    """Display Theia's locally tracked conversation usage privately."""
     if not await _require_login(interaction):
         return
     await interaction.response.defer(ephemeral=True)
