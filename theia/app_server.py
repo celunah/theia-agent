@@ -685,6 +685,7 @@ class CodexAppServer:
         self._usage_longest_running_turn_sec = 0.0
         self._state_dirty = False
         self._state_recovery_blocked = False
+        self._state_needs_cleanup = False
         self._skills_cache: tuple[dict[str, Any], ...] = ()
         self._skills_loaded_at = 0.0
         self._skills_lock = asyncio.Lock()
@@ -695,6 +696,9 @@ class CodexAppServer:
         self._auth_imported = False
         self._migrate_legacy_state()
         self._load_state()
+        if self._state_needs_cleanup:
+            self._persist_state()
+            self._state_needs_cleanup = False
         logger.debug(
             "Codex layer initialized (adaptive_reasoning=%s, approval_level=%s, "
             "self_improvement=%s, memory_roots=%d, skill_roots=%d, "
@@ -1165,6 +1169,9 @@ class CodexAppServer:
             if isinstance(sessions, dict):
                 state_now = time.time()
                 for key, value in sessions.items():
+                    if str(key).startswith("__"):
+                        self._state_needs_cleanup = True
+                        continue
                     if not isinstance(value, dict):
                         continue
                     thread_id = value.get("thread_id")
@@ -1204,14 +1211,17 @@ class CodexAppServer:
                         if isinstance(self_improvement_summary, str)
                         else None
                     )
-                    if (
+                    has_non_mood_state = bool(
                         thread_id
                         or personality_name
                         or personality_selected is True
                         or saved_self_improvement_summary
                         or saved_tool_policy is not None
                         or saved_mode != DEFAULT_MODE
-                        or mood is not None
+                    )
+                    if has_non_mood_state or (
+                        mood is not None
+                        and (thread_id or saved_last_activity_at is not None)
                     ):
                         self._sessions[str(key)] = _Session(
                             key=str(key),
@@ -1240,6 +1250,8 @@ class CodexAppServer:
                             else False,
                             last_activity_at=saved_last_activity_at,
                         )
+                    elif mood is not None:
+                        self._state_needs_cleanup = True
             aliases = data.get("session_aliases")
             if isinstance(aliases, dict):
                 self._session_aliases.update(
@@ -1367,13 +1379,19 @@ class CodexAppServer:
                     "last_activity_at": session.last_activity_at,
                 }
                 for key, session in self._sessions.items()
-                if session.mode != DEFAULT_MODE
-                or session.thread_id
-                or session.personality_name
-                or session.personality_selected
-                or session.pending_self_improvement_summary
-                or session.tool_policy is not None
-                or session.mood is not None
+                if not session.key.startswith("__")
+                and (
+                    session.mode != DEFAULT_MODE
+                    or session.thread_id
+                    or session.personality_name
+                    or session.personality_selected
+                    or session.pending_self_improvement_summary
+                    or session.tool_policy is not None
+                    or (
+                        session.mood is not None
+                        and session.last_activity_at is not None
+                    )
+                )
             },
             "session_aliases": dict(self._session_aliases),
             "message_ledger": dict(
@@ -1544,6 +1562,17 @@ class CodexAppServer:
                     self._approval_result(pending.kind, pending.params, approved=False)
                 )
         self._persist_state()
+
+    def _forget_session(self, session_key: str) -> None:
+        """Remove a session record and any aliases that point to it."""
+        canonical_key = self._canonical_session_key(session_key)
+        self._sessions.pop(canonical_key, None)
+        for alias in tuple(self._session_aliases):
+            if (
+                alias == canonical_key
+                or self._canonical_session_key(alias) == canonical_key
+            ):
+                self._session_aliases.pop(alias, None)
 
     def has_session(self, key: str) -> bool:
         """Return whether ``key`` has an associated Codex thread."""
@@ -2381,6 +2410,7 @@ class CodexAppServer:
         mood = session.mood
         assert mood is not None
         event_at = time.time() if now is None else now
+        session.last_activity_at = event_at
         changed = self._decay_mood(mood, now=event_at) or changed
         signature = self._mood_event_signature(text)
         if mood.last_event_signature == signature:
@@ -3269,15 +3299,27 @@ class CodexAppServer:
         checked_at = time.time() if now is None else now
         archived = 0
         deleted = 0
+        pruned_sessions = 0
         for session in tuple(self._sessions.values()):
             if session.lock is None:
                 session.lock = asyncio.Lock()
             async with session.lock:
-                if (
-                    not session.thread_id
-                    or session.turn_id
-                    or session.last_activity_at is None
-                ):
+                if not session.thread_id:
+                    has_session_metadata = bool(
+                        session.mode != DEFAULT_MODE
+                        or session.personality_name
+                        or session.personality_selected
+                        or session.pending_self_improvement_summary
+                        or session.tool_policy is not None
+                    )
+                    if not has_session_metadata and (
+                        session.last_activity_at is None
+                        or checked_at - session.last_activity_at >= SESSION_DELETE_AFTER
+                    ):
+                        self._forget_session(session.key)
+                        pruned_sessions += 1
+                    continue
+                if session.turn_id or session.last_activity_at is None:
                     continue
                 inactive_for = max(0.0, checked_at - session.last_activity_at)
                 if inactive_for >= SESSION_DELETE_AFTER:
@@ -3313,12 +3355,16 @@ class CodexAppServer:
                     self._set_thread_loaded(session.thread_id, False)
                     self._persist_state()
                     archived += 1
-        if archived or deleted:
+        if archived or deleted or pruned_sessions:
             logger.info(
-                "Applied Codex session retention (archived=%d, deleted=%d)",
+                "Applied Codex session retention (archived=%d, deleted=%d, "
+                "pruned_sessions=%d)",
                 archived,
                 deleted,
+                pruned_sessions,
             )
+        if pruned_sessions:
+            self._persist_state()
         self._prune_attachment_cache()
         return {"archived": archived, "deleted": deleted}
 
@@ -3702,6 +3748,7 @@ class CodexAppServer:
                 if review_turn_id is not None:
                     self._turns.pop(review_turn_id, None)
                 self._sessions.pop(review_key, None)
+                self._persist_state()
 
     async def _notify_self_improvement(
         self,

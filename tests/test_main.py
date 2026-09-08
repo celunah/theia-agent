@@ -2744,6 +2744,61 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(restored.archived)
         self.assertEqual(restored.last_activity_at, 123.0)
 
+    def test_state_load_discards_temporary_and_unthreaded_mood_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_path = root / "state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "sessions": {
+                            "real": {"thread_id": "real-thread"},
+                            "__self_improvement__:old": {
+                                "thread_id": "temporary-thread",
+                                "last_activity_at": 10.0,
+                            },
+                            "mood-only": {
+                                "mood": {
+                                    "baseline_traits": "steady, attentive",
+                                    "baseline_cause": "Resting affect.",
+                                    "traits": "steady, attentive",
+                                    "label": "neutral",
+                                    "strength": 0.5,
+                                    "causes": ["Resting affect."],
+                                    "transient": False,
+                                }
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "THEIA_HOME": str(root / "theia"),
+                    "THEIA_STATE": str(state_path),
+                },
+            ):
+                server = main.CodexAppServer()
+
+            self.assertIn("real", server._sessions)
+            self.assertNotIn("__self_improvement__:old", server._sessions)
+            self.assertNotIn("mood-only", server._sessions)
+            persisted = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(tuple(persisted["sessions"]), ("real",))
+
+    async def test_retention_prunes_unthreaded_transient_sessions(self) -> None:
+        server = main.CodexAppServer()
+        server._ensure_running = AsyncMock()
+        session = server._session("mood-only")
+        session.mood = server._new_mood_state(session)
+
+        result = await server.enforce_retention()
+
+        self.assertEqual(result, {"archived": 0, "deleted": 0})
+        self.assertNotIn("mood-only", server._sessions)
+
     async def test_activity_unarchives_a_thirty_day_session(self) -> None:
         server = main.CodexAppServer()
         server._ensure_running = AsyncMock()
@@ -4087,6 +4142,9 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(
                 "warm and direct", personality_path.read_text(encoding="utf-8")
             )
+            self.assertFalse(any(key.startswith("__") for key in server._sessions))
+            persisted = json.loads((root / "state.json").read_text(encoding="utf-8"))
+            self.assertFalse(any(key.startswith("__") for key in persisted["sessions"]))
 
     async def test_self_improvement_no_change_is_recorded_in_session_context(
         self,
