@@ -19,6 +19,8 @@ from discord.ext import commands
 from .app_server import CodexAppServer, CodexAppServerError
 from .core import (
     DEFAULT_MODE,
+    DEFAULT_PERSONALITY_SCOPE,
+    PERSONALITY_SCOPES,
     THEIA_VERSION,
     TEXT_MODE,
     VOICE_MODE,
@@ -2131,6 +2133,33 @@ def _personality_summary_embed(
         "known_entries": known_entries,
         "known_users": known_users,
     }
+    scope = ""
+    set_by = ""
+    embed_scope = ""
+    embed_set_by = ""
+    if summary is not None and summary.get("scope"):
+        scope = str(summary["scope"])
+        raw_set_by = summary.get("set_by")
+        set_by = (
+            f"Discord user ID: {raw_set_by}"
+            if isinstance(raw_set_by, int) and not isinstance(raw_set_by, bool)
+            else "Legacy selection"
+        )
+        context.update({"personality_scope": scope, "personality_set_by": set_by})
+        embed_scope = _frontend_label(
+            "label:personality_scope",
+            "Scope",
+            channel=channel,
+            user=user,
+            context=context,
+        )
+        embed_set_by = _frontend_label(
+            "label:personality_set_by",
+            "Set by",
+            channel=channel,
+            user=user,
+            context=context,
+        )
     embed = _frontend_embed(
         "command:personality",
         title,
@@ -2150,6 +2179,9 @@ def _personality_summary_embed(
         value=str(known_entries),
         inline=False,
     )
+    if embed_scope:
+        embed.add_field(name=embed_scope, value=scope, inline=True)
+        embed.add_field(name=embed_set_by, value=set_by, inline=True)
     embed.add_field(
         name=_frontend_label(
             "label:personality_known_users",
@@ -2199,16 +2231,26 @@ def _personality_summary_embed(
 @app_commands.describe(
     file="A Markdown or plain-text personality prompt",
     name="The profile name, or `none` to clear the active personality",
+    scope="Who should use this personality: me, server, or everyone",
+)
+@app_commands.choices(
+    scope=[app_commands.Choice(name=scope, value=scope) for scope in PERSONALITY_SCOPES]
 )
 @app_commands.autocomplete(name=personality_autocomplete)
 async def codex_personality(
     interaction: discord.Interaction,
     file: discord.Attachment | None = None,
     name: str | None = None,
+    scope: app_commands.Choice[str] | None = None,
 ) -> None:
-    """Upload, select, or clear the personality for the current Discord session."""
+    """Upload, select, or clear a personality at the requested scope."""
     await bot.presence.touch()
     await interaction.response.defer(ephemeral=True)
+    selected_scope = (
+        scope.value
+        if isinstance(scope, app_commands.Choice)
+        else str(scope or DEFAULT_PERSONALITY_SCOPE)
+    )
     if file is None and name is None:
         key = session_key(interaction.channel, interaction.user.id)
         try:
@@ -2238,11 +2280,19 @@ async def codex_personality(
             ephemeral=True,
         )
         return
+    if selected_scope != "me" and not await _require_server_admin(
+        interaction,
+        message="Only server administrators can change server or everyone personalities.",
+    ):
+        return
     try:
         selected = await bot.codex.configure_personality(
             session_key(interaction.channel, interaction.user.id),
             name=name,
             attachment=file,
+            scope=selected_scope,
+            actor_user_id=interaction.user.id,
+            guild_id=getattr(getattr(interaction, "guild", None), "id", None),
         )
     except CodexAppServerError as exc:
         await interaction.followup.send(
@@ -2258,13 +2308,18 @@ async def codex_personality(
         )
         return
     if selected is None:
-        description = "The active Codex personality has been cleared."
+        description = (
+            f"The active Codex personality has been cleared for `{selected_scope}`."
+        )
         title = "Personality cleared"
     elif file is not None:
-        description = f"Personality `{selected}` was uploaded and is now active."
+        description = (
+            f"Personality `{selected}` was uploaded and is now active for "
+            f"`{selected_scope}`."
+        )
         title = "Personality uploaded"
     else:
-        description = f"Personality `{selected}` is now active."
+        description = f"Personality `{selected}` is now active for `{selected_scope}`."
         title = "Personality selected"
     await interaction.followup.send(
         embed=_frontend_embed(
@@ -2273,7 +2328,10 @@ async def codex_personality(
             description,
             channel=interaction.channel,
             user=interaction.user,
-            context={"personality": selected or "none"},
+            context={
+                "personality": selected or "none",
+                "personality_scope": selected_scope,
+            },
             color=discord.Color.green(),
         ),
         ephemeral=True,

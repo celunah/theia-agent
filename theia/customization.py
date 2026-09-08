@@ -85,6 +85,8 @@ LABEL_TARGETS = (
     "about_personality",
     "personality_known_entries",
     "personality_known_users",
+    "personality_scope",
+    "personality_set_by",
     "personality_mood",
     "personality_presence",
     "personality_footer",

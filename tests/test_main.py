@@ -899,12 +899,16 @@ class CommandSurfaceTests(unittest.TestCase):
             "description": "A calm lunar guardian.",
             "known_entries": 12,
             "known_users": 3,
+            "scope": "me",
+            "set_by": None,
         }
         with tempfile.TemporaryDirectory() as directory:
             store = main.FrontendCustomizationStore(Path(directory) / "frontend.json")
             for target, value in (
                 ("personality_known_entries", "Lore"),
                 ("personality_known_users", "People"),
+                ("personality_scope", "Where"),
+                ("personality_set_by", "Author"),
                 ("personality_mood", "Affect"),
                 ("personality_presence", "Activity"),
                 ("personality_footer", "Use {command} to change {character_name}"),
@@ -926,6 +930,8 @@ class CommandSurfaceTests(unittest.TestCase):
             [(field.name, field.value) for field in embed.fields],
             [
                 ("Lore", "12"),
+                ("Where", "me"),
+                ("Author", "Legacy selection"),
                 ("People", "3"),
                 ("Affect", "Neutral (50%)"),
                 ("Activity", "watching the moon"),
@@ -1460,6 +1466,8 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
             "description": "A calm lunar guardian.",
             "known_entries": 12,
             "known_users": 3,
+            "scope": "me",
+            "set_by": 9,
         }
         with (
             patch.object(main.bot.presence, "touch", new=AsyncMock()),
@@ -1491,6 +1499,8 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
             [(field.name, field.value) for field in embed.fields],
             [
                 ("Known Entries", "12"),
+                ("Scope", "me"),
+                ("Set by", "Discord user ID: 9"),
                 ("Known Users", "3"),
                 ("Mood", "Neutral (50%)"),
                 ("Presence", "watching the moon"),
@@ -1499,6 +1509,35 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             embed.footer.text,
             "Add or change the character with `/personality <file> <slug>`.",
+        )
+
+    async def test_personality_shared_scopes_require_administrator_access(self) -> None:
+        interaction = SimpleNamespace(
+            channel=SimpleNamespace(id=7, guild=SimpleNamespace(id=42)),
+            guild=SimpleNamespace(id=42),
+            user=SimpleNamespace(
+                id=9,
+                guild_permissions=SimpleNamespace(administrator=False),
+            ),
+            response=SimpleNamespace(defer=AsyncMock(), is_done=lambda: True),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        configure = AsyncMock()
+        with (
+            patch.object(main.bot.presence, "touch", new=AsyncMock()),
+            patch.object(main.bot.codex, "configure_personality", new=configure),
+        ):
+            await cast(Any, main.codex_personality.callback)(
+                interaction,
+                name="cel",
+                scope=discord.app_commands.Choice(name="server", value="server"),
+            )
+
+        configure.assert_not_awaited()
+        self.assertTrue(interaction.followup.send.await_args.kwargs["ephemeral"])
+        self.assertIn(
+            "server or everyone personalities",
+            interaction.followup.send.await_args.kwargs["embed"].description,
         )
 
     async def test_login_messages_cover_each_authentication_path(self) -> None:
@@ -4261,6 +4300,89 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
                     None,
                 )
                 self.assertIsNone(restarted.active_personality("session"))
+
+    async def test_personality_scopes_resolve_in_precedence_order_and_persist(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment = {
+                "THEIA_HOME": str(root / "theia"),
+                "THEIA_STATE": str(root / "state.json"),
+            }
+            with patch.dict(os.environ, environment):
+                server = main.CodexAppServer()
+
+                async def upload(name: str, text: bytes, user_id: int) -> None:
+                    await server.configure_personality(
+                        f"guild:42:channel:1:user:{user_id}",
+                        name=name,
+                        attachment=SimpleNamespace(
+                            filename=f"{name}.md",
+                            size=len(text),
+                            read=AsyncMock(return_value=text),
+                        ),
+                        scope={
+                            "global": "everyone",
+                            "server": "server",
+                            "me": "me",
+                        }[name],
+                        actor_user_id=user_id,
+                        guild_id=42,
+                    )
+
+                await upload("global", b"Be global.", 1)
+                await upload("server", b"Be server-wide.", 2)
+                await upload("me", b"Be personal.", 9)
+
+                self.assertEqual(
+                    server.active_personality("guild:42:channel:5:user:9"), "me"
+                )
+                self.assertEqual(
+                    server.active_personality("guild:42:channel:5:user:8"), "server"
+                )
+                self.assertEqual(
+                    server.active_personality("guild:43:channel:5:user:8"), "global"
+                )
+                self.assertEqual(
+                    server.personality_selection("guild:42:channel:5:user:9"),
+                    {"scope": "me", "name": "me", "set_by": 9},
+                )
+                self.assertEqual(
+                    server.personality_selection("guild:42:channel:5:user:8"),
+                    {"scope": "server", "name": "server", "set_by": 2},
+                )
+
+                await server.configure_personality(
+                    "guild:42:channel:5:user:9",
+                    name="none",
+                    scope="me",
+                    actor_user_id=9,
+                    guild_id=42,
+                )
+                self.assertEqual(
+                    server.active_personality("guild:42:channel:5:user:9"), "server"
+                )
+
+                restarted = main.CodexAppServer()
+                self.assertEqual(
+                    restarted.active_personality("guild:42:channel:5:user:8"),
+                    "server",
+                )
+                self.assertEqual(
+                    restarted.active_personality("guild:43:channel:5:user:8"),
+                    "global",
+                )
+
+    async def test_personality_server_scope_requires_a_server(self) -> None:
+        server = main.CodexAppServer()
+        with self.assertRaisesRegex(main.CodexAppServerError, "requires a server"):
+            await server.configure_personality(
+                "guild:0:channel:1:user:9",
+                name="none",
+                scope="server",
+                actor_user_id=9,
+            )
 
     async def test_personality_summary_uses_ephemeral_codex_and_memory_counts(
         self,

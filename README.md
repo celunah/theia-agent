@@ -9,6 +9,8 @@ preferences that matter to you.
 - Natural text conversations with optional voice replies.
 - Persistent conversations, attachments, memories, skills, and personality
   character cards.
+- Personality profiles can be selected for yourself, the current server, or
+  everyone in Theia, with administrator protection for shared scopes.
 - Model selection, web search, approvals, and safe controls for agent actions.
 - Theia-only usage tracking, background work, daily recaps, and optional self-improvement.
 - A temporary, personality-aware mood, Rich Presence, and server-specific customization.

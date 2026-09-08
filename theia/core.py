@@ -75,6 +75,8 @@ MOOD_LABELS = frozenset(
         "relieved",
     }
 )
+PERSONALITY_SCOPES = ("me", "server", "everyone")
+DEFAULT_PERSONALITY_SCOPE = "me"
 APPROVAL_LEVEL_ENV = "THEIA_APPROVAL_LEVEL"
 APPROVAL_LEVELS = frozenset({"high", "medium", "low"})
 DEFAULT_APPROVAL_LEVEL = "high"

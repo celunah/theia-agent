@@ -32,6 +32,7 @@ from .core import (
     DEFAULT_CODEX_MODEL,
     DEFAULT_APPROVAL_LEVEL,
     DEFAULT_MODE,
+    DEFAULT_PERSONALITY_SCOPE,
     DEFAULT_REASONING_EFFORT,
     DEFAULT_NIGHTLY_RECAP_TIMEOUT,
     DEFAULT_SELF_IMPROVEMENT,
@@ -39,6 +40,7 @@ from .core import (
     MOOD_BASELINE_STRENGTH,
     MOOD_DECAY_PER_MINUTE,
     MOOD_LABELS,
+    PERSONALITY_SCOPES,
     CodexAppServerError,
     _command_embed,
     _configured_paths,
@@ -138,6 +140,7 @@ _SELF_IMPROVEMENT_SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$
 _PERSONALITY_SESSION_KEY_RE = re.compile(
     r"^guild:(?P<guild>[^:]+):channel:[^:]+:user:(?P<user>[^:]+)$"
 )
+_PERSONALITY_SCOPE_KEY_RE = re.compile(r"^(?:me|server):[1-9][0-9]*$|^everyone$")
 _MOOD_MAX_CAUSES = 3
 _MOOD_CAUSE_MAX_CHARACTERS = 180
 _MOOD_TRAITS_MAX_CHARACTERS = 180
@@ -668,6 +671,7 @@ class CodexAppServer:
             legacy_state if legacy_state != self._state_path.resolve() else None
         )
         self._sessions: dict[str, _Session] = {}
+        self._personality_scopes: dict[str, dict[str, Any]] = {}
         self._session_aliases: dict[str, str] = {}
         self._authenticated_users: set[int] = set()
         self._authenticated_guilds: set[int] = set()
@@ -1114,6 +1118,35 @@ class CodexAppServer:
         if isinstance(data, dict):
             model = data.get("model")
             self._model = str(model) if model else DEFAULT_CODEX_MODEL
+            personality_scopes = data.get("personality_scopes")
+            if isinstance(personality_scopes, dict):
+                for raw_key, raw_record in personality_scopes.items():
+                    if not isinstance(raw_key, str) or not isinstance(raw_record, dict):
+                        continue
+                    key = raw_key.strip()
+                    if not _PERSONALITY_SCOPE_KEY_RE.fullmatch(key):
+                        continue
+                    scope = str(raw_record.get("scope") or "").casefold()
+                    if scope not in PERSONALITY_SCOPES:
+                        continue
+                    expected_prefix = {
+                        "me": "me:",
+                        "server": "server:",
+                        "everyone": "everyone",
+                    }[scope]
+                    if not key.startswith(expected_prefix):
+                        continue
+                    name = raw_record.get("name")
+                    if name is not None and not isinstance(name, str):
+                        continue
+                    set_by = raw_record.get("set_by")
+                    if not isinstance(set_by, int) or isinstance(set_by, bool):
+                        set_by = None
+                    self._personality_scopes[key] = {
+                        "scope": scope,
+                        "name": name,
+                        "set_by": set_by,
+                    }
             authenticated_users = data.get("authenticated_users")
             if isinstance(authenticated_users, list):
                 self._authenticated_users.update(
@@ -1317,6 +1350,9 @@ class CodexAppServer:
             "model": self._model,
             "authenticated_users": sorted(self._authenticated_users),
             "authenticated_guilds": sorted(self._authenticated_guilds),
+            "personality_scopes": {
+                key: dict(record) for key, record in self._personality_scopes.items()
+            },
             "sessions": {
                 key: {
                     "mode": session.mode,
@@ -1579,6 +1615,7 @@ class CodexAppServer:
         name = self.active_personality(session_key)
         if name is None:
             return None
+        selection = self.personality_selection(session_key) or {}
         try:
             summary = self._personalities.summary(name)
             _, prompt = self._personalities.read(name)
@@ -1590,6 +1627,8 @@ class CodexAppServer:
             "identifier": summary.identifier,
             "character_name": summary.character_name,
             "description": description or "The character summary is unavailable.",
+            "scope": selection.get("scope"),
+            "set_by": selection.get("set_by"),
             **self._personality_memory_stats(),
         }
 
@@ -1990,6 +2029,102 @@ class CodexAppServer:
             return None
         return f"guild:{match.group('guild')}:user:{match.group('user')}"
 
+    @staticmethod
+    def _personality_scope_identity(
+        session_key: str,
+    ) -> tuple[int | None, int | None]:
+        """Return the guild and user IDs encoded in a Discord session key."""
+        match = _PERSONALITY_SESSION_KEY_RE.fullmatch(session_key)
+        if match is None:
+            return None, None
+        try:
+            guild_id = int(match.group("guild"))
+        except ValueError:
+            guild_id = None
+        user_value = match.group("user")
+        if user_value == "shared":
+            user_id = None
+        else:
+            try:
+                user_id = int(user_value)
+            except ValueError:
+                user_id = None
+        return guild_id, user_id
+
+    def _personality_scope_key(
+        self,
+        scope: str,
+        session_key: str,
+        *,
+        actor_user_id: int | None,
+        guild_id: int | None,
+    ) -> str | None:
+        """Resolve a command scope to its isolated persistent assignment key."""
+        normalized = scope.strip().casefold()
+        if normalized not in PERSONALITY_SCOPES:
+            raise CodexAppServerError(
+                "Personality scope must be `me`, `server`, or `everyone`."
+            )
+        key_guild_id, _ = self._personality_scope_identity(
+            self._canonical_session_key(session_key)
+        )
+        selected_user_id = (
+            actor_user_id
+            if isinstance(actor_user_id, int) and not isinstance(actor_user_id, bool)
+            else None
+        )
+        selected_guild_id = (
+            guild_id
+            if isinstance(guild_id, int) and not isinstance(guild_id, bool)
+            else key_guild_id
+        )
+        if normalized == "me":
+            if selected_user_id is None or selected_user_id <= 0:
+                # Keep the old direct-session API available to internal callers
+                # that use an opaque key rather than a Discord session key.
+                return None
+            return f"me:{selected_user_id}"
+        if normalized == "server":
+            if selected_guild_id is None or selected_guild_id <= 0:
+                raise CodexAppServerError(
+                    "The `server` personality scope requires a server."
+                )
+            return f"server:{selected_guild_id}"
+        return "everyone"
+
+    def personality_selection(self, session_key: str) -> dict[str, Any] | None:
+        """Return the effective profile assignment and its scope metadata."""
+        canonical_key = self._canonical_session_key(session_key)
+        guild_id, user_id = self._personality_scope_identity(canonical_key)
+        if user_id is not None:
+            record = self._personality_scopes.get(f"me:{user_id}")
+            if record is not None:
+                return dict(record)
+
+        session = self._sessions.get(canonical_key)
+        if session is not None and session.personality_selected:
+            return {
+                "scope": "me",
+                "name": session.personality_name,
+                "set_by": None,
+            }
+        if session is not None and session.personality_name:
+            return {
+                "scope": "me",
+                "name": session.personality_name,
+                "set_by": None,
+            }
+        inherited = self._inherited_personality(canonical_key)
+        if inherited is not None:
+            return {"scope": "me", "name": inherited, "set_by": None}
+
+        if guild_id is not None and guild_id > 0:
+            record = self._personality_scopes.get(f"server:{guild_id}")
+            if record is not None:
+                return dict(record)
+        record = self._personality_scopes.get("everyone")
+        return dict(record) if record is not None else None
+
     def _inherited_personality(self, session_key: str) -> str | None:
         """Return one unambiguous profile selected by this user in this guild."""
         scope = self._personality_scope(session_key)
@@ -2005,14 +2140,10 @@ class CodexAppServer:
         return next(iter(names)) if len(names) == 1 else None
 
     def active_personality(self, session_key: str) -> str | None:
-        """Return the active profile, including an unambiguous guild/user selection."""
-        canonical_key = self._canonical_session_key(session_key)
-        session = self._sessions.get(canonical_key)
-        if session is not None and session.personality_selected:
-            return session.personality_name
-        if session is not None and session.personality_name:
-            return session.personality_name
-        return self._inherited_personality(canonical_key)
+        """Return the active profile using me, server, then everyone precedence."""
+        selection = self.personality_selection(session_key)
+        name = selection.get("name") if selection is not None else None
+        return name if isinstance(name, str) and name else None
 
     @staticmethod
     def _derive_resting_traits(profile_name: str | None, profile_text: str) -> str:
@@ -2301,8 +2432,11 @@ class CodexAppServer:
         *,
         name: str | None,
         attachment: Any | None = None,
+        scope: str = DEFAULT_PERSONALITY_SCOPE,
+        actor_user_id: int | None = None,
+        guild_id: int | None = None,
     ) -> str | None:
-        """Select, clear, or upload the personality used by a session.
+        """Select, clear, or upload a personality at the requested scope.
 
         Changing the personality resets the Codex thread so its system
         instructions cannot mix profiles from different points in a session.
@@ -2310,16 +2444,28 @@ class CodexAppServer:
         session = self._session(session_key)
         assert session.lock is not None
         async with session.lock:
+            normalized_scope = scope.strip().casefold()
+            scope_key = self._personality_scope_key(
+                normalized_scope,
+                session.key,
+                actor_user_id=actor_user_id,
+                guild_id=guild_id,
+            )
             if attachment is None:
                 if name is None:
                     raise CodexAppServerError("Provide a personality name or file.")
                 if self._personalities.is_clear_name(name):
-                    changed = (
-                        session.personality_name is not None
-                        or not session.personality_selected
-                    )
-                    session.personality_name = None
-                    session.personality_selected = True
+                    if scope_key is None:
+                        changed = (
+                            session.personality_name is not None
+                            or not session.personality_selected
+                        )
+                        session.personality_name = None
+                        session.personality_selected = True
+                    else:
+                        old_name = self.active_personality(session.key)
+                        self._personality_scopes.pop(scope_key, None)
+                        changed = old_name != self.active_personality(session.key)
                     if changed:
                         self._reset_mood(session)
                         self._reset_session_thread(session)
@@ -2329,9 +2475,18 @@ class CodexAppServer:
                     selected_name, _ = self._personalities.read(name)
                 except PersonalityError as exc:
                     raise CodexAppServerError(str(exc)) from exc
-                changed = session.personality_name != selected_name
-                session.personality_name = selected_name
-                session.personality_selected = True
+                if scope_key is None:
+                    changed = session.personality_name != selected_name
+                    session.personality_name = selected_name
+                    session.personality_selected = True
+                else:
+                    old_name = self.active_personality(session.key)
+                    self._personality_scopes[scope_key] = {
+                        "scope": normalized_scope,
+                        "name": selected_name,
+                        "set_by": actor_user_id,
+                    }
+                    changed = old_name != self.active_personality(session.key)
                 if changed:
                     self._reset_mood(session)
                     self._reset_session_thread(session)
@@ -2350,8 +2505,15 @@ class CodexAppServer:
                 selected_name = await self._personalities.upload(attachment, name)
             except PersonalityError as exc:
                 raise CodexAppServerError(str(exc)) from exc
-            session.personality_name = selected_name
-            session.personality_selected = True
+            if scope_key is None:
+                session.personality_name = selected_name
+                session.personality_selected = True
+            else:
+                self._personality_scopes[scope_key] = {
+                    "scope": normalized_scope,
+                    "name": selected_name,
+                    "set_by": actor_user_id,
+                }
             self._reset_mood(session)
             self._reset_session_thread(session)
             self._persist_state()

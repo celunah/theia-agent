@@ -331,14 +331,18 @@ The default is indexed search. Live mode can be explicitly selected when current
 
 ### Personalities
 
-- `/personality file name` uploads and activates a Markdown/text personality.
-- `/personality name` switches to an existing profile.
-- `/personality name:none` clears it.
+- `/personality file name [scope]` uploads and activates a Markdown/text
+  personality. `/personality name [scope]` switches to an existing profile,
+  and `name:none` clears it. The scope is `me` (the invoking user), `server`
+  (the current server), or `everyone` (Theia's global default); `server` and
+  `everyone` require administrator access.
 - `/personality` shows a private character card for the active profile,
   including its identifier, a generated character description, counts of memory
   entries and known users, current mood, and Rich Presence line.
 - The character card footer explains how to add or change a character.
 - Personality-name autocomplete is supported.
+- Personality resolution uses `me`, then `server`, then `everyone` precedence,
+  and the character card records the active scope and setter ID.
 - `/about` retains an unambiguous selected profile for the same user and server
   when the current session has no local personality metadata; an explicit
   clear remains authoritative for that session.
