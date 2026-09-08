@@ -850,11 +850,7 @@ class CommandSurfaceTests(unittest.TestCase):
             (profile_root / "cel.md").write_text(
                 "# Celune\n\n"
                 "You are Celune, a calm and curious lunar guardian.\n\n"
-                "## Known Entries\n"
-                "- Moon Gate\n"
-                "- Silver Archive\n\n"
-                "## Known Users\n"
-                "- Luna\n",
+                "Speak with a warm, observant response style.\n",
                 encoding="utf-8",
             )
 
@@ -863,9 +859,6 @@ class CommandSurfaceTests(unittest.TestCase):
         self.assertEqual(summary.name, "cel")
         self.assertEqual(summary.identifier, "cel")
         self.assertEqual(summary.character_name, "Celune")
-        self.assertIn("calm and curious lunar guardian", summary.description)
-        self.assertEqual(summary.known_entries, ("Moon Gate", "Silver Archive"))
-        self.assertEqual(summary.known_users, ("Luna",))
 
     def test_personality_summary_embed_has_default_and_customized_fields(self) -> None:
         summary = {
@@ -873,8 +866,8 @@ class CommandSurfaceTests(unittest.TestCase):
             "identifier": "cel",
             "character_name": "Celune",
             "description": "A calm lunar guardian.",
-            "known_entries": ("Moon Gate",),
-            "known_users": ("Luna",),
+            "known_entries": 12,
+            "known_users": 3,
         }
         with tempfile.TemporaryDirectory() as directory:
             store = main.FrontendCustomizationStore(Path(directory) / "frontend.json")
@@ -901,8 +894,8 @@ class CommandSurfaceTests(unittest.TestCase):
         self.assertEqual(
             [(field.name, field.value) for field in embed.fields],
             [
-                ("Lore", "• Moon Gate"),
-                ("People", "• Luna"),
+                ("Lore", "12"),
+                ("People", "3"),
                 ("Affect", "Neutral (50%)"),
                 ("Activity", "watching the moon"),
             ],
@@ -1425,12 +1418,16 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
             "identifier": "cel",
             "character_name": "Celune",
             "description": "A calm lunar guardian.",
-            "known_entries": ("Moon Gate",),
-            "known_users": ("Luna",),
+            "known_entries": 12,
+            "known_users": 3,
         }
         with (
             patch.object(main.bot.presence, "touch", new=AsyncMock()),
-            patch.object(main.bot.codex, "personality_summary", return_value=summary),
+            patch.object(
+                main.bot.codex,
+                "personality_summary",
+                new=AsyncMock(return_value=summary),
+            ),
             patch.object(
                 main.bot.codex,
                 "mood_state",
@@ -1453,8 +1450,8 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [(field.name, field.value) for field in embed.fields],
             [
-                ("Known Entries", "• Moon Gate"),
-                ("Known Users", "• Luna"),
+                ("Known Entries", "12"),
+                ("Known Users", "3"),
                 ("Mood", "Neutral (50%)"),
                 ("Presence", "watching the moon"),
             ],
@@ -4095,6 +4092,90 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
                     None,
                 )
                 self.assertIsNone(restarted.active_personality("session"))
+
+    async def test_personality_summary_uses_ephemeral_codex_and_memory_counts(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            memory_root = root / "theia" / "memories"
+            memory_root.mkdir(parents=True)
+            (memory_root / "MEMORY.md").write_text(
+                "- First memory about <@101>\n"
+                "- Second memory about [Discord user id: 202]\n"
+                "- Third memory about <@101>\n",
+                encoding="utf-8",
+            )
+            (memory_root / "USER.md").write_text(
+                "- The profile is also associated with <@202>.\n", encoding="utf-8"
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "THEIA_HOME": str(root / "theia"),
+                    "THEIA_STATE": str(root / "state.json"),
+                },
+            ):
+                server = main.CodexAppServer()
+                await server.configure_personality(
+                    "session",
+                    name="cel",
+                    attachment=SimpleNamespace(
+                        filename="cel.md",
+                        size=40,
+                        read=AsyncMock(
+                            return_value=b"You are Celune, a calm guardian."
+                        ),
+                    ),
+                )
+                requests: list[tuple[str, dict[str, Any]]] = []
+
+                async def request(
+                    method: str, params: dict[str, Any], **_kwargs: Any
+                ) -> dict[str, Any]:
+                    requests.append((method, params))
+                    if method == "thread/start":
+                        return {"thread": {"id": "summary-thread"}}
+                    return {"turn": {"id": "summary-turn"}}
+
+                server._request = AsyncMock(side_effect=request)
+                server._ensure_running = AsyncMock()
+                server._wait_for_turn = AsyncMock(
+                    return_value=(
+                        '{"description":"Celune is a calm guardian who protects '
+                        'others and responds with warm, observant precision."}'
+                    )
+                )
+                summary = await server.personality_summary("session")
+
+        self.assertIsNotNone(summary)
+        assert summary is not None
+        self.assertEqual(
+            summary["description"],
+            "Celune is a calm guardian who protects others and responds with warm, "
+            "observant precision.",
+        )
+        self.assertEqual(summary["known_entries"], 4)
+        self.assertEqual(summary["known_users"], 2)
+        self.assertEqual(
+            [method for method, _ in requests], ["thread/start", "turn/start"]
+        )
+        thread_params = requests[0][1]
+        self.assertTrue(thread_params["ephemeral"])
+        self.assertEqual(thread_params["approvalPolicy"], "never")
+        self.assertEqual(thread_params["sandbox"], "read-only")
+        self.assertEqual(thread_params["runtimeWorkspaceRoots"], [])
+        self.assertEqual(thread_params["baseInstructions"], main.BASE_PRIORS)
+        self.assertNotIn("dynamicTools", thread_params)
+        turn_params = requests[1][1]
+        self.assertEqual(turn_params["effort"], "low")
+        self.assertIn(
+            "You are Celune, a calm guardian.", turn_params["input"][0]["text"]
+        )
+        self.assertIn("outputSchema", turn_params)
+        self.assertFalse(
+            any(key.startswith("__personality_summary__") for key in server._sessions)
+        )
 
     async def test_about_personality_recovers_one_active_profile_for_user_and_guild(
         self,

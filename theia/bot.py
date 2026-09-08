@@ -1804,8 +1804,8 @@ def _personality_summary_embed(
         personality = "none"
         character_name = ""
         character_slug = ""
-        known_entries: tuple[str, ...] = ()
-        known_users: tuple[str, ...] = ()
+        known_entries = 0
+        known_users = 0
     else:
         character_name = str(summary.get("character_name") or "Character")
         character_slug = str(summary.get("identifier") or "character")
@@ -1814,18 +1814,8 @@ def _personality_summary_embed(
             summary.get("description") or "No character description is available."
         )
         personality = str(summary.get("name") or character_slug)
-        raw_entries = summary.get("known_entries", ())
-        raw_users = summary.get("known_users", ())
-        known_entries = (
-            tuple(str(item) for item in raw_entries if str(item))
-            if isinstance(raw_entries, (list, tuple))
-            else ()
-        )
-        known_users = (
-            tuple(str(item) for item in raw_users if str(item))
-            if isinstance(raw_users, (list, tuple))
-            else ()
-        )
+        known_entries = max(0, int(summary.get("known_entries") or 0))
+        known_users = max(0, int(summary.get("known_users") or 0))
 
     raw_strength = mood.get("strength")
     strength = (
@@ -1845,8 +1835,8 @@ def _personality_summary_embed(
         "character_slug": character_slug,
         "mood": mood_text,
         "presence": current_presence,
-        "known_entries": "\n".join(known_entries),
-        "known_users": "\n".join(known_users),
+        "known_entries": known_entries,
+        "known_users": known_users,
     }
     embed = _frontend_embed(
         "command:personality",
@@ -1864,7 +1854,7 @@ def _personality_summary_embed(
             user=user,
             context=context,
         ),
-        value="\n".join(f"• {item}" for item in known_entries) or "None recorded.",
+        value=str(known_entries),
         inline=False,
     )
     embed.add_field(
@@ -1875,7 +1865,7 @@ def _personality_summary_embed(
             user=user,
             context=context,
         ),
-        value="\n".join(f"• {item}" for item in known_users) or "None recorded.",
+        value=str(known_users),
         inline=False,
     )
     embed.add_field(
@@ -1929,7 +1919,7 @@ async def codex_personality(
     if file is None and name is None:
         key = session_key(interaction.channel, interaction.user.id)
         try:
-            summary = bot.codex.personality_summary(key)
+            summary = await bot.codex.personality_summary(key)
             mood = bot.codex.mood_state(key)
         except CodexAppServerError as exc:
             await interaction.followup.send(

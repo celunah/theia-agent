@@ -13,13 +13,8 @@ import unicodedata
 PERSONALITY_SUFFIXES = frozenset({".md", ".markdown", ".text", ".txt"})
 MAX_PERSONALITY_BYTES = 128 * 1024
 MAX_PERSONALITY_NAME_LENGTH = 80
-MAX_SUMMARY_DESCRIPTION_LENGTH = 600
-MAX_SUMMARY_ITEM_LENGTH = 160
-MAX_SUMMARY_ITEMS = 6
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
 _IDENTIFIER_RE = re.compile(r"[^a-z0-9]+")
-_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(.+?)\s*$")
-_SUMMARY_SECTIONS = {"known entries", "known users"}
 
 
 class PersonalityError(ValueError):
@@ -36,14 +31,11 @@ class PersonalityProfile:
 
 @dataclass(frozen=True)
 class PersonalitySummary:
-    """A bounded, presentation-safe summary of one personality profile."""
+    """The local identity fields needed to display one personality profile."""
 
     name: str
     identifier: str
     character_name: str
-    description: str
-    known_entries: tuple[str, ...]
-    known_users: tuple[str, ...]
 
 
 def _clean_summary_text(value: str, limit: int) -> str:
@@ -86,49 +78,6 @@ def _character_name(name: str, prompt: str) -> str:
         if heading:
             return heading
     return _clean_summary_text(name, 120)
-
-
-def _description(prompt: str) -> str:
-    """Use the opening prose as a concise local profile description."""
-    for block in re.split(r"\n\s*\n", prompt):
-        lines = block.splitlines()
-        if not lines:
-            continue
-        first_heading = next((_heading(line) for line in lines if line.strip()), None)
-        if first_heading and first_heading.casefold() in _SUMMARY_SECTIONS:
-            continue
-        prose = []
-        for line in lines:
-            if _heading(line):
-                continue
-            line = re.sub(r"^\s*>\s?", "", line)
-            line = _LIST_ITEM_RE.sub(r"\1", line)
-            if line.strip():
-                prose.append(line.strip())
-        value = _clean_summary_text(" ".join(prose), MAX_SUMMARY_DESCRIPTION_LENGTH)
-        if value:
-            return value
-    return "No character description is available."
-
-
-def _section_items(prompt: str, section_name: str) -> tuple[str, ...]:
-    items: list[str] = []
-    active = False
-    for line in prompt.splitlines():
-        heading = _heading(line)
-        if heading:
-            active = heading.casefold() == section_name.casefold()
-            continue
-        if not active or not line.strip():
-            continue
-        match = _LIST_ITEM_RE.match(line)
-        value = match.group(1) if match else line.strip()
-        value = _clean_summary_text(value, MAX_SUMMARY_ITEM_LENGTH)
-        if value and value not in items:
-            items.append(value)
-        if len(items) >= MAX_SUMMARY_ITEMS:
-            break
-    return tuple(items)
 
 
 class PersonalityStore:
@@ -235,9 +184,6 @@ class PersonalityStore:
             name=name,
             identifier=_profile_identifier(name),
             character_name=_character_name(name, prompt),
-            description=_description(prompt),
-            known_entries=_section_items(prompt, "Known Entries"),
-            known_users=_section_items(prompt, "Known Users"),
         )
 
     async def upload(self, attachment: object, value: str | None) -> str:

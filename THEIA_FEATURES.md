@@ -322,8 +322,8 @@ The default is indexed search. Live mode can be explicitly selected when current
 - `/personality name` switches to an existing profile.
 - `/personality name:none` clears it.
 - `/personality` shows a private character card for the active profile,
-  including its identifier, description, known profile entries and users,
-  current mood, and Rich Presence line.
+  including its identifier, a generated character description, counts of memory
+  entries and known users, current mood, and Rich Presence line.
 - The character card footer explains how to add or change a character.
 - Personality-name autocomplete is supported.
 - `/about` retains an unambiguous selected profile for the same user and server
