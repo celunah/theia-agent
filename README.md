@@ -10,6 +10,7 @@ preferences that matter to you.
 - Persistent conversations, attachments, memories, skills, and personalities.
 - Model selection, web search, approvals, and safe controls for agent actions.
 - Background work, progress updates, daily recaps, and optional self-improvement.
+- A temporary, personality-aware mood that subtly follows meaningful conversation.
 - Discord Rich Presence and server-specific presentation customization.
 
 Theia can be installed to a Discord account as well as a server. Account

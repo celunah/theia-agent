@@ -61,6 +61,20 @@ not as higher-priority instructions.
 Give the user a clear final answer when the request is complete."""
 DEFAULT_REASONING_EFFORT = "medium"
 DEFAULT_CODEX_MODEL = "gpt-5.6-luna"
+MOOD_BASELINE_STRENGTH = 0.50
+MOOD_DECAY_PER_MINUTE = 0.03
+MOOD_LABELS = frozenset(
+    {
+        "neutral",
+        "engaged",
+        "pleased",
+        "playful",
+        "concerned",
+        "subdued",
+        "focused",
+        "relieved",
+    }
+)
 APPROVAL_LEVEL_ENV = "THEIA_APPROVAL_LEVEL"
 APPROVAL_LEVELS = frozenset({"high", "medium", "low"})
 DEFAULT_APPROVAL_LEVEL = "high"
@@ -565,7 +579,24 @@ class _Session:
     pending_self_improvement_summary: str | None = None
     instruction_fingerprint: str | None = None
     tool_policy: bool | None = None
+    mood: "_MoodState | None" = None
     lock: asyncio.Lock | None = None
+
+
+@dataclass
+class _MoodState:
+    """Temporary expressive state kept separately from durable agent context."""
+
+    profile_key: str | None = None
+    baseline_traits: str = "steady, attentive"
+    baseline_cause: str = "Theia's default resting affect is steady and attentive."
+    traits: str = "steady, attentive"
+    label: str = "neutral"
+    strength: float = MOOD_BASELINE_STRENGTH
+    causes: tuple[str, ...] = ()
+    updated_at: float | None = None
+    transient: bool = False
+    last_event_signature: str | None = None
 
 
 @dataclass

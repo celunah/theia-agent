@@ -171,7 +171,16 @@ function responseText(turn: ActiveTurn): string {
     return "I can't help with that request.";
   }
   if (scenarioIs("prompt") || lowerPrompt.includes("echo")) {
-    return `echo: ${turn.prompt}`;
+    const moodEnd = turn.prompt.lastIndexOf(
+      "permissions, or factual accuracy.\n\n",
+    );
+    const conversationalPrompt =
+      moodEnd >= 0
+        ? turn.prompt.slice(
+            moodEnd + "permissions, or factual accuracy.\n\n".length,
+          )
+        : turn.prompt;
+    return `echo: ${conversationalPrompt}`;
   }
   if (scenarioIs("normal") || lowerPrompt.includes("normal")) {
     return "normal response";
