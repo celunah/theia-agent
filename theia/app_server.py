@@ -1725,13 +1725,15 @@ class CodexAppServer:
         memory = self._memory_instructions(allow_tools=True)
         if not memory:
             return None
-        source = None
-        if session_key:
-            source = self._sessions.get(self._canonical_session_key(session_key))
-        personality = self._personality_instructions(source) if source else None
+        personality_name = (
+            self.active_personality(session_key) if session_key is not None else None
+        )
         session_id = f"__memory_retrieval__:{time.monotonic_ns()}"
-        session = _Session(key=session_id)
+        session = _Session(key=session_id, personality_name=personality_name)
         self._sessions[session_id] = session
+        personality = (
+            self._personality_instructions(session) if personality_name else None
+        )
         state: _TurnState | None = None
         thread_id: str | None = None
         turn_id: str | None = None
@@ -2040,7 +2042,7 @@ class CodexAppServer:
 
     def _new_mood_state(self, session: _Session) -> _MoodState:
         """Create the profile baseline without touching the Codex conversation."""
-        profile_name = session.personality_name or None
+        profile_name = self.active_personality(session.key)
         profile_text = ""
         if profile_name:
             try:
@@ -2066,7 +2068,7 @@ class CodexAppServer:
 
     def _ensure_mood_state(self, session: _Session) -> bool:
         """Ensure the session mood belongs to its currently active profile."""
-        profile_name = session.personality_name or None
+        profile_name = self.active_personality(session.key)
         if session.mood is not None and session.mood.profile_key == profile_name:
             return False
         self._reset_mood(session)
@@ -2365,10 +2367,11 @@ class CodexAppServer:
         session.instruction_fingerprint = None
 
     def _personality_instructions(self, session: _Session) -> str | None:
-        if not session.personality_name:
+        profile_name = self.active_personality(session.key)
+        if not profile_name:
             return None
         try:
-            _, prompt = self._personalities.read(session.personality_name)
+            _, prompt = self._personalities.read(profile_name)
         except PersonalityError as exc:
             raise CodexAppServerError(str(exc)) from exc
         return (
@@ -3568,10 +3571,11 @@ class CodexAppServer:
 
     def _self_improvement_personality_path(self, session: _Session) -> Path | None:
         """Resolve the active personality file without creating a new profile."""
-        if not session.personality_name:
+        profile_name = self.active_personality(session.key)
+        if not profile_name:
             return None
         try:
-            profile = self._personalities.resolve(session.personality_name)
+            profile = self._personalities.resolve(profile_name)
         except PersonalityError:
             return None
         if profile is None or not _path_is_under(
@@ -3963,13 +3967,14 @@ class CodexAppServer:
     ) -> str | None:
         """Generate one private, no-tool recap without extending a user thread."""
         await self._ensure_running()
-        source = None
-        if session_key:
-            source = self._sessions.get(self._canonical_session_key(session_key))
         session_id = f"__nightly_recap__:{time.monotonic_ns()}"
         session = _Session(
             key=session_id,
-            personality_name=source.personality_name if source is not None else None,
+            personality_name=(
+                self.active_personality(session_key)
+                if session_key is not None
+                else None
+            ),
         )
         self._sessions[session_id] = session
         state: _TurnState | None = None
@@ -4070,13 +4075,14 @@ class CodexAppServer:
     ) -> dict[str, str] | None:
         """Generate one short activity line in a disposable, no-tool turn."""
         await self._ensure_running()
-        source = None
-        if session_key:
-            source = self._sessions.get(self._canonical_session_key(session_key))
         session_id = f"__presence__:{time.monotonic_ns()}"
         session = _Session(
             key=session_id,
-            personality_name=source.personality_name if source is not None else None,
+            personality_name=(
+                self.active_personality(session_key)
+                if session_key is not None
+                else None
+            ),
         )
         self._sessions[session_id] = session
         state: _TurnState | None = None

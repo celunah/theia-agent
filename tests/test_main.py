@@ -4374,6 +4374,17 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
                     server.active_personality("guild:42:channel:8:user:9"),
                     "Cel",
                 )
+                inherited_session = server._session("guild:42:channel:8:user:9")
+                instructions = server._system_instructions(
+                    inherited_session, allow_tools=False
+                )
+                self.assertIn("Be warm.", instructions)
+                self.assertIn(
+                    "warm", server.mood_state(inherited_session.key)["traits"]
+                )
+                self.assertIsNotNone(
+                    server._self_improvement_personality_path(inherited_session)
+                )
                 self.assertIsNone(
                     server.active_personality("guild:43:channel:8:user:9")
                 )
@@ -4400,6 +4411,51 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
             await server.configure_personality(
                 "session", name="none", attachment=attachment
             )
+
+    async def test_inherited_personality_reaches_ephemeral_workers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(
+                os.environ,
+                {
+                    "THEIA_HOME": str(root / "theia"),
+                    "THEIA_STATE": str(root / "state.json"),
+                },
+            ):
+                server = main.CodexAppServer()
+                await server.configure_personality(
+                    "guild:42:channel:7:user:9",
+                    name="Cel",
+                    attachment=SimpleNamespace(
+                        filename="cel.md",
+                        size=8,
+                        read=AsyncMock(return_value=b"Be warm."),
+                    ),
+                )
+                target = "guild:42:channel:8:user:9"
+                server._ensure_running = AsyncMock()
+                server._request = AsyncMock(
+                    side_effect=[
+                        {"thread": {"id": "presence-thread"}},
+                        {"turn": {"id": "presence-turn"}},
+                        {"thread": {"id": "recap-thread"}},
+                        {"turn": {"id": "recap-turn"}},
+                    ]
+                )
+                server._wait_for_turn = AsyncMock(
+                    side_effect=[
+                        '{"activity_type":"none","text":"idle"}',
+                        '{"recap":"The user reviewed the project."}',
+                    ]
+                )
+
+                await server.generate_presence("generic", session_key=target)
+                await server.generate_nightly_recap("journal", session_key=target)
+
+                requests = server._request.await_args_list
+
+        self.assertIn("Be warm.", requests[0].args[1]["baseInstructions"])
+        self.assertIn("Be warm.", requests[2].args[1]["baseInstructions"])
 
     async def test_resting_mood_is_derived_from_the_active_personality(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
