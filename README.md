@@ -21,12 +21,13 @@ threads, and voice.
 ## Commands
 
 ```text
-/login  /about  /usage  /credits  /model  /mode
+/login  /about  /usage  /debug  /credits  /model  /mode
 /approve  /deny  /stop  /undo  /btw
 /skill  /personality  /customize  /restart
 ```
 
-`/restart` and `/customize` are for administrators. The full capability
+`/debug`, `/restart`, and `/customize` are for administrators. `/debug` shows a
+sanitized live view of Theia's runtime while it is open. The full capability
 inventory is in [`THEIA_FEATURES.md`](THEIA_FEATURES.md).
 
 ## Setup

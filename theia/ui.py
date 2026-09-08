@@ -76,6 +76,55 @@ class _DecisionView(discord.ui.View):
         self.stop()
 
 
+class _DebugView(discord.ui.View):
+    """Owner-only control for a live administrator diagnostics message."""
+
+    def __init__(
+        self,
+        user_id: int | None,
+        *,
+        channel: Any | None = None,
+        customizer: Any | None = None,
+        timeout: float = 900,
+    ) -> None:
+        super().__init__(timeout=timeout)
+        self.user_id = user_id
+        self.guild_id = getattr(getattr(channel, "guild", None), "id", None)
+        self.customizer = customizer
+        stop = discord.ui.Button(
+            label=_render_frontend_label(
+                customizer,
+                self.guild_id,
+                "label:debug_stop_updates",
+                "Stop live updates",
+            ),
+            style=discord.ButtonStyle.secondary,
+        )
+
+        async def stop_callback(interaction: discord.Interaction) -> None:
+            if not await self.interaction_check(interaction):
+                return
+            for child in self.children:
+                if isinstance(child, discord.ui.Button):
+                    child.disabled = True
+            self.stop()
+            await interaction.response.edit_message(view=self)
+
+        stop.callback = stop_callback
+        self.add_item(stop)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Allow only the administrator who opened the diagnostic view to stop it."""
+        return await _check_interaction_owner(interaction, self.user_id)
+
+    async def on_timeout(self) -> None:
+        """Stop refreshing after the bounded live-view lifetime."""
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        self.stop()
+
+
 class _JsonModal(discord.ui.Modal):
     def __init__(
         self,

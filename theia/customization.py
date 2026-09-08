@@ -37,6 +37,7 @@ COMMAND_TARGETS = (
     "mode",
     "customize",
     "about",
+    "debug",
 )
 
 LABEL_TARGETS = (
@@ -87,6 +88,13 @@ LABEL_TARGETS = (
     "personality_mood",
     "personality_presence",
     "personality_footer",
+    "debug_runtime",
+    "debug_configuration",
+    "debug_session",
+    "debug_counts",
+    "debug_usage",
+    "debug_live_footer",
+    "debug_stop_updates",
 )
 
 ELEMENTS = ("title", "content", "color", "label")

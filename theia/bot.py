@@ -48,6 +48,7 @@ from .presence import PresenceManager, RichPresenceManager
 from .recaps import NightlyRecapManager
 from .voice import VoiceModeError, VoiceModeManager, VoiceSession
 from .audio import AudioProtocolError
+from .ui import _DebugView
 
 logger = _codex_logger()
 
@@ -58,6 +59,8 @@ MAX_CONTEXT_CHARACTERS = 16000
 CONTEXT_MESSAGE_LIMIT_ENV = "THEIA_CONTEXT_MESSAGES"
 CONTEXT_CHARACTER_LIMIT_ENV = "THEIA_CONTEXT_MAX_CHARACTERS"
 BARE_MENTION_PROMPT = "Please respond to the recent conversation context."
+DEBUG_REFRESH_INTERVAL = 2.0
+DEBUG_VIEW_TIMEOUT = 15 * 60
 
 
 def _frontend_embed(
@@ -881,6 +884,166 @@ def _usage_embed(
     return embed
 
 
+def _debug_embed(
+    state: dict[str, Any],
+    *,
+    channel: Any | None = None,
+    user: discord.abc.User | None = None,
+) -> discord.Embed:
+    """Render bounded live diagnostics without exposing prompts or protocol data."""
+    runtime = state.get("runtime") if isinstance(state, dict) else {}
+    configuration = state.get("configuration") if isinstance(state, dict) else {}
+    session = state.get("session") if isinstance(state, dict) else {}
+    counts = state.get("counts") if isinstance(state, dict) else {}
+    usage = state.get("usage") if isinstance(state, dict) else {}
+    if not isinstance(runtime, dict):
+        runtime = {}
+    if not isinstance(configuration, dict):
+        configuration = {}
+    if not isinstance(session, dict):
+        session = {}
+    if not isinstance(counts, dict):
+        counts = {}
+    if not isinstance(usage, dict):
+        usage = {}
+    workers = counts.get("internal_workers")
+    if isinstance(workers, dict):
+        worker_text = ", ".join(
+            f"{name}: {value}"
+            for name, value in sorted(workers.items())
+            if isinstance(name, str) and isinstance(value, int)
+        )
+    else:
+        worker_text = ""
+    mood = session.get("mood")
+    if isinstance(mood, dict):
+        raw_strength = mood.get("strength", 0.5)
+        if (
+            isinstance(raw_strength, (int, float))
+            and not isinstance(raw_strength, bool)
+            and math.isfinite(float(raw_strength))
+        ):
+            mood_strength = max(0.0, min(1.0, float(raw_strength)))
+        else:
+            mood_strength = 0.5
+        mood_text = (
+            f"{_truncate(mood.get('traits') or 'unknown', 120)} "
+            f"({mood.get('label') or 'neutral'}, "
+            f"{mood_strength * 100:.0f}%)"
+        )
+    else:
+        mood_text = "Unavailable"
+    process = str(runtime.get("process") or "unknown")
+    exit_code = runtime.get("exit_code")
+    if process != "running" and isinstance(exit_code, int):
+        process = f"{process} (exit {exit_code})"
+    state_text = (
+        "recovery blocked"
+        if runtime.get("state_recovery_blocked")
+        else "dirty"
+        if runtime.get("state_dirty")
+        else "clean"
+    )
+    embed = _frontend_embed(
+        "command:debug",
+        "Theia debug state",
+        "Live, sanitized runtime diagnostics. This view refreshes while it is open.",
+        channel=channel,
+        user=user,
+        context={
+            "model": str(configuration.get("model") or "Unavailable"),
+            "mode": str(session.get("mode") or "Unavailable"),
+            "personality": str(session.get("personality") or "None"),
+            "active_turns": _format_count(counts.get("active_turns")),
+            "pending_approvals": _format_count(counts.get("pending_approvals")),
+        },
+    )
+    fields = (
+        (
+            "label:debug_runtime",
+            "Runtime",
+            "\n".join(
+                (
+                    f"Process: {process}",
+                    "Authentication: "
+                    + ("authenticated" if runtime.get("authenticated") else "required"),
+                    f"State: {state_text}",
+                    f"Protocol requests pending: {_format_count(counts.get('pending_protocol_requests'))}",
+                )
+            ),
+        ),
+        (
+            "label:debug_configuration",
+            "Configuration",
+            "\n".join(
+                (
+                    f"Model: {configuration.get('model') or 'Unavailable'}",
+                    f"Approval: {configuration.get('approval_level') or 'Unavailable'}",
+                    "Adaptive reasoning: "
+                    + ("on" if configuration.get("adaptive_reasoning") else "off"),
+                    "Self-improvement: "
+                    + ("on" if configuration.get("self_improvement") else "off"),
+                )
+            ),
+        ),
+        (
+            "label:debug_session",
+            "Current session",
+            "\n".join(
+                (
+                    f"Mode: {session.get('mode') or 'Unavailable'}",
+                    f"Personality: {session.get('personality') or 'None'}",
+                    f"Mood: {mood_text}",
+                    f"Thread: {_truncate(session.get('thread_id') or 'none', 80)}",
+                    f"Turn: {_truncate(session.get('turn_id') or 'idle', 80)}",
+                )
+            ),
+        ),
+        (
+            "label:debug_counts",
+            "Activity",
+            "\n".join(
+                (
+                    f"Sessions: {_format_count(counts.get('sessions'))}",
+                    f"Loaded threads: {_format_count(counts.get('loaded_threads'))}",
+                    f"Active turns: {_format_count(counts.get('active_turns'))}",
+                    f"Pending approvals: {_format_count(counts.get('pending_approvals'))}",
+                    f"Background tasks: {_format_count(counts.get('background_tasks'))}",
+                    f"Internal workers: {worker_text or 'none'}",
+                )
+            ),
+        ),
+        (
+            "label:debug_usage",
+            "Theia usage",
+            "\n".join(
+                (
+                    f"Cumulative tokens: {_format_count(usage.get('cumulative_tokens'))}",
+                    (
+                        "Longest turn: "
+                        f"{_format_whole_seconds(usage.get('longest_turn_seconds'))} seconds"
+                    ),
+                )
+            ),
+        ),
+    )
+    for target, name, value in fields:
+        embed.add_field(
+            name=_frontend_label(target, name, channel=channel, user=user),
+            value=_truncate(value, 1024),
+            inline=False,
+        )
+    embed.set_footer(
+        text=_frontend_label(
+            "label:debug_live_footer",
+            "Live updates every 2 seconds. Stop them with the button.",
+            channel=channel,
+            user=user,
+        )
+    )
+    return embed
+
+
 def _credits_embed(
     result: dict[str, Any],
     *,
@@ -1206,6 +1369,7 @@ class TheiaBot(commands.Bot):
         self._participating_threads: set[int] = set()
         self._known_channels: dict[int, Any] = {}
         self._request_tasks: set[asyncio.Task[Any]] = set()
+        self._debug_tasks: set[asyncio.Task[Any]] = set()
         self._restart_task: asyncio.Task[None] | None = None
         self._retention_task: asyncio.Task[None] | None = None
         self._nightly_recap_task: asyncio.Task[None] | None = None
@@ -1250,6 +1414,76 @@ class TheiaBot(commands.Bot):
             await asyncio.gather(*tasks, return_exceptions=True)
         self._request_tasks.clear()
 
+    def schedule_debug_refresh(
+        self,
+        message: Any,
+        view: _DebugView,
+        *,
+        session_key_value: str,
+        channel: Any | None,
+        user: discord.abc.User | None,
+    ) -> None:
+        """Refresh one diagnostic message independently of agent request tasks."""
+        task = asyncio.create_task(
+            self._refresh_debug_message(
+                message,
+                view,
+                session_key_value=session_key_value,
+                channel=channel,
+                user=user,
+            )
+        )
+        self._debug_tasks.add(task)
+        task.add_done_callback(self._debug_task_done)
+
+    def _debug_task_done(self, task: asyncio.Task[Any]) -> None:
+        self._debug_tasks.discard(task)
+        if task.cancelled():
+            return
+        with contextlib.suppress(asyncio.InvalidStateError):
+            error = task.exception()
+            if error is not None:
+                logger.debug("Live debug view stopped (error=%s)", type(error).__name__)
+
+    async def _refresh_debug_message(
+        self,
+        message: Any,
+        view: _DebugView,
+        *,
+        session_key_value: str,
+        channel: Any | None,
+        user: discord.abc.User | None,
+    ) -> None:
+        while not view.is_finished():
+            await asyncio.sleep(DEBUG_REFRESH_INTERVAL)
+            if view.is_finished():
+                return
+            try:
+                await message.edit(
+                    embed=_debug_embed(
+                        self.codex.debug_state(session_key_value),
+                        channel=channel,
+                        user=user,
+                    ),
+                    view=view,
+                )
+            except (discord.DiscordException, AttributeError) as exc:
+                logger.debug(
+                    "Live debug view could not be refreshed (error=%s)",
+                    type(exc).__name__,
+                )
+                view.stop()
+                return
+
+    async def _cancel_debug_tasks(self) -> None:
+        """Stop live diagnostic refreshes before shared resources close."""
+        tasks = tuple(self._debug_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._debug_tasks.clear()
+
     async def _change_presence_when_ready(self, **kwargs: Any) -> None:
         """Defer presence changes until Discord has established the gateway."""
         if not self.is_ready():
@@ -1284,6 +1518,7 @@ class TheiaBot(commands.Bot):
 
     async def close(self) -> None:
         """Stop background services and close Discord and Codex resources in order."""
+        await self._cancel_debug_tasks()
         await self._cancel_request_tasks()
         if self._retention_task is not None:
             self._retention_task.cancel()
@@ -1614,6 +1849,48 @@ async def codex_about(interaction: discord.Interaction) -> None:
         ),
         ephemeral=True,
     )
+
+
+@_user_installable_command
+@bot.tree.command(name="debug", description="Show live runtime diagnostics")
+async def codex_debug(interaction: discord.Interaction) -> None:
+    """Show sanitized live runtime diagnostics to the invoking administrator."""
+    if not await _require_server_admin(
+        interaction,
+        message="Only Theia administrators can view debug state.",
+    ):
+        return
+    key = session_key(interaction.channel, interaction.user.id)
+    view = _DebugView(
+        interaction.user.id,
+        channel=interaction.channel,
+        customizer=bot.customizations,
+        timeout=DEBUG_VIEW_TIMEOUT,
+    )
+    await interaction.response.send_message(
+        embed=_debug_embed(
+            bot.codex.debug_state(key),
+            channel=interaction.channel,
+            user=interaction.user,
+        ),
+        view=view,
+        ephemeral=True,
+    )
+    try:
+        message = await interaction.original_response()
+    except (discord.DiscordException, AttributeError) as exc:
+        logger.debug(
+            "Could not attach live debug refresh (error=%s)", type(exc).__name__
+        )
+        return
+    if message is not None:
+        bot.schedule_debug_refresh(
+            message,
+            view,
+            session_key_value=key,
+            channel=interaction.channel,
+            user=interaction.user,
+        )
 
 
 @_user_installable_command

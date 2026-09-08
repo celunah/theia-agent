@@ -11,6 +11,7 @@ The current commands are:
 - `/login`
 - `/about`
 - `/usage`
+- `/debug`
 - `/credits`
 - `/approve`
 - `/deny`
@@ -47,6 +48,11 @@ revision used to produce them.
 threads, including the total cumulative tokens across those threads. It does not
 display the authenticated account's lifetime Codex activity, and its longest-turn
 duration is rounded to whole seconds.
+
+`/debug` is an administrator-only ephemeral view of sanitized Theia runtime
+state. It refreshes independently while the view is open, including during other
+agent tasks, and does not expose prompts, tool output, credentials, or private
+paths.
 
 Each isolated conversation also has a temporary simulated mood. It derives a
 resting affect from the active personality, responds only to meaningful user
@@ -112,6 +118,11 @@ presences are global rather than guild-scoped, so generated lines are required
 to remain generic and never expose user, guild, channel, message, or file
 context. Idle generation refreshes more often after recent activity and less
 often after the context goes stale.
+
+For memory-relevant administrator requests, Theia may run a bounded, ephemeral
+read-only retrieval pass. It returns at most three paraphrased memory facts to
+the current turn; the worker has no tools and cannot write memory, skills,
+recaps, personality data, or self-improvement changes.
 
 Server administrators can use `/customize` to change Discord-only embed
 titles, embed content, embed colors, status labels, and interaction button

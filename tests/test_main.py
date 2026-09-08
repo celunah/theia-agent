@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import discord
 from typing_extensions import Self
@@ -291,6 +291,7 @@ class CommandSurfaceTests(unittest.TestCase):
                 "mode",
                 "restart",
                 "customize",
+                "debug",
             },
         )
         self.assertEqual(main.bot.command_prefix, ())
@@ -1093,6 +1094,15 @@ class CommandSurfaceTests(unittest.TestCase):
                     "personality_presence",
                     "personality_footer",
                 ),
+                (
+                    "debug_runtime",
+                    "debug_configuration",
+                    "debug_session",
+                    "debug_counts",
+                    "debug_usage",
+                    "debug_live_footer",
+                    "debug_stop_updates",
+                ),
             )
             for name in group
         }
@@ -1656,6 +1666,71 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 "Usage for Example",
             )
+
+    async def test_debug_command_is_admin_only_and_starts_live_refresh(self) -> None:
+        guild = SimpleNamespace(id=42)
+        channel = SimpleNamespace(id=7, guild=guild)
+        response = SimpleNamespace(send_message=AsyncMock())
+        message = SimpleNamespace(edit=AsyncMock())
+        interaction = SimpleNamespace(
+            guild=guild,
+            channel=channel,
+            response=response,
+            original_response=AsyncMock(return_value=message),
+            user=SimpleNamespace(
+                id=1,
+                name="admin",
+                guild_permissions=SimpleNamespace(administrator=True),
+            ),
+        )
+        state = {
+            "runtime": {"process": "running", "authenticated": True},
+            "configuration": {"model": "gpt-5.6-luna", "approval_level": "high"},
+            "session": {"mode": "text", "personality": "Cel", "mood": {}},
+            "counts": {},
+            "usage": {},
+        }
+        with (
+            patch.object(main.bot.codex, "debug_state", return_value=state),
+            patch.object(main.bot, "schedule_debug_refresh") as schedule,
+        ):
+            await cast(Any, main.codex_debug.callback)(interaction)
+
+        kwargs = response.send_message.await_args.kwargs
+        self.assertTrue(kwargs["ephemeral"])
+        self.assertIsInstance(kwargs["view"], main._DebugView)
+        schedule.assert_called_once_with(
+            message,
+            kwargs["view"],
+            session_key_value=main.session_key(channel, 1),
+            channel=channel,
+            user=interaction.user,
+        )
+
+    async def test_debug_command_rejects_non_administrators(self) -> None:
+        guild = SimpleNamespace(id=42)
+        channel = SimpleNamespace(id=7, guild=guild)
+        response = SimpleNamespace(
+            is_done=lambda: False,
+            send_message=AsyncMock(),
+        )
+        interaction = SimpleNamespace(
+            guild=guild,
+            channel=channel,
+            response=response,
+            user=SimpleNamespace(
+                id=2,
+                guild_permissions=SimpleNamespace(administrator=False),
+            ),
+        )
+        with patch.object(main.bot, "schedule_debug_refresh") as schedule:
+            await cast(Any, main.codex_debug.callback)(interaction)
+
+        self.assertEqual(
+            response.send_message.await_args.kwargs["embed"].title,
+            "Administrator access required",
+        )
+        schedule.assert_not_called()
 
     async def test_model_selection_confirmation_is_public(self) -> None:
         interaction = SimpleNamespace(
@@ -2364,6 +2439,70 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(thread_params["approvalPolicy"], "never")
         self.assertEqual(turn_params["effort"], "low")
         self.assertIn("outputSchema", turn_params)
+
+    async def test_memory_retrieval_is_ephemeral_bounded_and_read_only(self) -> None:
+        server = main.CodexAppServer()
+        source = server._session("guild:42:channel:7:user:9")
+        source.personality_name = "cel"
+        server._memory_instructions = cast(
+            Any, Mock(return_value="private memory about the release")
+        )
+        server._personality_instructions = cast(
+            Any, Mock(return_value="warm and precise")
+        )
+        requests: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+
+        async def request(method: str, params: dict[str, Any], **kwargs: Any) -> dict:
+            requests.append((method, params, kwargs))
+            if method == "thread/start":
+                return {"thread": {"id": "memory-thread"}}
+            return {"turn": {"id": "memory-turn"}}
+
+        server._request = AsyncMock(side_effect=request)
+        server._ensure_running = AsyncMock()
+        server._wait_for_turn = AsyncMock(
+            return_value='{"matches":[{"summary":"The release was planned.","confidence":0.8}]}'
+        )
+
+        result = await server.generate_memory_retrieval(
+            "What did we discuss earlier?",
+            session_key=source.key,
+            allow_tools=True,
+        )
+
+        self.assertEqual(
+            result,
+            {"matches": [{"summary": "The release was planned.", "confidence": 0.8}]},
+        )
+        self.assertEqual(
+            [method for method, _, _ in requests], ["thread/start", "turn/start"]
+        )
+        thread_params = requests[0][1]
+        self.assertTrue(thread_params["ephemeral"])
+        self.assertEqual(thread_params["approvalPolicy"], "never")
+        self.assertEqual(thread_params["sandbox"], "read-only")
+        self.assertEqual(thread_params["runtimeWorkspaceRoots"], [])
+        self.assertEqual(thread_params["baseInstructions"], main.BASE_PRIORS)
+        self.assertNotIn("dynamicTools", thread_params)
+        turn_params = requests[1][1]
+        self.assertEqual(turn_params["effort"], "low")
+        self.assertIn("outputSchema", turn_params)
+        worker_input = turn_params["input"][0]["text"]
+        self.assertIn("private memory about the release", worker_input)
+        self.assertIn("warm and precise", worker_input)
+        self.assertNotIn("memory-thread", server._sessions)
+
+    async def test_memory_retrieval_does_not_cross_the_safe_tool_boundary(self) -> None:
+        server = main.CodexAppServer()
+        server._memory_instructions = cast(Any, Mock())
+
+        result = await server.generate_memory_retrieval(
+            "What did we discuss earlier?",
+            session_key="session",
+        )
+
+        self.assertIsNone(result)
+        cast(Any, server._memory_instructions).assert_not_called()
 
     async def test_thread_history_methods_use_codex_pagination(self) -> None:
         server = main.CodexAppServer()
