@@ -842,6 +842,73 @@ class CommandSurfaceTests(unittest.TestCase):
             [(choice.name, choice.value) for choice in choices], [("calm", "calm")]
         )
 
+    def test_personality_summary_extracts_bounded_character_card_data(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile_root = root / "personalities"
+            profile_root.mkdir()
+            (profile_root / "cel.md").write_text(
+                "# Celune\n\n"
+                "You are Celune, a calm and curious lunar guardian.\n\n"
+                "## Known Entries\n"
+                "- Moon Gate\n"
+                "- Silver Archive\n\n"
+                "## Known Users\n"
+                "- Luna\n",
+                encoding="utf-8",
+            )
+
+            summary = main.PersonalityStore(root).summary("cel")
+
+        self.assertEqual(summary.name, "cel")
+        self.assertEqual(summary.identifier, "cel")
+        self.assertEqual(summary.character_name, "Celune")
+        self.assertIn("calm and curious lunar guardian", summary.description)
+        self.assertEqual(summary.known_entries, ("Moon Gate", "Silver Archive"))
+        self.assertEqual(summary.known_users, ("Luna",))
+
+    def test_personality_summary_embed_has_default_and_customized_fields(self) -> None:
+        summary = {
+            "name": "cel",
+            "identifier": "cel",
+            "character_name": "Celune",
+            "description": "A calm lunar guardian.",
+            "known_entries": ("Moon Gate",),
+            "known_users": ("Luna",),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            store = main.FrontendCustomizationStore(Path(directory) / "frontend.json")
+            for target, value in (
+                ("personality_known_entries", "Lore"),
+                ("personality_known_users", "People"),
+                ("personality_mood", "Affect"),
+                ("personality_presence", "Activity"),
+                ("personality_footer", "Use {command} to change {character_name}"),
+            ):
+                store.set(42, target, "label", value)
+            channel = SimpleNamespace(id=7, guild=SimpleNamespace(id=42))
+            with patch.object(main.bot, "customizations", store):
+                embed = main._personality_summary_embed(
+                    summary,
+                    {"label": "neutral", "strength": 0.5},
+                    "watching the moon",
+                    channel=channel,
+                    user=cast(Any, SimpleNamespace(name="Luna", id=9)),
+                )
+
+        self.assertEqual(embed.title, "Celune (cel)")
+        self.assertEqual(embed.description, "A calm lunar guardian.")
+        self.assertEqual(
+            [(field.name, field.value) for field in embed.fields],
+            [
+                ("Lore", "• Moon Gate"),
+                ("People", "• Luna"),
+                ("Affect", "Neutral (50%)"),
+                ("Activity", "watching the moon"),
+            ],
+        )
+        self.assertEqual(embed.footer.text, "Use /personality to change Celune")
+
     def test_model_autocomplete_uses_codex_models(self) -> None:
         with patch.object(
             main.bot.codex,
@@ -995,6 +1062,13 @@ class CommandSurfaceTests(unittest.TestCase):
                     "about_plan",
                     "about_mode",
                     "about_personality",
+                ),
+                (
+                    "personality_known_entries",
+                    "personality_known_users",
+                    "personality_mood",
+                    "personality_presence",
+                    "personality_footer",
                 ),
             )
             for name in group
@@ -1333,6 +1407,61 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
                 ("Mode", "Text"),
                 ("Personality", "Cel"),
             ],
+        )
+
+    async def test_personality_root_shows_the_active_character_card_privately(
+        self,
+    ) -> None:
+        guild = SimpleNamespace(id=42)
+        channel = SimpleNamespace(id=7, guild=guild)
+        interaction = SimpleNamespace(
+            channel=channel,
+            user=SimpleNamespace(id=9, name="username"),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        summary = {
+            "name": "cel",
+            "identifier": "cel",
+            "character_name": "Celune",
+            "description": "A calm lunar guardian.",
+            "known_entries": ("Moon Gate",),
+            "known_users": ("Luna",),
+        }
+        with (
+            patch.object(main.bot.presence, "touch", new=AsyncMock()),
+            patch.object(main.bot.codex, "personality_summary", return_value=summary),
+            patch.object(
+                main.bot.codex,
+                "mood_state",
+                return_value={"label": "neutral", "strength": 0.5},
+            ),
+            patch.object(
+                main.bot.rich_presence,
+                "_current_activity",
+                discord.CustomActivity("watching the moon"),
+            ),
+        ):
+            await cast(Any, main.codex_personality.callback)(interaction)
+
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        kwargs = interaction.followup.send.await_args.kwargs
+        self.assertTrue(kwargs["ephemeral"])
+        embed = kwargs["embed"]
+        self.assertEqual(embed.title, "Celune (cel)")
+        self.assertEqual(embed.description, "A calm lunar guardian.")
+        self.assertEqual(
+            [(field.name, field.value) for field in embed.fields],
+            [
+                ("Known Entries", "• Moon Gate"),
+                ("Known Users", "• Luna"),
+                ("Mood", "Neutral (50%)"),
+                ("Presence", "watching the moon"),
+            ],
+        )
+        self.assertEqual(
+            embed.footer.text,
+            "Add or change the character with `/personality <file> <slug>`.",
         )
 
     async def test_login_messages_cover_each_authentication_path(self) -> None:
@@ -5016,6 +5145,12 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         assert spec is not None
         self.assertEqual(len(spec.text), 128)
         self.assertFalse(spec.text.endswith("..."))
+
+    def test_current_presence_line_is_read_only(self) -> None:
+        manager = main.RichPresenceManager(AsyncMock(), AsyncMock())
+        self.assertIsNone(manager.current_line)
+        manager._current_activity = discord.CustomActivity("watching the moon")
+        self.assertEqual(manager.current_line, "watching the moon")
 
 
 class _AudioHTTPResponse:

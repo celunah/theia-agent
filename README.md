@@ -7,7 +7,8 @@ preferences that matter to you.
 ## Features
 
 - Natural text conversations with optional voice replies.
-- Persistent conversations, attachments, memories, skills, and personalities.
+- Persistent conversations, attachments, memories, skills, and personality
+  character cards.
 - Model selection, web search, approvals, and safe controls for agent actions.
 - Theia-only usage tracking, background work, daily recaps, and optional self-improvement.
 - A temporary, personality-aware mood, Rich Presence, and server-specific customization.

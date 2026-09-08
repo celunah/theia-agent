@@ -322,6 +322,16 @@ class RichPresenceManager:
         """Return the latest activity object requested from Discord."""
         return self._current_activity
 
+    @property
+    def current_line(self) -> str | None:
+        """Return the current activity text without changing presence state."""
+        if self._current_activity is None:
+            return None
+        value = getattr(self._current_activity, "name", None)
+        if not isinstance(value, str) or not value.strip():
+            return None
+        return value.strip()
+
     async def start(self) -> None:
         """Start periodic idle activity generation."""
         if not self.enabled:

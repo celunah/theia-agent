@@ -1511,6 +1511,24 @@ class CodexAppServer:
         """Return the available personality profile names."""
         return self._personalities.names()
 
+    def personality_summary(self, session_key: str) -> dict[str, Any] | None:
+        """Return the active profile's bounded character-card information."""
+        name = self.active_personality(session_key)
+        if name is None:
+            return None
+        try:
+            summary = self._personalities.summary(name)
+        except PersonalityError as exc:
+            raise CodexAppServerError(str(exc)) from exc
+        return {
+            "name": summary.name,
+            "identifier": summary.identifier,
+            "character_name": summary.character_name,
+            "description": summary.description,
+            "known_entries": summary.known_entries,
+            "known_users": summary.known_users,
+        }
+
     @property
     def voice_mode_available(self) -> bool:
         """Whether both configured audio services can support voice mode."""

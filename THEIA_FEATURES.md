@@ -321,7 +321,10 @@ The default is indexed search. Live mode can be explicitly selected when current
 - `/personality file name` uploads and activates a Markdown/text personality.
 - `/personality name` switches to an existing profile.
 - `/personality name:none` clears it.
-- `/personality` explains usage.
+- `/personality` shows a private character card for the active profile,
+  including its identifier, description, known profile entries and users,
+  current mood, and Rich Presence line.
+- The character card footer explains how to add or change a character.
 - Personality-name autocomplete is supported.
 - `/about` retains an unambiguous selected profile for the same user and server
   when the current session has no local personality metadata; an explicit

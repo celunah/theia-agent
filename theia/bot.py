@@ -1789,6 +1789,128 @@ async def personality_autocomplete(
     return choices[:25]
 
 
+def _personality_summary_embed(
+    summary: dict[str, Any] | None,
+    mood: dict[str, Any],
+    presence_line: str | None,
+    *,
+    channel: Any | None = None,
+    user: discord.abc.User | None = None,
+) -> discord.Embed:
+    """Build the private character card for the active personality."""
+    if summary is None:
+        title = "No personality selected"
+        description = "No character is active for this Discord session."
+        personality = "none"
+        character_name = ""
+        character_slug = ""
+        known_entries: tuple[str, ...] = ()
+        known_users: tuple[str, ...] = ()
+    else:
+        character_name = str(summary.get("character_name") or "Character")
+        character_slug = str(summary.get("identifier") or "character")
+        title = f"{character_name} ({character_slug})"
+        description = str(
+            summary.get("description") or "No character description is available."
+        )
+        personality = str(summary.get("name") or character_slug)
+        raw_entries = summary.get("known_entries", ())
+        raw_users = summary.get("known_users", ())
+        known_entries = (
+            tuple(str(item) for item in raw_entries if str(item))
+            if isinstance(raw_entries, (list, tuple))
+            else ()
+        )
+        known_users = (
+            tuple(str(item) for item in raw_users if str(item))
+            if isinstance(raw_users, (list, tuple))
+            else ()
+        )
+
+    raw_strength = mood.get("strength")
+    strength = (
+        float(raw_strength)
+        if isinstance(raw_strength, (int, float)) and not isinstance(raw_strength, bool)
+        else 0.5
+    )
+    strength = max(0.0, min(1.0, strength))
+    mood_label = str(mood.get("label") or "neutral").strip().title() or "Neutral"
+    mood_text = f"{mood_label} ({strength * 100:.0f}%)"
+    current_presence = presence_line.strip() if presence_line else "Unavailable"
+    current_presence = current_presence or "Unavailable"
+    context = {
+        "command": "/personality",
+        "personality": personality,
+        "character_name": character_name,
+        "character_slug": character_slug,
+        "mood": mood_text,
+        "presence": current_presence,
+        "known_entries": "\n".join(known_entries),
+        "known_users": "\n".join(known_users),
+    }
+    embed = _frontend_embed(
+        "command:personality",
+        title,
+        description,
+        channel=channel,
+        user=user,
+        context=context,
+    )
+    embed.add_field(
+        name=_frontend_label(
+            "label:personality_known_entries",
+            "Known Entries",
+            channel=channel,
+            user=user,
+            context=context,
+        ),
+        value="\n".join(f"• {item}" for item in known_entries) or "None recorded.",
+        inline=False,
+    )
+    embed.add_field(
+        name=_frontend_label(
+            "label:personality_known_users",
+            "Known Users",
+            channel=channel,
+            user=user,
+            context=context,
+        ),
+        value="\n".join(f"• {item}" for item in known_users) or "None recorded.",
+        inline=False,
+    )
+    embed.add_field(
+        name=_frontend_label(
+            "label:personality_mood",
+            "Mood",
+            channel=channel,
+            user=user,
+            context=context,
+        ),
+        value=mood_text,
+        inline=True,
+    )
+    embed.add_field(
+        name=_frontend_label(
+            "label:personality_presence",
+            "Presence",
+            channel=channel,
+            user=user,
+            context=context,
+        ),
+        value=current_presence,
+        inline=True,
+    )
+    footer = _frontend_label(
+        "label:personality_footer",
+        "Add or change the character with `/personality <file> <slug>`.",
+        channel=channel,
+        user=user,
+        context=context,
+    )
+    embed.set_footer(text=footer)
+    return embed
+
+
 @_user_installable_command
 @bot.tree.command(name="personality", description="Manage Codex personality profiles")
 @app_commands.describe(
@@ -1805,14 +1927,28 @@ async def codex_personality(
     await bot.presence.touch()
     await interaction.response.defer(ephemeral=True)
     if file is None and name is None:
+        key = session_key(interaction.channel, interaction.user.id)
+        try:
+            summary = bot.codex.personality_summary(key)
+            mood = bot.codex.mood_state(key)
+        except CodexAppServerError as exc:
+            await interaction.followup.send(
+                embed=_frontend_embed(
+                    "command:personality",
+                    "Personality unavailable",
+                    _safe_error_reason(exc),
+                    channel=interaction.channel,
+                    user=interaction.user,
+                    color=discord.Color.orange(),
+                ),
+                ephemeral=True,
+            )
+            return
         await interaction.followup.send(
-            embed=_frontend_embed(
-                "command:personality",
-                "Personality",
-                "Use `/personality file:<markdown-or-text> name:<name>` to upload "
-                "and activate a profile. Use `/personality name:<name>` to switch "
-                "profiles, or `/personality name:none` to clear the active profile. "
-                "A file must be paired with a name.",
+            embed=_personality_summary_embed(
+                summary,
+                mood,
+                bot.rich_presence.current_line,
                 channel=interaction.channel,
                 user=interaction.user,
             ),

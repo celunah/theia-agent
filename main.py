@@ -38,6 +38,7 @@ from theia.bot import (
     _maybe_create_response_thread,
     _message_context,
     _name_new_response_thread,
+    _personality_summary_embed,
     _restart_in_place,
     _should_respond_to_message,
     _thread_name,
@@ -124,7 +125,12 @@ from theia.delivery import (
     send_paginated,
     send_response,
 )
-from theia.personality import PersonalityError, PersonalityProfile, PersonalityStore
+from theia.personality import (
+    PersonalityError,
+    PersonalityProfile,
+    PersonalityStore,
+    PersonalitySummary,
+)
 from theia.recaps import (
     DEFAULT_NIGHTLY_RECAP,
     DEFAULT_NIGHTLY_RECAP_CONTEXT_MAX_CHARACTERS,
@@ -239,6 +245,7 @@ __all__ = [
     "PersonalityError",
     "PersonalityProfile",
     "PersonalityStore",
+    "PersonalitySummary",
     "PresenceManager",
     "RichPresenceManager",
     "SendMessage",
@@ -283,6 +290,7 @@ __all__ = [
     "_message_context",
     "_name_new_response_thread",
     "_path_from_value",
+    "_personality_summary_embed",
     "_reaction_paginators",
     "_restart_in_place",
     "_safe_approval_reason",

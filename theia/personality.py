@@ -1,16 +1,25 @@
 """Validation and storage for Theia personality prompt profiles."""
 
 import contextlib
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, unquote
 from typing import Any, cast
+import unicodedata
 
 PERSONALITY_SUFFIXES = frozenset({".md", ".markdown", ".text", ".txt"})
 MAX_PERSONALITY_BYTES = 128 * 1024
 MAX_PERSONALITY_NAME_LENGTH = 80
+MAX_SUMMARY_DESCRIPTION_LENGTH = 600
+MAX_SUMMARY_ITEM_LENGTH = 160
+MAX_SUMMARY_ITEMS = 6
+_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
+_IDENTIFIER_RE = re.compile(r"[^a-z0-9]+")
+_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(.+?)\s*$")
+_SUMMARY_SECTIONS = {"known entries", "known users"}
 
 
 class PersonalityError(ValueError):
@@ -23,6 +32,103 @@ class PersonalityProfile:
 
     name: str
     path: Path
+
+
+@dataclass(frozen=True)
+class PersonalitySummary:
+    """A bounded, presentation-safe summary of one personality profile."""
+
+    name: str
+    identifier: str
+    character_name: str
+    description: str
+    known_entries: tuple[str, ...]
+    known_users: tuple[str, ...]
+
+
+def _clean_summary_text(value: str, limit: int) -> str:
+    """Remove formatting and mention syntax from profile-derived UI text."""
+    text = re.sub(r"<@!?\d+>", "@user", value)
+    text = re.sub(r"<@&\d+>", "@role", text)
+    text = re.sub(r"<#\d+>", "#channel", text)
+    text = re.sub(r"@(?:everyone|here)\b", "at everyone", text, flags=re.IGNORECASE)
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"[`*_~]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > limit:
+        return text[: limit - 1].rstrip() + "…"
+    return text
+
+
+def _heading(line: str) -> str | None:
+    match = _HEADING_RE.match(line)
+    if match is None:
+        return None
+    return _clean_summary_text(re.sub(r"\s+#+\s*$", "", match.group(1)), 200)
+
+
+def _profile_identifier(name: str) -> str:
+    normalized = (
+        unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+    )
+    identifier = _IDENTIFIER_RE.sub("-", normalized.casefold()).strip("-")
+    return identifier or "character"
+
+
+def _character_name(name: str, prompt: str) -> str:
+    match = re.search(
+        r"^\s*(?:you are|i am)\s+([^,.:!\n]+)", prompt, re.IGNORECASE | re.MULTILINE
+    )
+    if match:
+        return _clean_summary_text(match.group(1), 120)
+    for line in prompt.splitlines():
+        heading = _heading(line)
+        if heading:
+            return heading
+    return _clean_summary_text(name, 120)
+
+
+def _description(prompt: str) -> str:
+    """Use the opening prose as a concise local profile description."""
+    for block in re.split(r"\n\s*\n", prompt):
+        lines = block.splitlines()
+        if not lines:
+            continue
+        first_heading = next((_heading(line) for line in lines if line.strip()), None)
+        if first_heading and first_heading.casefold() in _SUMMARY_SECTIONS:
+            continue
+        prose = []
+        for line in lines:
+            if _heading(line):
+                continue
+            line = re.sub(r"^\s*>\s?", "", line)
+            line = _LIST_ITEM_RE.sub(r"\1", line)
+            if line.strip():
+                prose.append(line.strip())
+        value = _clean_summary_text(" ".join(prose), MAX_SUMMARY_DESCRIPTION_LENGTH)
+        if value:
+            return value
+    return "No character description is available."
+
+
+def _section_items(prompt: str, section_name: str) -> tuple[str, ...]:
+    items: list[str] = []
+    active = False
+    for line in prompt.splitlines():
+        heading = _heading(line)
+        if heading:
+            active = heading.casefold() == section_name.casefold()
+            continue
+        if not active or not line.strip():
+            continue
+        match = _LIST_ITEM_RE.match(line)
+        value = match.group(1) if match else line.strip()
+        value = _clean_summary_text(value, MAX_SUMMARY_ITEM_LENGTH)
+        if value and value not in items:
+            items.append(value)
+        if len(items) >= MAX_SUMMARY_ITEMS:
+            break
+    return tuple(items)
 
 
 class PersonalityStore:
@@ -121,6 +227,18 @@ class PersonalityStore:
         if "\x00" in text:
             raise PersonalityError("That personality profile is not valid text.")
         return profile.name, text
+
+    def summary(self, value: str | None) -> PersonalitySummary:
+        """Return safe character-card data extracted from a selected profile."""
+        name, prompt = self.read(value)
+        return PersonalitySummary(
+            name=name,
+            identifier=_profile_identifier(name),
+            character_name=_character_name(name, prompt),
+            description=_description(prompt),
+            known_entries=_section_items(prompt, "Known Entries"),
+            known_users=_section_items(prompt, "Known Users"),
+        )
 
     async def upload(self, attachment: object, value: str | None) -> str:
         """Download, validate, and store an uploaded personality prompt."""

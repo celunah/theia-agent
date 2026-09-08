@@ -82,6 +82,11 @@ LABEL_TARGETS = (
     "about_plan",
     "about_mode",
     "about_personality",
+    "personality_known_entries",
+    "personality_known_users",
+    "personality_mood",
+    "personality_presence",
+    "personality_footer",
 )
 
 ELEMENTS = ("title", "content", "color", "label")
@@ -101,6 +106,12 @@ PLACEHOLDERS = {
     "mode",
     "skill",
     "personality",
+    "character_name",
+    "character_slug",
+    "mood",
+    "presence",
+    "known_entries",
+    "known_users",
     "balance",
     "used_percent",
     "reset_at",
