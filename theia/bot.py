@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import math
 import os
 import re
 import subprocess
@@ -776,6 +777,16 @@ def _format_count(value: Any) -> str:
     return f"{value:,}"
 
 
+def _format_whole_seconds(value: Any) -> str:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+    ):
+        return "Unavailable"
+    return f"{value:,.0f}"
+
+
 def _format_percent(value: Any) -> str:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return f"{value:g}% used"
@@ -821,17 +832,24 @@ def _usage_embed(
         user=user,
         context={
             "lifetime_tokens": _format_count(summary.get("lifetimeTokens")),
+            "total_cumulative_tokens": _format_count(
+                summary.get("totalCumulativeTokens", summary.get("lifetimeTokens"))
+            ),
             "peak_daily_tokens": _format_count(summary.get("peakDailyTokens")),
             "current_streak": _format_count(summary.get("currentStreakDays")),
             "longest_streak": _format_count(summary.get("longestStreakDays")),
-            "longest_running_turn": _format_count(summary.get("longestRunningTurnSec")),
+            "longest_running_turn": _format_whole_seconds(
+                summary.get("longestRunningTurnSec")
+            ),
         },
     )
     fields = (
         (
             "label:usage_lifetime_tokens",
-            "Theia tokens",
-            _format_count(summary.get("lifetimeTokens")),
+            "Total cumulative tokens",
+            _format_count(
+                summary.get("totalCumulativeTokens", summary.get("lifetimeTokens"))
+            ),
         ),
         (
             "label:usage_peak_daily_tokens",
@@ -851,9 +869,7 @@ def _usage_embed(
         (
             "label:usage_longest_running_turn",
             "Longest running turn",
-            f"{_format_count(summary.get('longestRunningTurnSec'))} seconds"
-            if isinstance(summary.get("longestRunningTurnSec"), (int, float))
-            else "Unavailable",
+            f"{_format_whole_seconds(summary.get('longestRunningTurnSec'))} seconds",
         ),
     )
     for target, name, value in fields:

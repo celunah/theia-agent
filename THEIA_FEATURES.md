@@ -44,7 +44,9 @@ and current session mode and personality. One-file builds embed the short Git
 revision used to produce them.
 
 `/usage` privately displays token activity tracked from Theia's own conversation
-threads. It does not display the authenticated account's lifetime Codex activity.
+threads, including the total cumulative tokens across those threads. It does not
+display the authenticated account's lifetime Codex activity, and its longest-turn
+duration is rounded to whole seconds.
 
 Each isolated conversation also has a temporary simulated mood. It derives a
 resting affect from the active personality, responds only to meaningful user

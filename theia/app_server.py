@@ -1041,6 +1041,7 @@ class CodexAppServer:
             "scope": "theia",
             "summary": {
                 "lifetimeTokens": totals["totalTokens"],
+                "totalCumulativeTokens": totals["totalTokens"],
                 "peakDailyTokens": max(daily.values(), default=0),
                 "currentStreakDays": current_streak,
                 "longestStreakDays": longest_streak,

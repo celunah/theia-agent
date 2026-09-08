@@ -116,6 +116,7 @@ PLACEHOLDERS = {
     "used_percent",
     "reset_at",
     "lifetime_tokens",
+    "total_cumulative_tokens",
     "peak_daily_tokens",
     "current_streak",
     "longest_streak",

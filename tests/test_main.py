@@ -777,9 +777,15 @@ class CommandSurfaceTests(unittest.TestCase):
     def test_usage_reports_only_claimed_theia_thread_tokens(self) -> None:
         server = main.CodexAppServer()
         server._persist_state = lambda: None
+        server._usage_threads.clear()
+        server._usage_daily.clear()
+        server._usage_tracked_since = None
         session = server._session("discord-user")
         session.thread_id = "theia-thread"
         server._claim_usage_thread("theia-thread")
+        second_session = server._session("another-discord-user")
+        second_session.thread_id = "another-theia-thread"
+        server._claim_usage_thread("another-theia-thread")
 
         server._handle_notification(
             {
@@ -800,6 +806,15 @@ class CommandSurfaceTests(unittest.TestCase):
             {
                 "method": "thread/tokenUsage/updated",
                 "params": {
+                    "threadId": "another-theia-thread",
+                    "tokenUsage": {"total": {"totalTokens": 8}},
+                },
+            }
+        )
+        server._handle_notification(
+            {
+                "method": "thread/tokenUsage/updated",
+                "params": {
                     "threadId": "account-wide-thread",
                     "tokenUsage": {"total": {"totalTokens": 9_900_000_000}},
                 },
@@ -809,8 +824,9 @@ class CommandSurfaceTests(unittest.TestCase):
         usage = asyncio.run(server.usage())
 
         self.assertEqual(usage["scope"], "theia")
-        self.assertEqual(usage["summary"]["lifetimeTokens"], 42)
-        self.assertEqual(usage["summary"]["peakDailyTokens"], 42)
+        self.assertEqual(usage["summary"]["lifetimeTokens"], 50)
+        self.assertEqual(usage["summary"]["totalCumulativeTokens"], 50)
+        self.assertEqual(usage["summary"]["peakDailyTokens"], 50)
 
     def test_usage_embed_labels_theia_scope(self) -> None:
         embed = main._usage_embed(
@@ -818,6 +834,7 @@ class CommandSurfaceTests(unittest.TestCase):
                 "scope": "theia",
                 "summary": {
                     "lifetimeTokens": 42,
+                    "totalCumulativeTokens": 42,
                     "peakDailyTokens": 42,
                     "currentStreakDays": 1,
                     "longestStreakDays": 1,
@@ -829,7 +846,20 @@ class CommandSurfaceTests(unittest.TestCase):
         self.assertEqual(
             embed.description, "Usage tracked from Theia's conversation threads."
         )
-        self.assertEqual(embed.fields[0].name, "Theia tokens")
+        self.assertEqual(embed.fields[0].name, "Total cumulative tokens")
+        self.assertEqual(embed.fields[0].value, "42")
+
+    def test_usage_embed_rounds_longest_running_turn_to_whole_seconds(self) -> None:
+        embed = main._usage_embed(
+            {
+                "summary": {
+                    "lifetimeTokens": 42,
+                    "longestRunningTurnSec": 12.75,
+                }
+            }
+        )
+
+        self.assertEqual(embed.fields[-1].value, "13 seconds")
 
     def test_personality_autocomplete_uses_available_profiles(self) -> None:
         with patch.object(
