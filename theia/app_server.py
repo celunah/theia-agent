@@ -514,6 +514,7 @@ class CodexAppServer:
         self._provider_capabilities: dict[str, Any] | None = None
         self._provider_capabilities_key: tuple[str | None, str | None] | None = None
         self._frontend_customizer: Any | None = None
+        self._view_registrar: Callable[[Any, Any], Awaitable[None]] | None = None
         self._loaded_thread_ids: set[str] = set()
         self._model: str | None = DEFAULT_CODEX_MODEL
         self._login_id: str | None = None
@@ -721,6 +722,12 @@ class CodexAppServer:
         Codex request or persisted session state.
         """
         self._frontend_customizer = customizer
+
+    def set_view_registrar(
+        self, registrar: Callable[[Any, Any], Awaitable[None]] | None
+    ) -> None:
+        """Attach the Discord view persistence hook without sharing UI state."""
+        self._view_registrar = registrar
 
     def approval_level(self) -> str:
         """Return the configured Theia approval level."""
@@ -5708,13 +5715,19 @@ class CodexAppServer:
     ) -> Any:
         """Send through an interaction webhook when a turn has no bot channel."""
         if state is not None and state.interaction_sender is not None:
-            return await state.interaction_sender(**kwargs)
-        target = channel or (state.channel if state is not None else None)
-        if target is None:
-            raise discord.DiscordException(
-                "No Discord message destination is available."
-            )
-        return await target.send(**kwargs)
+            message = await state.interaction_sender(**kwargs)
+        else:
+            target = channel or (state.channel if state is not None else None)
+            if target is None:
+                raise discord.DiscordException(
+                    "No Discord message destination is available."
+                )
+            message = await target.send(**kwargs)
+        view = kwargs.get("view")
+        if view is not None and self._view_registrar is not None:
+            with contextlib.suppress(Exception):
+                await self._view_registrar(view, message)
+        return message
 
     async def _approval_request(
         self,

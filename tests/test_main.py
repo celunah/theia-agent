@@ -25,7 +25,7 @@ from scripts.configure import (
     validate_configuration,
 )
 from theia import core as core_module
-from theia.bot import _handle_voice_transcript, on_message
+from theia.bot import _PersistentViewStore, _handle_voice_transcript, on_message
 from theia.core import _path_is_under
 
 
@@ -1225,6 +1225,62 @@ class CommandSurfaceTests(unittest.TestCase):
             ["Back", "Forward"],
         )
 
+    def test_interaction_views_use_restart_safe_component_ids(self) -> None:
+        views = (
+            main._PaginatorView(["first", "second"], owner_id=7),
+            main._ImageResultView(
+                7,
+                (Path("/tmp/generated.png"),),
+                on_action=AsyncMock(),
+            ),
+            main._DecisionView(
+                7,
+                [("Approve", "accept", discord.ButtonStyle.success)],
+            ),
+            main._DebugView(7),
+            main._FormView(7, prompt="Provide JSON"),
+            main._UserInputView(
+                7,
+                [{"id": "answer", "question": "Answer", "options": [{"label": "Yes"}]}],
+            ),
+        )
+
+        for view in views:
+            self.assertTrue(view.children)
+            self.assertTrue(
+                all(
+                    str(getattr(item, "custom_id", "")).startswith("theia:")
+                    for item in view.children
+                )
+            )
+
+    def test_persistent_view_store_restores_a_paginator(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "views.json"
+            store = _PersistentViewStore(path)
+            view = main._PaginatorView(["first", "second"], owner_id=7)
+            store.register(view, SimpleNamespace(id=123))
+
+            restored_store = _PersistentViewStore(path)
+            restored: list[Any] = []
+
+            def add_view(candidate: Any, *, message_id: int) -> None:
+                restored.append((candidate, message_id))
+
+            fake_bot = SimpleNamespace(
+                add_view=add_view,
+            )
+            restored_store.restore(
+                cast(Any, fake_bot),
+                main.bot._restore_persistent_view,
+            )
+
+        self.assertEqual(len(restored), 1)
+        restored_view, message_id = restored[0]
+        self.assertEqual(message_id, 123)
+        self.assertTrue(restored_view.is_persistent())
+        self.assertEqual(restored_view.persistence_token, view.persistence_token)
+
     def test_input_modals_use_frontend_customization(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = main.FrontendCustomizationStore(Path(directory) / "frontend.json")
@@ -1410,6 +1466,23 @@ class ConfigurationScriptTests(unittest.TestCase):
 
 
 class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unhandled_interaction_gets_a_restart_safe_acknowledgement(
+        self,
+    ) -> None:
+        response = SimpleNamespace(
+            is_done=lambda: False,
+            send_message=AsyncMock(),
+        )
+        interaction = SimpleNamespace(response=response)
+        with patch("theia.bot.STALE_INTERACTION_FALLBACK_DELAY", 0):
+            await main.bot._acknowledge_unhandled_interaction(cast(Any, interaction))
+
+        response.send_message.assert_awaited_once_with(
+            "This control expired or was interrupted by a restart. "
+            "Please start a new request.",
+            ephemeral=True,
+        )
+
     async def test_btw_without_prompt_opens_the_shared_request_modal(self) -> None:
         interaction = SimpleNamespace(
             user=SimpleNamespace(id=7),

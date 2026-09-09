@@ -21,12 +21,17 @@ from .core import (
     _subtext,
 )
 from .customization import CustomizationError
-from .ui import _PromptModal, _check_interaction_owner
+from .ui import (
+    _PersistentViewMixin,
+    _PromptModal,
+    _check_interaction_owner,
+)
 
 SendMessage = Callable[..., Awaitable[Any]]
 SpeakText = Callable[[str], Awaitable[None]]
 ImagePathResolver = Callable[[dict[str, Any]], Path | None]
 ImageAction = Callable[[discord.Interaction, str, tuple[Path, ...]], Awaitable[None]]
+ViewRegistrar = Callable[[discord.ui.View, Any], Awaitable[None]]
 INTERMEDIATE_STATUS_LIMIT = 1990
 logger = _codex_logger()
 
@@ -65,7 +70,7 @@ def _format_thought_duration(seconds: float) -> str:
     return f"Thought for {minutes} {minute_unit} and {remainder} {second_unit}"
 
 
-class _PaginatorView(discord.ui.View):
+class _PaginatorView(_PersistentViewMixin, discord.ui.View):
     def __init__(
         self,
         pages: list[str],
@@ -74,13 +79,17 @@ class _PaginatorView(discord.ui.View):
         customizer: Any | None = None,
         guild_id: int | None = None,
         timeout: float = 900,
+        token: str | None = None,
+        recovered: bool = False,
+        index: int = 0,
     ) -> None:
-        super().__init__(timeout=timeout)
+        self._init_persistence("paginator", token, recovered=recovered)
+        super().__init__(timeout=None if recovered else timeout)
         self.pages = pages
         self.owner_id = owner_id
         self.customizer = customizer
         self.guild_id = guild_id
-        self.index = 0
+        self.index = max(0, min(index, max(0, len(pages) - 1)))
         self.message: discord.Message | discord.WebhookMessage | None = None
         previous = discord.ui.Button(
             label=_render_frontend_label(
@@ -90,6 +99,7 @@ class _PaginatorView(discord.ui.View):
                 "Previous",
             ),
             style=discord.ButtonStyle.secondary,
+            custom_id=self._custom_id("previous"),
         )
         following = discord.ui.Button(
             label=_render_frontend_label(
@@ -99,6 +109,7 @@ class _PaginatorView(discord.ui.View):
                 "Next",
             ),
             style=discord.ButtonStyle.primary,
+            custom_id=self._custom_id("next"),
         )
 
         async def previous_callback(interaction: discord.Interaction) -> None:
@@ -108,6 +119,7 @@ class _PaginatorView(discord.ui.View):
             await interaction.response.edit_message(
                 content=self.content(), view=self._view()
             )
+            await self._notify_state_change()
 
         async def next_callback(interaction: discord.Interaction) -> None:
             if not await self.interaction_check(interaction):
@@ -116,6 +128,7 @@ class _PaginatorView(discord.ui.View):
             await interaction.response.edit_message(
                 content=self.content(), view=self._view()
             )
+            await self._notify_state_change()
 
         previous.callback = previous_callback
         following.callback = next_callback
@@ -138,6 +151,14 @@ class _PaginatorView(discord.ui.View):
     def content(self) -> str:
         """Return the page currently selected by the paginator."""
         return self.pages[self.index]
+
+    def persistence_data(self) -> dict[str, Any]:
+        return {
+            "pages": self.pages,
+            "index": self.index,
+            "owner_id": self.owner_id,
+            "guild_id": self.guild_id,
+        }
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """Allow pagination controls only for the response owner."""
@@ -176,7 +197,7 @@ class _PaginatorView(discord.ui.View):
 _reaction_paginators: dict[int, _PaginatorView] = {}
 
 
-class _ImageResultView(discord.ui.View):
+class _ImageResultView(_PersistentViewMixin, discord.ui.View):
     """Owner-only controls for a generated image attachment."""
 
     def __init__(
@@ -189,8 +210,11 @@ class _ImageResultView(discord.ui.View):
         customizer: Any | None = None,
         guild_id: int | None = None,
         timeout: float = 900,
+        token: str | None = None,
+        recovered: bool = False,
     ) -> None:
-        super().__init__(timeout=timeout)
+        self._init_persistence("image", token, recovered=recovered)
+        super().__init__(timeout=None if recovered else timeout)
         self.user_id = user_id
         self.image_paths = image_paths
         self.on_action = on_action
@@ -206,6 +230,7 @@ class _ImageResultView(discord.ui.View):
                 "Follow up",
             ),
             style=discord.ButtonStyle.primary,
+            custom_id=self._custom_id("follow-up"),
         )
 
         async def follow_up_callback(interaction: discord.Interaction) -> None:
@@ -223,6 +248,13 @@ class _ImageResultView(discord.ui.View):
 
         follow_up.callback = follow_up_callback
         self.add_item(follow_up)
+
+    def persistence_data(self) -> dict[str, Any]:
+        return {
+            "user_id": self.user_id,
+            "image_paths": [str(path) for path in self.image_paths],
+            "guild_id": self.guild_id,
+        }
 
     async def _follow_up_submit(
         self,
@@ -246,6 +278,7 @@ async def send_paginated(
     speech: Iterable[AudioOutput] = (),
     customizer: Any | None = None,
     guild_id: int | None = None,
+    on_view_created: ViewRegistrar | None = None,
     **kwargs: Any,
 ) -> Any:
     """Send a response using components, reactions, or message splitting as fallback."""
@@ -288,6 +321,9 @@ async def send_paginated(
         message = await send(
             **send_kwargs(pages[0], page_view=view, include_speech=bool(speech_outputs))
         )
+        if view is not None and on_view_created is not None:
+            with contextlib.suppress(Exception):
+                await on_view_created(view, message)
         if view is not None:
             view.message = message
         return message
@@ -324,6 +360,7 @@ class _ResponseDelivery:
         context: dict[str, Any] | None = None,
         image_path_resolver: ImagePathResolver | None = None,
         on_image_action: ImageAction | None = None,
+        on_view_created: ViewRegistrar | None = None,
     ) -> None:
         self.send = send
         self.kwargs = kwargs
@@ -335,6 +372,7 @@ class _ResponseDelivery:
         self.context = dict(context or {})
         self.image_path_resolver = image_path_resolver
         self.on_image_action = on_image_action
+        self.on_view_created = on_view_created
         self._image_paths: list[Path] = []
         self._image_item_ids: set[str] = set()
         self.status_message: discord.Message | discord.WebhookMessage | None = None
@@ -576,6 +614,7 @@ class _ResponseDelivery:
             speech=speech,
             customizer=self.customizer,
             guild_id=self.guild_id,
+            on_view_created=self.on_view_created,
             **self.kwargs,
         )
         paths = tuple(
@@ -589,6 +628,7 @@ class _ResponseDelivery:
             await self._send_images(
                 paths,
                 on_image_action=on_image_action or self.on_image_action,
+                on_view_created=self.on_view_created,
             )
 
     async def _send_images(
@@ -596,6 +636,7 @@ class _ResponseDelivery:
         image_paths: tuple[Path, ...],
         *,
         on_image_action: ImageAction | None,
+        on_view_created: ViewRegistrar | None,
     ) -> None:
         """Send generated image files and attach their follow-up controls."""
         files: list[discord.File] = []
@@ -641,6 +682,9 @@ class _ResponseDelivery:
         try:
             edit_async = cast(Callable[..., Awaitable[Any]], edit)
             await edit_async(view=view)
+            if on_view_created is not None:
+                with contextlib.suppress(Exception):
+                    await on_view_created(view, message)
         except (discord.DiscordException, TypeError) as exc:
             logger.info(
                 "Could not attach generated image controls (error=%s)",

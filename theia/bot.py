@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import json
 import math
 import os
 import re
@@ -44,6 +45,8 @@ from .customization import (
 )
 from .delivery import (
     SendMessage,
+    _ImageResultView,
+    _PaginatorView,
     _reaction_paginators,
     _ResponseDelivery,
 )
@@ -51,8 +54,13 @@ from .presence import PresenceManager, RichPresenceManager
 from .recaps import NightlyRecapManager
 from .voice import VoiceModeError, VoiceModeManager, VoiceSession
 from .audio import AudioProtocolError
-from .ui import _DebugView
-from .ui import _PromptModal
+from .ui import (
+    _DecisionView,
+    _DebugView,
+    _FormView,
+    _PromptModal,
+    _UserInputView,
+)
 
 logger = _codex_logger()
 
@@ -65,6 +73,153 @@ CONTEXT_CHARACTER_LIMIT_ENV = "THEIA_CONTEXT_MAX_CHARACTERS"
 BARE_MENTION_PROMPT = "Please respond to the recent conversation context."
 DEBUG_REFRESH_INTERVAL = 2.0
 DEBUG_VIEW_TIMEOUT = 15 * 60
+PERSISTENT_VIEW_FILE = "discord-views.json"
+PERSISTENT_VIEW_VERSION = 1
+PERSISTENT_VIEW_LIMIT = 256
+STALE_INTERACTION_FALLBACK_DELAY = 2.0
+
+
+class _PersistentViewStore:
+    """Persist enough Discord view state to re-register it after a restart."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.records: dict[str, dict[str, Any]] = {}
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError):
+            return
+        if not isinstance(data, dict) or data.get("version") != PERSISTENT_VIEW_VERSION:
+            return
+        records = data.get("views")
+        if not isinstance(records, list):
+            return
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            token = record.get("token")
+            message_id = record.get("message_id")
+            if not isinstance(token, str) or not token:
+                continue
+            if not isinstance(message_id, int) or message_id <= 0:
+                continue
+            if not isinstance(record.get("kind"), str):
+                continue
+            if not isinstance(record.get("state"), dict):
+                continue
+            self.records[token] = dict(record)
+
+    def _persist(self) -> None:
+        records = sorted(
+            self.records.values(),
+            key=lambda record: float(record.get("expires_at", 0)),
+            reverse=True,
+        )[:PERSISTENT_VIEW_LIMIT]
+        data = {"version": PERSISTENT_VIEW_VERSION, "views": records}
+        temporary = self.path.with_suffix(".tmp")
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            temporary.chmod(0o600)
+            temporary.replace(self.path)
+        except OSError as exc:
+            logger.debug(
+                "Could not persist Discord view state (error=%s)", type(exc).__name__
+            )
+            with contextlib.suppress(OSError):
+                temporary.unlink()
+
+    def register(self, view: Any, message: Any) -> None:
+        token = getattr(view, "persistence_token", None)
+        message_id = getattr(message, "id", None)
+        if not isinstance(token, str) or not token:
+            return
+        if not isinstance(message_id, int) or message_id <= 0:
+            return
+        try:
+            state = view.persistence_data()
+            json.dumps(state)
+        except (AttributeError, TypeError, ValueError):
+            return
+        timeout = view.persistence_timeout()
+        expires_at = time.time() + timeout if timeout is not None else None
+        self.records[token] = {
+            "token": token,
+            "message_id": message_id,
+            "kind": str(getattr(view, "persistence_kind", "")),
+            "expires_at": expires_at,
+            "state": state,
+        }
+        self._persist()
+        view.set_persistence_callbacks(
+            on_state_change=self.update,
+            on_stop=self.remove,
+        )
+
+    async def update(self, view: Any) -> None:
+        token = getattr(view, "persistence_token", None)
+        if token not in self.records:
+            return
+        try:
+            state = view.persistence_data()
+            json.dumps(state)
+        except (AttributeError, TypeError, ValueError):
+            return
+        self.records[token]["state"] = state
+        self._persist()
+
+    def remove(self, view: Any) -> None:
+        token = getattr(view, "persistence_token", None)
+        if token in self.records:
+            self.records.pop(token, None)
+            self._persist()
+
+    def restore(
+        self,
+        bot_instance: commands.Bot,
+        factory: Callable[[dict[str, Any]], Any | None],
+    ) -> None:
+        now = time.time()
+        changed = False
+        for token, record in tuple(self.records.items()):
+            expires_at = record.get("expires_at")
+            if expires_at is not None:
+                try:
+                    if float(expires_at) <= now:
+                        self.records.pop(token, None)
+                        changed = True
+                        continue
+                except (TypeError, ValueError):
+                    self.records.pop(token, None)
+                    changed = True
+                    continue
+            try:
+                view = factory(record)
+            except Exception as exc:  # noqa: BLE001 - corrupt view state is disposable
+                logger.debug(
+                    "Could not restore a Discord view (error=%s)",
+                    type(exc).__name__,
+                )
+                view = None
+            if view is None:
+                self.records.pop(token, None)
+                changed = True
+                continue
+            try:
+                bot_instance.add_view(view, message_id=record["message_id"])
+            except (TypeError, ValueError):
+                self.records.pop(token, None)
+                changed = True
+                continue
+            view.set_persistence_callbacks(
+                on_state_change=self.update,
+                on_stop=self.remove,
+            )
+        if changed:
+            self._persist()
 
 
 class _GeneratedImageAttachment:
@@ -674,6 +829,7 @@ async def handle_request(
         guild_id=_guild_id(channel),
         context=customization_context(channel, user=None, user_id=user_id),
         image_path_resolver=bot.codex.image_artifact_path,
+        on_view_created=bot.register_view,
     )
     request_session_key = session_key(channel, user_id)
     response_for_presence: str | None = None
@@ -1409,7 +1565,12 @@ class TheiaBot(commands.Bot):
         super().__init__(command_prefix=(), intents=intents, help_command=None)
         self.customizations = FrontendCustomizationStore()
         self.codex = CodexAppServer()
+        self._persistent_views = _PersistentViewStore(
+            self.codex.runtime_home() / PERSISTENT_VIEW_FILE
+        )
+        self._interaction_recovery_tasks: set[asyncio.Task[Any]] = set()
         self.codex.set_frontend_customizer(self.customizations)
+        self.codex.set_view_registrar(self.register_view)
         self._participating_threads: set[int] = set()
         self._known_channels: dict[int, Any] = {}
         self._request_tasks: set[asyncio.Task[Any]] = set()
@@ -1435,6 +1596,150 @@ class TheiaBot(commands.Bot):
         self._request_tasks.add(task)
         task.add_done_callback(self._request_task_done)
 
+    async def register_view(self, view: Any, message: Any) -> None:
+        """Persist a component view after Discord has assigned its message ID."""
+        self._persistent_views.register(view, message)
+
+    def _restore_persistent_view(self, record: dict[str, Any]) -> Any | None:
+        """Rebuild one persisted view without restoring an old process callback."""
+        state = record.get("state")
+        kind = record.get("kind")
+        token = record.get("token")
+        if not isinstance(state, dict) or not isinstance(kind, str):
+            return None
+        if not isinstance(token, str) or not token:
+            return None
+
+        user_id = state.get("user_id")
+        user_id = user_id if isinstance(user_id, int) and user_id > 0 else None
+        guild_id = state.get("guild_id")
+        guild_id = guild_id if isinstance(guild_id, int) and guild_id > 0 else None
+        customizer = self.customizations
+        if kind == "paginator":
+            pages = state.get("pages")
+            if (
+                not isinstance(pages, list)
+                or not pages
+                or not all(isinstance(page, str) for page in pages)
+            ):
+                return None
+            index = state.get("index", 0)
+            index = index if isinstance(index, int) else 0
+            return _PaginatorView(
+                pages,
+                owner_id=user_id,
+                customizer=customizer,
+                guild_id=guild_id,
+                token=token,
+                recovered=True,
+                index=index,
+            )
+        if kind == "image":
+            paths: list[Path] = []
+            for value in state.get("image_paths", []):
+                if not isinstance(value, str):
+                    continue
+                path = self.codex.image_artifact_path(
+                    {"type": "imageGeneration", "savedPath": value}
+                )
+                if path is not None and path not in paths:
+                    paths.append(path)
+            if not paths:
+                return None
+
+            async def follow_up(
+                interaction: discord.Interaction,
+                prompt: str,
+                image_paths: tuple[Path, ...],
+            ) -> None:
+                await _run_image_follow_up(
+                    interaction,
+                    prompt,
+                    image_paths,
+                    channel=interaction.channel,
+                )
+
+            return _ImageResultView(
+                user_id,
+                tuple(paths),
+                on_action=follow_up,
+                customizer=customizer,
+                guild_id=guild_id,
+                token=token,
+                recovered=True,
+            )
+        if kind == "decision":
+            raw_choices = state.get("choices")
+            if not isinstance(raw_choices, list):
+                return None
+            choices: list[tuple[str, str, discord.ButtonStyle]] = []
+            for choice in raw_choices:
+                if not isinstance(choice, dict):
+                    continue
+                label = choice.get("label")
+                value = choice.get("value")
+                style = choice.get("style")
+                if (
+                    not isinstance(label, str)
+                    or not isinstance(value, str)
+                    or not isinstance(style, int)
+                ):
+                    continue
+                try:
+                    button_style = discord.ButtonStyle(style)
+                except (TypeError, ValueError):
+                    continue
+                choices.append((label, value, button_style))
+            if not choices:
+                return None
+            return _DecisionView(
+                user_id,
+                choices,
+                token=token,
+                recovered=True,
+            )
+        if kind == "debug":
+            return _DebugView(
+                user_id,
+                customizer=customizer,
+                guild_id=guild_id,
+                token=token,
+                recovered=True,
+            )
+        if kind == "form":
+            prompt = state.get("prompt")
+            if not isinstance(prompt, str):
+                return None
+            return _FormView(
+                user_id,
+                prompt=prompt,
+                customizer=customizer,
+                guild_id=guild_id,
+                token=token,
+                recovered=True,
+            )
+        if kind == "user-input":
+            questions = state.get("questions")
+            if not isinstance(questions, list) or not all(
+                isinstance(question, dict) for question in questions
+            ):
+                return None
+            question_index = state.get("question_index", 0)
+            question_index = question_index if isinstance(question_index, int) else 0
+            answers = state.get("answers")
+            answers = answers if isinstance(answers, dict) else None
+            return _UserInputView(
+                user_id,
+                questions,
+                customizer=customizer,
+                guild_id=guild_id,
+                token=token,
+                recovered=True,
+                question_index=question_index,
+                answers=answers,
+            )
+        return None
+
     def _request_task_done(self, task: asyncio.Task[Any]) -> None:
         self._request_tasks.discard(task)
         if task.cancelled():
@@ -1457,6 +1762,41 @@ class TheiaBot(commands.Bot):
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._request_tasks.clear()
+
+    async def _cancel_interaction_recovery_tasks(self) -> None:
+        """Cancel delayed stale-interaction acknowledgements during shutdown."""
+        tasks = tuple(self._interaction_recovery_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._interaction_recovery_tasks.clear()
+
+    async def _acknowledge_unhandled_interaction(
+        self, interaction: discord.Interaction
+    ) -> None:
+        await asyncio.sleep(STALE_INTERACTION_FALLBACK_DELAY)
+        if interaction.response.is_done():
+            return
+        with contextlib.suppress(discord.DiscordException):
+            await interaction.response.send_message(
+                "This control expired or was interrupted by a restart. "
+                "Please start a new request.",
+                ephemeral=True,
+            )
+
+    def _schedule_interaction_recovery(self, interaction: discord.Interaction) -> None:
+        task = asyncio.create_task(self._acknowledge_unhandled_interaction(interaction))
+        self._interaction_recovery_tasks.add(task)
+        task.add_done_callback(self._interaction_recovery_tasks.discard)
+
+    async def on_interaction(self, interaction: discord.Interaction) -> None:
+        """Acknowledge component or modal interactions unknown after a restart."""
+        if interaction.type in {
+            discord.InteractionType.component,
+            discord.InteractionType.modal_submit,
+        }:
+            self._schedule_interaction_recovery(interaction)
 
     def schedule_debug_refresh(
         self,
@@ -1552,6 +1892,7 @@ class TheiaBot(commands.Bot):
     async def setup_hook(self) -> None:
         """Start Codex, synchronize slash commands, and begin background services."""
         await super().setup_hook()
+        self._persistent_views.restore(self, self._restore_persistent_view)
         await self.codex.start()
         await self.tree.sync()
         await self.presence.start()
@@ -1562,6 +1903,7 @@ class TheiaBot(commands.Bot):
 
     async def close(self) -> None:
         """Stop background services and close Discord and Codex resources in order."""
+        await self._cancel_interaction_recovery_tasks()
         await self._cancel_debug_tasks()
         await self._cancel_request_tasks()
         if self._retention_task is not None:
@@ -1928,6 +2270,7 @@ async def codex_debug(interaction: discord.Interaction) -> None:
         )
         return
     if message is not None:
+        await bot.register_view(view, message)
         bot.schedule_debug_refresh(
             message,
             view,

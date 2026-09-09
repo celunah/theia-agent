@@ -296,6 +296,10 @@ When Codex completes an image-generation item with a safe saved artifact, Theia
 posts the image to Discord and adds an owner-only `Follow up` control. `Follow
 up` opens the same request modal used by `/btw`.
 
+Interactive Discord views are registered and restored across bot restarts when
+their state is available. In-flight approvals or input requests that were
+interrupted by the restart are acknowledged and marked for a new request.
+
 ## Web search
 
 Theia uses Codex’s native web-search capability rather than implementing a separate search engine.

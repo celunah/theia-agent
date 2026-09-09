@@ -1,8 +1,9 @@
 """Discord approval and structured-input views used by Codex interactions."""
 
 import json
+import secrets
 from collections.abc import Awaitable, Callable, Iterable
-from typing import Any
+from typing import Any, cast
 
 import discord
 
@@ -15,6 +16,74 @@ from .core import (
 )
 
 PromptSubmit = Callable[[discord.Interaction, str], Awaitable[None]]
+StateChange = Callable[[Any], Awaitable[None]]
+StateStop = Callable[[Any], None]
+RESTART_RECOVERY_MESSAGE = (
+    "This request was interrupted when Theia restarted. Please start it again."
+)
+
+
+def _component_custom_id(kind: str, token: str, action: str) -> str:
+    """Build a bounded component ID that can be restored after a restart."""
+    return f"theia:{kind}:{token}:{action}"
+
+
+def _modal_custom_id(kind: str, user_id: int | None) -> str:
+    """Build a namespaced modal ID for stale-interaction recovery."""
+    owner = str(user_id) if user_id is not None else "0"
+    return f"theia:modal:{kind}:{owner}:{secrets.token_hex(6)}"
+
+
+class _PersistentViewMixin:
+    """Provide IDs and lifecycle hooks for views restored after a restart."""
+
+    def _init_persistence(
+        self,
+        kind: str,
+        token: str | None,
+        *,
+        recovered: bool,
+    ) -> None:
+        self.persistence_kind = kind
+        self.persistence_token = token or secrets.token_hex(8)
+        self.recovered = recovered
+        self._on_state_change: StateChange | None = None
+        self._on_state_stop: StateStop | None = None
+
+    def _custom_id(self, action: str) -> str:
+        return _component_custom_id(
+            self.persistence_kind,
+            self.persistence_token,
+            action,
+        )
+
+    def set_persistence_callbacks(
+        self,
+        *,
+        on_state_change: StateChange | None = None,
+        on_stop: StateStop | None = None,
+    ) -> None:
+        self._on_state_change = on_state_change
+        self._on_state_stop = on_stop
+
+    async def _notify_state_change(self) -> None:
+        if self._on_state_change is not None:
+            await self._on_state_change(self)
+
+    def stop(self) -> None:
+        already_finished = bool(cast(Any, self).is_finished())
+        super().stop()  # type: ignore[misc]
+        if not already_finished and self._on_state_stop is not None:
+            self._on_state_stop(self)
+
+    def persistence_data(self) -> dict[str, Any]:
+        """Return JSON-safe state used to restore this view."""
+        return {}
+
+    def persistence_timeout(self) -> float | None:
+        """Return the normal lifetime used by the persistence registry."""
+        timeout = getattr(self, "timeout", None)
+        return float(timeout) if timeout is not None else None
 
 
 async def _check_interaction_owner(
@@ -30,7 +99,7 @@ async def _check_interaction_owner(
     return True
 
 
-class _DecisionView(discord.ui.View):
+class _DecisionView(_PersistentViewMixin, discord.ui.View):
     def __init__(
         self,
         user_id: int | None,
@@ -38,13 +107,21 @@ class _DecisionView(discord.ui.View):
         *,
         timeout: float = 300,
         on_decision: Callable[[str, discord.abc.User], Awaitable[None]] | None = None,
+        token: str | None = None,
+        recovered: bool = False,
     ) -> None:
-        super().__init__(timeout=timeout)
+        self._init_persistence("decision", token, recovered=recovered)
+        super().__init__(timeout=None if recovered else timeout)
         self.user_id = user_id
         self.value: str | None = None
         self.on_decision = on_decision
-        for label, value, style in choices:
-            button = discord.ui.Button(label=label, style=style)
+        self.choices = tuple(choices)
+        for index, (label, value, style) in enumerate(self.choices):
+            button = discord.ui.Button(
+                label=label,
+                style=style,
+                custom_id=self._custom_id(f"decision-{index}"),
+            )
 
             async def callback(
                 interaction: discord.Interaction,
@@ -57,13 +134,30 @@ class _DecisionView(discord.ui.View):
                 for child in self.children:
                     if isinstance(child, discord.ui.Button):
                         child.disabled = True
-                await interaction.response.edit_message(view=self)
+                if self.recovered:
+                    await interaction.response.edit_message(
+                        content=RESTART_RECOVERY_MESSAGE,
+                        embed=None,
+                        view=self,
+                    )
+                else:
+                    await interaction.response.edit_message(view=self)
                 if self.on_decision is not None:
                     await self.on_decision(decision, interaction.user)
+                await self._notify_state_change()
                 self.stop()
 
             button.callback = callback
             self.add_item(button)
+
+    def persistence_data(self) -> dict[str, Any]:
+        return {
+            "user_id": self.user_id,
+            "choices": [
+                {"label": label, "value": value, "style": style.value}
+                for label, value, style in self.choices
+            ],
+        }
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """Allow a decision only from the user who owns the pending request."""
@@ -78,7 +172,7 @@ class _DecisionView(discord.ui.View):
         self.stop()
 
 
-class _DebugView(discord.ui.View):
+class _DebugView(_PersistentViewMixin, discord.ui.View):
     """Owner-only control for a live administrator diagnostics message."""
 
     def __init__(
@@ -88,10 +182,18 @@ class _DebugView(discord.ui.View):
         channel: Any | None = None,
         customizer: Any | None = None,
         timeout: float = 900,
+        guild_id: int | None = None,
+        token: str | None = None,
+        recovered: bool = False,
     ) -> None:
-        super().__init__(timeout=timeout)
+        self._init_persistence("debug", token, recovered=recovered)
+        super().__init__(timeout=None if recovered else timeout)
         self.user_id = user_id
-        self.guild_id = getattr(getattr(channel, "guild", None), "id", None)
+        self.guild_id = (
+            guild_id
+            if guild_id is not None
+            else getattr(getattr(channel, "guild", None), "id", None)
+        )
         self.customizer = customizer
         stop = discord.ui.Button(
             label=_render_frontend_label(
@@ -101,6 +203,7 @@ class _DebugView(discord.ui.View):
                 "Stop live updates",
             ),
             style=discord.ButtonStyle.secondary,
+            custom_id=self._custom_id("stop"),
         )
 
         async def stop_callback(interaction: discord.Interaction) -> None:
@@ -110,10 +213,20 @@ class _DebugView(discord.ui.View):
                 if isinstance(child, discord.ui.Button):
                     child.disabled = True
             self.stop()
-            await interaction.response.edit_message(view=self)
+            if self.recovered:
+                await interaction.response.edit_message(
+                    content="Theia restarted, so live debug updates have ended.",
+                    embed=None,
+                    view=self,
+                )
+            else:
+                await interaction.response.edit_message(view=self)
 
         stop.callback = stop_callback
         self.add_item(stop)
+
+    def persistence_data(self) -> dict[str, Any]:
+        return {"user_id": self.user_id, "guild_id": self.guild_id}
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """Allow only the administrator who opened the diagnostic view to stop it."""
@@ -147,7 +260,10 @@ class _PromptModal(discord.ui.Modal):
             "label:input_modal_title",
             title,
         )
-        super().__init__(title=_truncate(modal_title, 45))
+        super().__init__(
+            title=_truncate(modal_title, 45),
+            custom_id=_modal_custom_id("prompt", user_id),
+        )
         self.user_id = user_id
         self.on_prompt_submit = on_submit
         self.prompt = discord.ui.TextInput(
@@ -186,7 +302,10 @@ class _JsonModal(discord.ui.Modal):
             "label:input_modal_title",
             title,
         )
-        super().__init__(title=_truncate(modal_title, 45))
+        super().__init__(
+            title=_truncate(modal_title, 45),
+            custom_id=_modal_custom_id("json", user_id),
+        )
         self.view = view
         self.user_id = user_id
         self.value = discord.ui.TextInput(
@@ -221,7 +340,7 @@ class _JsonModal(discord.ui.Modal):
         self.view.stop()
 
 
-class _FormView(discord.ui.View):
+class _FormView(_PersistentViewMixin, discord.ui.View):
     def __init__(
         self,
         user_id: int | None,
@@ -230,11 +349,19 @@ class _FormView(discord.ui.View):
         channel: discord.abc.Messageable | None = None,
         customizer: Any | None = None,
         timeout: float = 300,
+        guild_id: int | None = None,
+        token: str | None = None,
+        recovered: bool = False,
     ) -> None:
-        super().__init__(timeout=timeout)
+        self._init_persistence("form", token, recovered=recovered)
+        super().__init__(timeout=None if recovered else timeout)
         self.user_id = user_id
         self.prompt = prompt
-        self.guild_id = getattr(getattr(channel, "guild", None), "id", None)
+        self.guild_id = (
+            guild_id
+            if guild_id is not None
+            else getattr(getattr(channel, "guild", None), "id", None)
+        )
         self.customizer = customizer
         self.value: Any = None
         answer = discord.ui.Button(
@@ -245,6 +372,7 @@ class _FormView(discord.ui.View):
                 "Answer",
             ),
             style=discord.ButtonStyle.primary,
+            custom_id=self._custom_id("answer"),
         )
         decline = discord.ui.Button(
             label=_render_frontend_label(
@@ -254,10 +382,19 @@ class _FormView(discord.ui.View):
                 "Decline",
             ),
             style=discord.ButtonStyle.secondary,
+            custom_id=self._custom_id("decline"),
         )
 
         async def answer_callback(interaction: discord.Interaction) -> None:
             if await self.interaction_check(interaction):
+                if self.recovered:
+                    await interaction.response.edit_message(
+                        content=RESTART_RECOVERY_MESSAGE,
+                        embed=None,
+                        view=self,
+                    )
+                    self.stop()
+                    return
                 await interaction.response.send_modal(
                     _JsonModal(
                         self,
@@ -270,13 +407,27 @@ class _FormView(discord.ui.View):
         async def decline_callback(interaction: discord.Interaction) -> None:
             if await self.interaction_check(interaction):
                 self.value = None
-                await interaction.response.edit_message(view=self)
+                if self.recovered:
+                    await interaction.response.edit_message(
+                        content=RESTART_RECOVERY_MESSAGE,
+                        embed=None,
+                        view=self,
+                    )
+                else:
+                    await interaction.response.edit_message(view=self)
                 self.stop()
 
         answer.callback = answer_callback
         decline.callback = decline_callback
         self.add_item(answer)
         self.add_item(decline)
+
+    def persistence_data(self) -> dict[str, Any]:
+        return {
+            "user_id": self.user_id,
+            "prompt": self.prompt,
+            "guild_id": self.guild_id,
+        }
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """Allow form actions only from the user who owns the pending request."""
@@ -287,7 +438,7 @@ class _FormView(discord.ui.View):
         self.stop()
 
 
-class _UserInputView(discord.ui.View):
+class _UserInputView(_PersistentViewMixin, discord.ui.View):
     def __init__(
         self,
         user_id: int | None,
@@ -296,15 +447,25 @@ class _UserInputView(discord.ui.View):
         channel: discord.abc.Messageable | None = None,
         customizer: Any | None = None,
         timeout: float = 300,
+        guild_id: int | None = None,
+        token: str | None = None,
+        recovered: bool = False,
+        question_index: int = 0,
+        answers: dict[str, dict[str, list[str]]] | None = None,
     ) -> None:
-        super().__init__(timeout=timeout)
+        self._init_persistence("user-input", token, recovered=recovered)
+        super().__init__(timeout=None if recovered else timeout)
         self.user_id = user_id
         self.questions = questions
-        self.guild_id = getattr(getattr(channel, "guild", None), "id", None)
+        self.guild_id = (
+            guild_id
+            if guild_id is not None
+            else getattr(getattr(channel, "guild", None), "id", None)
+        )
         self.customizer = customizer
         self.value: dict[str, Any] | None = None
-        self.question_index = 0
-        self._answers: dict[str, dict[str, list[str]]] = {}
+        self.question_index = max(0, min(question_index, max(0, len(questions) - 1)))
+        self._answers = dict(answers or {})
         self._build_question_items()
 
     @property
@@ -367,7 +528,13 @@ class _UserInputView(discord.ui.View):
                 )
             )
             label = _truncate(label, 80)
-            button = discord.ui.Button(label=label, style=discord.ButtonStyle.primary)
+            button = discord.ui.Button(
+                label=label,
+                style=discord.ButtonStyle.primary,
+                custom_id=self._custom_id(
+                    f"option-{self.question_index}-{len(self.children)}"
+                ),
+            )
 
             async def callback(
                 interaction: discord.Interaction,
@@ -375,6 +542,14 @@ class _UserInputView(discord.ui.View):
                 answer: str = str(option.get("label") or ""),
             ) -> None:
                 if await self.interaction_check(interaction):
+                    if self.recovered:
+                        await interaction.response.edit_message(
+                            content=RESTART_RECOVERY_MESSAGE,
+                            embed=None,
+                            view=self,
+                        )
+                        self.stop()
+                        return
                     complete = self._record_answer(answer)
                     if complete:
                         await interaction.response.edit_message(view=self)
@@ -383,6 +558,7 @@ class _UserInputView(discord.ui.View):
                         await interaction.response.edit_message(
                             **self.message_kwargs(for_edit=True)
                         )
+                    await self._notify_state_change()
 
             button.callback = callback
             self.add_item(button)
@@ -396,16 +572,34 @@ class _UserInputView(discord.ui.View):
                     "Other" if options else "Answer",
                 ),
                 style=discord.ButtonStyle.secondary,
+                custom_id=self._custom_id(f"other-{self.question_index}"),
             )
 
             async def other_callback(interaction: discord.Interaction) -> None:
                 if await self.interaction_check(interaction):
+                    if self.recovered:
+                        await interaction.response.edit_message(
+                            content=RESTART_RECOVERY_MESSAGE,
+                            embed=None,
+                            view=self,
+                        )
+                        self.stop()
+                        return
                     await interaction.response.send_modal(
                         _TextModal(self, self.user_id, question),
                     )
 
             other.callback = other_callback
             self.add_item(other)
+
+    def persistence_data(self) -> dict[str, Any]:
+        return {
+            "user_id": self.user_id,
+            "questions": self.questions,
+            "guild_id": self.guild_id,
+            "question_index": self.question_index,
+            "answers": self._answers,
+        }
 
     def _record_answer(self, answer: str) -> bool:
         question_id = str(self.current_question.get("id") or self.question_index)
@@ -443,7 +637,10 @@ class _TextModal(discord.ui.Modal):
             "label:input_modal_title",
             title,
         )
-        super().__init__(title=_truncate(modal_title, 45))
+        super().__init__(
+            title=_truncate(modal_title, 45),
+            custom_id=_modal_custom_id("text", user_id),
+        )
         self.view = view
         self.user_id = user_id
         self.question = question
@@ -474,3 +671,4 @@ class _TextModal(discord.ui.Modal):
             await interaction.response.edit_message(
                 **self.view.message_kwargs(for_edit=True)
             )
+        await self.view._notify_state_change()
