@@ -10,13 +10,14 @@ import sys
 import time
 from collections.abc import Awaitable, Callable, Coroutine, Iterable
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, TypeGuard, cast
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-from .app_server import CodexAppServer, CodexAppServerError
+from .app_server import MAX_ATTACHMENT_BYTES, CodexAppServer, CodexAppServerError
 from .core import (
     DEFAULT_MODE,
     DEFAULT_PERSONALITY_SCOPE,
@@ -51,6 +52,7 @@ from .recaps import NightlyRecapManager
 from .voice import VoiceModeError, VoiceModeManager, VoiceSession
 from .audio import AudioProtocolError
 from .ui import _DebugView
+from .ui import _PromptModal
 
 logger = _codex_logger()
 
@@ -63,6 +65,34 @@ CONTEXT_CHARACTER_LIMIT_ENV = "THEIA_CONTEXT_MAX_CHARACTERS"
 BARE_MENTION_PROMPT = "Please respond to the recent conversation context."
 DEBUG_REFRESH_INTERVAL = 2.0
 DEBUG_VIEW_TIMEOUT = 15 * 60
+
+
+class _GeneratedImageAttachment:
+    """Present a validated local image as an input attachment for a new turn."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.filename = path.name
+        self.content_type = {
+            ".gif": "image/gif",
+            ".jpeg": "image/jpeg",
+            ".jpg": "image/jpeg",
+            ".png": "image/png",
+            ".webp": "image/webp",
+        }.get(path.suffix.casefold(), "image/png")
+        self.url = ""
+        try:
+            self.size = path.stat().st_size
+        except OSError:
+            self.size = 0
+
+    async def read(self) -> bytes:
+        """Read the generated image only while it remains a regular file."""
+        if self.path.is_symlink() or not self.path.is_file():
+            raise OSError("generated image is no longer available")
+        if self.path.stat().st_size > MAX_ATTACHMENT_BYTES:
+            raise OSError("generated image is too large")
+        return self.path.read_bytes()
 
 
 def _frontend_embed(
@@ -619,7 +649,7 @@ async def handle_request(
     channel: Any | None,
     user_id: int,
     user: Any | None = None,
-    attachments: Iterable[discord.Attachment] = (),
+    attachments: Iterable[Any] = (),
     allow_tools: bool = True,
     context: str | None = None,
     request_id: str | int | None = None,
@@ -638,16 +668,19 @@ async def handle_request(
         send,
         kwargs,
         owner_id=user_id,
+        channel=channel,
         speak_text=speak_text,
         customizer=bot.customizations,
         guild_id=_guild_id(channel),
         context=customization_context(channel, user=None, user_id=user_id),
+        image_path_resolver=bot.codex.image_artifact_path,
     )
     request_session_key = session_key(channel, user_id)
     response_for_presence: str | None = None
     recap_started_at = bot.recaps.now()
 
     def on_channel_change(new_channel: Any) -> None:
+        delivery.channel = new_channel
         if use_webhook_thread:
             # Interaction follow-ups must keep using the webhook sender while
             # targeting the newly-created thread explicitly.
@@ -749,6 +782,16 @@ async def handle_request(
                 failed=failed,
                 error_reason=error_reason if failed else None,
                 speech=speech,
+                image_paths=delivery.image_paths,
+                on_image_action=lambda image_interaction, action, action_prompt, paths: (
+                    _run_image_action(
+                        image_interaction,
+                        action,
+                        action_prompt,
+                        paths,
+                        channel=delivery.channel,
+                    )
+                ),
             )
             with contextlib.suppress(Exception):
                 bot.recaps.record_exchange(
@@ -2453,19 +2496,44 @@ async def codex_undo(interaction: discord.Interaction) -> None:
 @_user_installable_command
 @bot.tree.command(name="btw", description="Send a request to Codex")
 @app_commands.describe(
-    prompt="The request to send to Codex",
+    prompt="The request to send to Codex, or leave blank to open the request modal",
     file="An optional file to include with the request",
 )
 async def codex_btw(
     interaction: discord.Interaction,
-    prompt: str,
+    prompt: str | None = None,
     file: discord.Attachment | None = None,
 ) -> None:
     """Send a prompt and optional attachment through the current Discord session."""
     if not await _require_login(interaction):
         return
+    prompt_value = (prompt or "").strip()
+    if not prompt_value:
+
+        async def submit_modal_prompt(
+            modal_interaction: discord.Interaction,
+            modal_prompt: str,
+        ) -> None:
+            if not await _require_login(modal_interaction):
+                return
+            await modal_interaction.response.defer()
+            bot.schedule_request(
+                _run_btw_request(modal_interaction, modal_prompt, file)
+            )
+
+        await interaction.response.send_modal(
+            _PromptModal(
+                interaction.user.id,
+                on_submit=submit_modal_prompt,
+                channel=interaction.channel,
+                customizer=bot.customizations,
+                title="Send a request",
+                placeholder="Tell Codex what to do.",
+            )
+        )
+        return
     await interaction.response.defer()
-    bot.schedule_request(_run_btw_request(interaction, prompt, file))
+    bot.schedule_request(_run_btw_request(interaction, prompt_value, file))
 
 
 async def _run_btw_request(
@@ -2523,6 +2591,74 @@ async def _run_btw_request(
         )
         with contextlib.suppress(Exception):
             await _send_command_failure(interaction, "Request unavailable", exc)
+
+
+async def _run_image_action(
+    interaction: discord.Interaction,
+    action: str,
+    prompt: str,
+    image_paths: tuple[Path, ...],
+    *,
+    channel: Any | None,
+) -> None:
+    """Acknowledge an image control and run its follow-up in the same session."""
+    if not await _require_login(interaction):
+        return
+    await interaction.response.defer()
+    bot.schedule_request(
+        _process_image_action(
+            interaction,
+            action,
+            prompt,
+            image_paths,
+            channel=channel,
+        )
+    )
+
+
+async def _process_image_action(
+    interaction: discord.Interaction,
+    action: str,
+    prompt: str,
+    image_paths: tuple[Path, ...],
+    *,
+    channel: Any | None,
+) -> None:
+    """Run one image action after its Discord interaction is acknowledged."""
+    request_channel = channel or interaction.channel
+    user_only = _is_user_only_install(interaction)
+    request_sender = _interaction_request_sender(interaction)
+    request_prompt = prompt.strip()
+    if action == "remove_background":
+        request_prompt = (
+            "Remove the background from the attached image and return the edited image."
+        )
+    if not request_prompt:
+        request_prompt = "Continue working with the attached generated image."
+    key = session_key(request_channel, interaction.user.id)
+    try:
+        await handle_request(
+            request_sender,
+            request_prompt,
+            channel=request_channel,
+            user_id=interaction.user.id,
+            user=interaction.user,
+            attachments=tuple(_GeneratedImageAttachment(path) for path in image_paths),
+            allow_tools=_interaction_allows_tools(interaction),
+            context=await _channel_context(request_channel),
+            request_id=f"image:{interaction.id}",
+            speak_text=_voice_speak_callback(key),
+            use_webhook_thread=True,
+            interaction_sender=request_sender if user_only else None,
+            allow_discord_tools=not user_only,
+        )
+    except Exception as exc:  # noqa: BLE001 - an image action must not go silent
+        logger.error(
+            "Background image action failed (error=%s)",
+            type(exc).__name__,
+        )
+        with contextlib.suppress(Exception):
+            await _send_command_failure(interaction, "Image action unavailable", exc)
 
 
 async def skill_autocomplete(

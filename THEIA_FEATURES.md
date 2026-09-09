@@ -17,7 +17,7 @@ The current commands are:
 - `/deny`
 - `/stop`
 - `/undo`
-- `/btw <prompt> [file]`
+- `/btw [prompt] [file]` (a blank prompt opens a request modal)
 - `/skill <skill_name>`
 - `/personality [file] [name]`
 - `/model <model>`
@@ -291,6 +291,11 @@ self-improvement review. The setting is a trusted deployment override and does
 not bypass Codex authentication.
 
 Tool availability still depends on the selected model, account, provider capabilities, and Codex configuration. `modelProvider/capabilities/read` is implemented and cached, but does not currently have a dedicated Discord command.
+
+When Codex completes an image-generation item with a safe saved artifact, Theia
+posts the image to Discord and adds owner-only `Follow up` and `Remove
+background` controls. `Follow up` opens the same request modal used by `/btw`;
+`Download image` links to the Discord-hosted attachment.
 
 ## Web search
 

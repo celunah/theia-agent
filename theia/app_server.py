@@ -82,6 +82,7 @@ MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024
 MAX_ATTACHMENT_TEXT_BYTES = 100 * 1024
 MAX_ATTACHMENTS_PER_REQUEST = 10
 MAX_ATTACHMENT_BATCH_BYTES = 64 * 1024 * 1024
+IMAGE_SUFFIXES = frozenset({".gif", ".jpeg", ".jpg", ".png", ".webp"})
 MESSAGE_LEDGER_LIMIT = 2000
 MESSAGE_LEDGER_RETRY_AFTER = 15 * 60
 CHANNEL_CHECKPOINT_LIMIT = 200
@@ -3433,7 +3434,7 @@ class CodexAppServer:
         channel: discord.abc.Messageable | None,
         user_id: int | None,
         user: Any | None = None,
-        attachments: Iterable[discord.Attachment] = (),
+        attachments: Iterable[Any] = (),
         allow_tools: bool = True,
         thread_source: discord.Message | None = None,
         user_prompt: str | None = None,
@@ -4727,6 +4728,29 @@ class CodexAppServer:
             with contextlib.suppress(OSError):
                 temporary.unlink()
         return path
+
+    def image_artifact_path(self, item: dict[str, Any]) -> Path | None:
+        """Return a safe generated-image path from one Codex image item."""
+        if str(item.get("type") or "").casefold() != "imagegeneration":
+            return None
+        raw_path = item.get("savedPath") or item.get("saved_path")
+        path = _path_from_value(raw_path)
+        if path is None:
+            return None
+        try:
+            if path.is_symlink():
+                return None
+            resolved = path.resolve(strict=True)
+            if (
+                not resolved.is_file()
+                or resolved.suffix.casefold() not in IMAGE_SUFFIXES
+                or not _path_is_under(resolved, self._shared_workspace_roots)
+                or resolved.stat().st_size > MAX_ATTACHMENT_BYTES
+            ):
+                return None
+        except OSError:
+            return None
+        return resolved
 
     def _user_input(
         self,
@@ -6669,6 +6693,11 @@ class CodexAppServer:
                 state.completed = turn
                 state.thread_id = state.thread_id or params.get("threadId")
                 for item in turn.get("items", []):
+                    if (
+                        isinstance(item, dict)
+                        and str(item.get("type") or "").casefold() == "imagegeneration"
+                    ):
+                        self._emit(state, "item_completed", item)
                     if (
                         item.get("type") == "agentMessage"
                         and isinstance(item.get("text"), str)

@@ -120,6 +120,7 @@ from theia.core import (
 )
 from theia.delivery import (
     SendMessage,
+    _ImageResultView,
     _is_tool_item,
     _PaginatorView,
     _reaction_paginators,
@@ -182,6 +183,7 @@ from theia.ui import (
     _DecisionView,
     _FormView,
     _JsonModal,
+    _PromptModal,
     _TextModal,
     _UserInputView,
 )
@@ -266,10 +268,12 @@ __all__ = [
     "_DebugView",
     "_DecisionView",
     "_FormView",
+    "_ImageResultView",
     "_JsonModal",
     "_MoodState",
     "_PaginatorView",
     "_PendingApproval",
+    "_PromptModal",
     "_ResponseDelivery",
     "_Session",
     "_TextModal",

@@ -247,6 +247,40 @@ class TestLocalCodexBoundary(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Working through the request.", commentary)
         self.assertEqual(events[-1][0], "turn_completed")
 
+    async def test_image_generation_artifact_crosses_the_boundary_safely(self) -> None:
+        """Verify native image items expose only safe generated artifacts."""
+        server = await self._server(scenario="image")
+        events: list[tuple[str, dict[str, Any]]] = []
+
+        async def on_event(event: str, payload: dict[str, Any]) -> None:
+            events.append((event, payload))
+
+        result = await self._ask(
+            server,
+            "make an image",
+            on_event=on_event,
+        )
+
+        self.assertEqual(result, "streamed response")
+        image_items = [
+            payload
+            for event, payload in events
+            if event == "item_completed" and payload.get("type") == "imageGeneration"
+        ]
+        self.assertEqual(len(image_items), 1)
+        artifact = server.image_artifact_path(image_items[0])
+        self.assertIsNotNone(artifact)
+        assert artifact is not None
+        self.assertTrue(artifact.is_file())
+        self.assertIsNone(
+            server.image_artifact_path(
+                {
+                    "type": "imageGeneration",
+                    "savedPath": str(self._root / "outside.png"),
+                }
+            )
+        )
+
     async def test_refusal_is_a_completed_non_error_response(self) -> None:
         """Verify a model refusal remains user-visible without becoming a transport error."""
         server = await self._server(scenario="refusal")

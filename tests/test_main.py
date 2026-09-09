@@ -103,6 +103,12 @@ class _Message:
         self.deleted = True
 
 
+class _ImageMessage(_Message):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attachments = (SimpleNamespace(url="https://cdn.example/image.png"),)
+
+
 class _HistoryChannel(_Channel):
     def __init__(self, messages: list[SimpleNamespace]) -> None:
         super().__init__()
@@ -1109,6 +1115,7 @@ class CommandSurfaceTests(unittest.TestCase):
                     "debug_live_footer",
                     "debug_stop_updates",
                 ),
+                ("image_follow_up", "image_remove_background", "image_download"),
             )
             for name in group
         }
@@ -1263,6 +1270,17 @@ class CommandSurfaceTests(unittest.TestCase):
         self.assertEqual(text_modal.answer.to_component_dict()["label"], "Response")
         self.assertEqual(getattr(user_input.children[0], "label", None), "Select")
 
+    def test_prompt_modal_is_shared_by_follow_up_flows(self) -> None:
+        modal = main._PromptModal(
+            7,
+            on_submit=AsyncMock(),
+            channel=SimpleNamespace(guild=SimpleNamespace(id=42)),
+            title="Send a request",
+        )
+
+        self.assertEqual(modal.title, "Send a request")
+        self.assertEqual(modal.prompt.to_component_dict()["label"], "Request")
+
     def test_codex_cli_version_is_read_from_the_selected_executable(self) -> None:
         server = main.CodexAppServer()
         with (
@@ -1392,6 +1410,26 @@ class ConfigurationScriptTests(unittest.TestCase):
 
 
 class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_btw_without_prompt_opens_the_shared_request_modal(self) -> None:
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=7),
+            channel=_Channel(),
+            response=SimpleNamespace(
+                is_done=lambda: False,
+                send_modal=AsyncMock(),
+            ),
+        )
+        with (
+            patch.object(main.bot, "customizations", None),
+            patch("theia.bot._require_login", new=AsyncMock(return_value=True)),
+        ):
+            await cast(Any, main.codex_btw.callback)(interaction)
+
+        interaction.response.send_modal.assert_awaited_once()
+        self.assertIsInstance(
+            interaction.response.send_modal.await_args.args[0], main._PromptModal
+        )
+
     def setUp(self) -> None:
         """Keep default-policy tests independent of a developer's .env file."""
         self._approval_environment = patch.dict(
@@ -5332,6 +5370,74 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0]["content"], response)
         self.assertNotIn("embed", calls[0])
         self.assertNotIn("view", calls[0])
+
+    async def test_generated_images_get_scoped_controls_and_download_link(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "generated.png"
+            image_path.write_bytes(b"image")
+            calls: list[dict[str, Any]] = []
+            sent_messages: list[Any] = []
+
+            async def send(**kwargs: Any) -> Any:
+                calls.append(kwargs)
+                message = _ImageMessage() if "files" in kwargs else _Message()
+                sent_messages.append(message)
+                return message
+
+            on_action = AsyncMock()
+            delivery = main._ResponseDelivery(
+                send,
+                {},
+                owner_id=7,
+                channel=_Channel(),
+                image_path_resolver=lambda _item: image_path,
+                on_image_action=on_action,
+            )
+            await delivery.on_event(
+                "item_completed",
+                {
+                    "type": "imageGeneration",
+                    "id": "image-1",
+                    "savedPath": str(image_path),
+                },
+            )
+            await delivery.finalize("Here is the image.")
+
+        image_call = next(call for call in calls if "files" in call)
+        self.assertEqual(image_call["files"][0].filename, "theia-image-1.png")
+        self.assertEqual(len(image_call["files"]), 1)
+        view = cast(_ImageMessage, sent_messages[-1]).edits[-1]["view"]
+        self.assertIsInstance(view, main._ImageResultView)
+        self.assertEqual(
+            [getattr(item, "label", None) for item in view.children],
+            ["Follow up", "Remove background", "Download image"],
+        )
+        self.assertEqual(
+            getattr(view.children[-1], "url", None),
+            "https://cdn.example/image.png",
+        )
+
+    async def test_image_follow_up_control_opens_the_shared_prompt_modal(self) -> None:
+        image_path = Path("/tmp/generated.png")
+        on_action = AsyncMock()
+        view = main._ImageResultView(
+            7,
+            (image_path,),
+            on_action=on_action,
+            channel=_Channel(),
+            download_url="https://cdn.example/image.png",
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=7),
+            response=SimpleNamespace(send_modal=AsyncMock()),
+        )
+
+        await cast(Any, view.children[0]).callback(interaction)
+
+        interaction.response.send_modal.assert_awaited_once()
+        self.assertIsInstance(
+            interaction.response.send_modal.await_args.args[0], main._PromptModal
+        )
 
     async def test_status_does_not_render_path_from_intermediate_message(self) -> None:
         message = _Message()

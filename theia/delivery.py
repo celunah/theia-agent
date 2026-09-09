@@ -5,7 +5,8 @@ import contextlib
 import io
 import time
 from collections.abc import Awaitable, Callable, Iterable
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
 import discord
 
@@ -20,9 +21,14 @@ from .core import (
     _subtext,
 )
 from .customization import CustomizationError
+from .ui import _PromptModal, _check_interaction_owner
 
 SendMessage = Callable[..., Awaitable[Any]]
 SpeakText = Callable[[str], Awaitable[None]]
+ImagePathResolver = Callable[[dict[str, Any]], Path | None]
+ImageAction = Callable[
+    [discord.Interaction, str, str, tuple[Path, ...]], Awaitable[None]
+]
 INTERMEDIATE_STATUS_LIMIT = 1990
 logger = _codex_logger()
 
@@ -172,6 +178,102 @@ class _PaginatorView(discord.ui.View):
 _reaction_paginators: dict[int, _PaginatorView] = {}
 
 
+class _ImageResultView(discord.ui.View):
+    """Owner-only controls for a generated image attachment."""
+
+    def __init__(
+        self,
+        user_id: int | None,
+        image_paths: tuple[Path, ...],
+        *,
+        on_action: ImageAction,
+        channel: Any | None = None,
+        customizer: Any | None = None,
+        guild_id: int | None = None,
+        download_url: str | None = None,
+        timeout: float = 900,
+    ) -> None:
+        super().__init__(timeout=timeout)
+        self.user_id = user_id
+        self.image_paths = image_paths
+        self.on_action = on_action
+        self.channel = channel
+        self.customizer = customizer
+        self.guild_id = guild_id
+
+        follow_up = discord.ui.Button(
+            label=_render_frontend_label(
+                customizer,
+                guild_id,
+                "label:image_follow_up",
+                "Follow up",
+            ),
+            style=discord.ButtonStyle.primary,
+        )
+        remove_background = discord.ui.Button(
+            label=_render_frontend_label(
+                customizer,
+                guild_id,
+                "label:image_remove_background",
+                "Remove background",
+            ),
+            style=discord.ButtonStyle.secondary,
+        )
+
+        async def follow_up_callback(interaction: discord.Interaction) -> None:
+            if await self.interaction_check(interaction):
+                await interaction.response.send_modal(
+                    _PromptModal(
+                        self.user_id,
+                        on_submit=self._follow_up_submit,
+                        channel=self.channel,
+                        customizer=self.customizer,
+                        title="Image follow-up",
+                        placeholder="Describe what to do with this image next.",
+                    )
+                )
+
+        async def remove_background_callback(
+            interaction: discord.Interaction,
+        ) -> None:
+            if await self.interaction_check(interaction):
+                await self.on_action(
+                    interaction,
+                    "remove_background",
+                    "",
+                    self.image_paths,
+                )
+
+        follow_up.callback = follow_up_callback
+        remove_background.callback = remove_background_callback
+        self.add_item(follow_up)
+        self.add_item(remove_background)
+        if download_url:
+            self.add_item(
+                discord.ui.Button(
+                    label=_render_frontend_label(
+                        customizer,
+                        guild_id,
+                        "label:image_download",
+                        "Download image",
+                    ),
+                    style=discord.ButtonStyle.link,
+                    url=download_url,
+                )
+            )
+
+    async def _follow_up_submit(
+        self,
+        interaction: discord.Interaction,
+        prompt: str,
+    ) -> None:
+        await self.on_action(interaction, "follow_up", prompt, self.image_paths)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Allow image controls only to the user who generated the image."""
+        return await _check_interaction_owner(interaction, self.user_id)
+
+
 async def send_paginated(
     send: SendMessage,
     response: str,
@@ -253,22 +355,56 @@ class _ResponseDelivery:
         kwargs: dict[str, Any],
         *,
         owner_id: int | None = None,
+        channel: Any | None = None,
         speak_text: SpeakText | None = None,
         customizer: Any | None = None,
         guild_id: int | None = None,
         context: dict[str, Any] | None = None,
+        image_path_resolver: ImagePathResolver | None = None,
+        on_image_action: ImageAction | None = None,
     ) -> None:
         self.send = send
         self.kwargs = kwargs
         self.owner_id = owner_id
+        self.channel = channel
         self.speak_text = speak_text
         self.customizer = customizer
         self.guild_id = guild_id
         self.context = dict(context or {})
+        self.image_path_resolver = image_path_resolver
+        self.on_image_action = on_image_action
+        self._image_paths: list[Path] = []
+        self._image_item_ids: set[str] = set()
         self.status_message: discord.Message | discord.WebhookMessage | None = None
         self.last_edit = 0.0
         self.thought_started_at: float | None = None
         self.lock = asyncio.Lock()
+
+    @property
+    def image_paths(self) -> tuple[Path, ...]:
+        """Return generated images collected during this turn."""
+        return tuple(self._image_paths)
+
+    def _remember_image(self, item: dict[str, Any]) -> None:
+        if self.image_path_resolver is None:
+            return
+        item_id = str(item.get("id") or "")
+        if item_id and item_id in self._image_item_ids:
+            return
+        try:
+            path = self.image_path_resolver(item)
+        except (OSError, TypeError, ValueError) as exc:
+            logger.info(
+                "Could not prepare a generated image for Discord (error=%s)",
+                type(exc).__name__,
+            )
+            return
+        if path is None:
+            return
+        if item_id:
+            self._image_item_ids.add(item_id)
+        if path not in self._image_paths:
+            self._image_paths.append(path)
 
     async def start(self) -> None:
         """Reserve the delivery lifecycle hook for future initial-status behavior."""
@@ -304,6 +440,8 @@ class _ResponseDelivery:
                     await self._set_status("Thinking", "Thinking")
                 return
             if event == "item_completed":
+                if str(payload.get("type") or "").casefold() == "imagegeneration":
+                    self._remember_image(payload)
                 if _is_tool_item(payload):
                     await self._set_status("Thinking", "Thinking")
                 elif (
@@ -406,6 +544,8 @@ class _ResponseDelivery:
         failed: bool = False,
         error_reason: str | None = None,
         speech: Iterable[AudioOutput] = (),
+        image_paths: Iterable[Path] = (),
+        on_image_action: ImageAction | None = None,
     ) -> None:
         """Replace progress status with a safe error or paginated final response."""
         async with self.lock:
@@ -476,6 +616,84 @@ class _ResponseDelivery:
             guild_id=self.guild_id,
             **self.kwargs,
         )
+        paths = tuple(
+            dict.fromkeys(
+                path
+                for path in (image_paths or self.image_paths)
+                if isinstance(path, Path)
+            )
+        )
+        if paths:
+            await self._send_images(
+                paths,
+                on_image_action=on_image_action or self.on_image_action,
+            )
+
+    async def _send_images(
+        self,
+        image_paths: tuple[Path, ...],
+        *,
+        on_image_action: ImageAction | None,
+    ) -> None:
+        """Send generated image files and attach their follow-up controls."""
+        files: list[discord.File] = []
+        try:
+            for index, path in enumerate(image_paths[:10], start=1):
+                suffix = path.suffix.casefold()
+                if not suffix or len(suffix) > 12 or not suffix[1:].isalnum():
+                    suffix = ".png"
+                files.append(
+                    discord.File(
+                        str(path),
+                        filename=f"theia-image-{index}{suffix}",
+                    )
+                )
+            message = await self.send(
+                files=files,
+                allowed_mentions=discord.AllowedMentions.none(),
+                **self.kwargs,
+            )
+        except (discord.DiscordException, OSError, TypeError) as exc:
+            logger.info(
+                "Could not deliver a generated image to Discord (error=%s)",
+                type(exc).__name__,
+            )
+            return
+        finally:
+            for file in files:
+                file.close()
+
+        if on_image_action is None:
+            return
+        attachments = getattr(message, "attachments", ())
+        download_url = next(
+            (
+                str(getattr(attachment, "url", ""))
+                for attachment in attachments
+                if getattr(attachment, "url", None)
+            ),
+            None,
+        )
+        view = _ImageResultView(
+            self.owner_id,
+            image_paths,
+            on_action=on_image_action,
+            channel=self.channel,
+            customizer=self.customizer,
+            guild_id=self.guild_id,
+            download_url=download_url,
+        )
+        edit = getattr(message, "edit", None)
+        if not callable(edit):
+            return
+        try:
+            edit_async = cast(Callable[..., Awaitable[Any]], edit)
+            await edit_async(view=view)
+        except (discord.DiscordException, TypeError) as exc:
+            logger.info(
+                "Could not attach generated image controls (error=%s)",
+                type(exc).__name__,
+            )
 
 
 async def send_response(send: SendMessage, response: str, **kwargs: Any) -> None:

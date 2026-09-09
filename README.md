@@ -24,13 +24,16 @@ threads, and voice.
 
 ```text
 /login  /about  /usage  /debug  /credits  /model  /mode
-/approve  /deny  /stop  /undo  /btw
+/approve  /deny  /stop  /undo  /btw [prompt] [file]
 /skill  /personality  /customize  /restart
 ```
 
 `/debug`, `/restart`, and `/customize` are for administrators. `/debug` shows a
 sanitized live view of Theia's runtime while it is open. The full capability
 inventory is in [`THEIA_FEATURES.md`](THEIA_FEATURES.md).
+
+Leave the `/btw` prompt blank to enter it in a Discord modal. Generated images
+are posted as attachments with owner-only follow-up controls.
 
 ## Setup
 

@@ -14,6 +14,8 @@ from .core import (
     _truncate,
 )
 
+PromptSubmit = Callable[[discord.Interaction, str], Awaitable[None]]
+
 
 async def _check_interaction_owner(
     interaction: discord.Interaction, user_id: int | None
@@ -123,6 +125,50 @@ class _DebugView(discord.ui.View):
             if isinstance(child, discord.ui.Button):
                 child.disabled = True
         self.stop()
+
+
+class _PromptModal(discord.ui.Modal):
+    """Collect one normal-language request for a follow-up interaction."""
+
+    def __init__(
+        self,
+        user_id: int | None,
+        *,
+        on_submit: PromptSubmit,
+        channel: Any | None = None,
+        customizer: Any | None = None,
+        title: str = "Follow up",
+        placeholder: str = "Tell Codex what to do next.",
+    ) -> None:
+        guild_id = getattr(getattr(channel, "guild", None), "id", None)
+        modal_title = _render_frontend_label(
+            customizer,
+            guild_id,
+            "label:input_modal_title",
+            title,
+        )
+        super().__init__(title=_truncate(modal_title, 45))
+        self.user_id = user_id
+        self.on_prompt_submit = on_submit
+        self.prompt = discord.ui.TextInput(
+            label=_render_frontend_label(
+                customizer,
+                guild_id,
+                "label:text_input_label",
+                "Request",
+            ),
+            placeholder=_truncate(placeholder, 100),
+            style=discord.TextStyle.paragraph,
+            required=True,
+            max_length=4000,
+        )
+        self.add_item(self.prompt)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        """Pass the owner's submitted request to the owning interaction flow."""
+        if not await _check_interaction_owner(interaction, self.user_id):
+            return
+        await self.on_prompt_submit(interaction, str(self.prompt))
 
 
 class _JsonModal(discord.ui.Modal):

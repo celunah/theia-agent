@@ -1,3 +1,4 @@
+import { writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 type JsonObject = Record<string, unknown>;
@@ -13,12 +14,14 @@ interface ActiveTurn {
   threadId: string;
   turnId: string;
   prompt: string;
+  cwd: string;
 }
 
 const scenario = (process.env.FAKE_APP_SERVER_SCENARIO || "").toLowerCase();
 let nextThreadId = 1;
 let nextTurnId = 1;
 const activeTurns = new Map<string, ActiveTurn>();
+const threadCwds = new Map<string, string>();
 const threadTotalTokens = new Map<
   string,
   { inputTokens: number; outputTokens: number; totalTokens: number }
@@ -236,6 +239,29 @@ function finishNormalTurn(turn: ActiveTurn): void {
   if (scenarioIs("intermediate", "preamble-and-intermediate")) {
     emitCommentary(turn, "Working through the request.", "intermediate");
   }
+  if (scenarioIs("image")) {
+    const savedPath = `${turn.cwd}/theia-generated-image.png`;
+    writeFileSync(savedPath, "fake image bytes");
+    const item = {
+      type: "imageGeneration",
+      id: `image-${turn.turnId}`,
+      result: "generated",
+      status: "completed",
+      savedPath,
+      revisedPrompt: null,
+      failure: null,
+    };
+    notify("item/started", {
+      threadId: turn.threadId,
+      turnId: turn.turnId,
+      item,
+    });
+    notify("item/completed", {
+      threadId: turn.threadId,
+      turnId: turn.turnId,
+      item,
+    });
+  }
   streamTurn(turn, responseText(turn), scenarioIs("malformed-stream"));
 }
 
@@ -245,6 +271,7 @@ function startTurn(request: RpcRequest): void {
     threadId,
     turnId: `turn-${nextTurnId++}`,
     prompt: inputPrompt(request.params),
+    cwd: threadCwds.get(threadId) || process.cwd(),
   };
   activeTurns.set(turn.turnId, turn);
   respond(request, { turn: { id: turn.turnId } });
@@ -409,12 +436,14 @@ function handleRequest(request: RpcRequest): void {
       return;
     case "thread/start": {
       const threadId = `thread-${nextThreadId++}`;
+      threadCwds.set(threadId, stringParam(params, "cwd"));
       respond(request, { thread: { id: threadId } });
       notify("thread/started", { thread: { id: threadId }, threadId });
       return;
     }
     case "thread/resume": {
       const threadId = stringParam(params, "threadId") || "thread-missing";
+      threadCwds.set(threadId, stringParam(params, "cwd"));
       respond(request, { thread: { id: threadId } });
       notify("thread/started", { thread: { id: threadId }, threadId });
       return;
