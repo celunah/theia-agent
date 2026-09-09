@@ -613,6 +613,7 @@ class CodexAppServer:
         self._audio = OpenAICompatibleAudio.from_environment()
         self._hermes_memory_root = self._codex_home / "memories" / "hermes"
         self._attachment_root = self._codex_home / "attachments"
+        self._generated_image_root = self._codex_home / "generated_images"
         self._memory_roots = _configured_paths(
             "CODEX_MEMORY_ROOTS",
             (
@@ -647,6 +648,12 @@ class CodexAppServer:
                     *workspace_skill_roots,
                 )
             )
+        )
+        # Codex stores native image-generation artifacts here. Keep this as a
+        # delivery-only root rather than exposing the private directory to
+        # ordinary tool authorization.
+        self._image_artifact_roots = tuple(
+            dict.fromkeys((*self._shared_workspace_roots, self._generated_image_root))
         )
         self._safe_workspace_roots = tuple(
             dict.fromkeys(
@@ -4751,7 +4758,7 @@ class CodexAppServer:
             if (
                 not resolved.is_file()
                 or resolved.suffix.casefold() not in IMAGE_SUFFIXES
-                or not _path_is_under(resolved, self._shared_workspace_roots)
+                or not _path_is_under(resolved, self._image_artifact_roots)
                 or resolved.stat().st_size > MAX_ATTACHMENT_BYTES
             ):
                 return None

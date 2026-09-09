@@ -1,5 +1,6 @@
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
+import { dirname, join } from "node:path";
 
 type JsonObject = Record<string, unknown>;
 type RpcId = number | string;
@@ -240,7 +241,13 @@ function finishNormalTurn(turn: ActiveTurn): void {
     emitCommentary(turn, "Working through the request.", "intermediate");
   }
   if (scenarioIs("image")) {
-    const savedPath = `${turn.cwd}/theia-generated-image.png`;
+    const savedPath = join(
+      process.env.CODEX_HOME || turn.cwd,
+      "generated_images",
+      turn.threadId,
+      "theia-generated-image.png",
+    );
+    mkdirSync(dirname(savedPath), { recursive: true });
     writeFileSync(savedPath, "fake image bytes");
     const item = {
       type: "imageGeneration",

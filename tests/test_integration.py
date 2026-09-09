@@ -272,6 +272,7 @@ class TestLocalCodexBoundary(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(artifact)
         assert artifact is not None
         self.assertTrue(artifact.is_file())
+        self.assertTrue(artifact.is_relative_to(server._generated_image_root))
         self.assertIsNone(
             server.image_artifact_path(
                 {
