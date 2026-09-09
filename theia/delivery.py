@@ -26,9 +26,7 @@ from .ui import _PromptModal, _check_interaction_owner
 SendMessage = Callable[..., Awaitable[Any]]
 SpeakText = Callable[[str], Awaitable[None]]
 ImagePathResolver = Callable[[dict[str, Any]], Path | None]
-ImageAction = Callable[
-    [discord.Interaction, str, str, tuple[Path, ...]], Awaitable[None]
-]
+ImageAction = Callable[[discord.Interaction, str, tuple[Path, ...]], Awaitable[None]]
 INTERMEDIATE_STATUS_LIMIT = 1990
 logger = _codex_logger()
 
@@ -190,7 +188,6 @@ class _ImageResultView(discord.ui.View):
         channel: Any | None = None,
         customizer: Any | None = None,
         guild_id: int | None = None,
-        download_url: str | None = None,
         timeout: float = 900,
     ) -> None:
         super().__init__(timeout=timeout)
@@ -210,15 +207,6 @@ class _ImageResultView(discord.ui.View):
             ),
             style=discord.ButtonStyle.primary,
         )
-        remove_background = discord.ui.Button(
-            label=_render_frontend_label(
-                customizer,
-                guild_id,
-                "label:image_remove_background",
-                "Remove background",
-            ),
-            style=discord.ButtonStyle.secondary,
-        )
 
         async def follow_up_callback(interaction: discord.Interaction) -> None:
             if await self.interaction_check(interaction):
@@ -233,41 +221,15 @@ class _ImageResultView(discord.ui.View):
                     )
                 )
 
-        async def remove_background_callback(
-            interaction: discord.Interaction,
-        ) -> None:
-            if await self.interaction_check(interaction):
-                await self.on_action(
-                    interaction,
-                    "remove_background",
-                    "",
-                    self.image_paths,
-                )
-
         follow_up.callback = follow_up_callback
-        remove_background.callback = remove_background_callback
         self.add_item(follow_up)
-        self.add_item(remove_background)
-        if download_url:
-            self.add_item(
-                discord.ui.Button(
-                    label=_render_frontend_label(
-                        customizer,
-                        guild_id,
-                        "label:image_download",
-                        "Download image",
-                    ),
-                    style=discord.ButtonStyle.link,
-                    url=download_url,
-                )
-            )
 
     async def _follow_up_submit(
         self,
         interaction: discord.Interaction,
         prompt: str,
     ) -> None:
-        await self.on_action(interaction, "follow_up", prompt, self.image_paths)
+        await self.on_action(interaction, prompt, self.image_paths)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """Allow image controls only to the user who generated the image."""
@@ -665,15 +627,6 @@ class _ResponseDelivery:
 
         if on_image_action is None:
             return
-        attachments = getattr(message, "attachments", ())
-        download_url = next(
-            (
-                str(getattr(attachment, "url", ""))
-                for attachment in attachments
-                if getattr(attachment, "url", None)
-            ),
-            None,
-        )
         view = _ImageResultView(
             self.owner_id,
             image_paths,
@@ -681,7 +634,6 @@ class _ResponseDelivery:
             channel=self.channel,
             customizer=self.customizer,
             guild_id=self.guild_id,
-            download_url=download_url,
         )
         edit = getattr(message, "edit", None)
         if not callable(edit):

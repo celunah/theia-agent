@@ -98,8 +98,6 @@ LABEL_TARGETS = (
     "debug_live_footer",
     "debug_stop_updates",
     "image_follow_up",
-    "image_remove_background",
-    "image_download",
 )
 
 ELEMENTS = ("title", "content", "color", "label")

@@ -1115,7 +1115,7 @@ class CommandSurfaceTests(unittest.TestCase):
                     "debug_live_footer",
                     "debug_stop_updates",
                 ),
-                ("image_follow_up", "image_remove_background", "image_download"),
+                ("image_follow_up",),
             )
             for name in group
         }
@@ -5371,7 +5371,7 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("embed", calls[0])
         self.assertNotIn("view", calls[0])
 
-    async def test_generated_images_get_scoped_controls_and_download_link(self) -> None:
+    async def test_generated_images_get_only_a_follow_up_control(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             image_path = Path(directory) / "generated.png"
             image_path.write_bytes(b"image")
@@ -5410,11 +5410,7 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(view, main._ImageResultView)
         self.assertEqual(
             [getattr(item, "label", None) for item in view.children],
-            ["Follow up", "Remove background", "Download image"],
-        )
-        self.assertEqual(
-            getattr(view.children[-1], "url", None),
-            "https://cdn.example/image.png",
+            ["Follow up"],
         )
 
     async def test_image_follow_up_control_opens_the_shared_prompt_modal(self) -> None:
@@ -5425,7 +5421,6 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
             (image_path,),
             on_action=on_action,
             channel=_Channel(),
-            download_url="https://cdn.example/image.png",
         )
         interaction = SimpleNamespace(
             user=SimpleNamespace(id=7),

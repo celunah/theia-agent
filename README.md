@@ -33,7 +33,7 @@ sanitized live view of Theia's runtime while it is open. The full capability
 inventory is in [`THEIA_FEATURES.md`](THEIA_FEATURES.md).
 
 Leave the `/btw` prompt blank to enter it in a Discord modal. Generated images
-are posted as attachments with owner-only follow-up controls.
+are posted as attachments with an owner-only `Follow up` control.
 
 ## Setup
 

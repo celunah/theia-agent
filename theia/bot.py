@@ -783,10 +783,9 @@ async def handle_request(
                 error_reason=error_reason if failed else None,
                 speech=speech,
                 image_paths=delivery.image_paths,
-                on_image_action=lambda image_interaction, action, action_prompt, paths: (
-                    _run_image_action(
+                on_image_action=lambda image_interaction, action_prompt, paths: (
+                    _run_image_follow_up(
                         image_interaction,
-                        action,
                         action_prompt,
                         paths,
                         channel=delivery.channel,
@@ -2593,9 +2592,8 @@ async def _run_btw_request(
             await _send_command_failure(interaction, "Request unavailable", exc)
 
 
-async def _run_image_action(
+async def _run_image_follow_up(
     interaction: discord.Interaction,
-    action: str,
     prompt: str,
     image_paths: tuple[Path, ...],
     *,
@@ -2606,9 +2604,8 @@ async def _run_image_action(
         return
     await interaction.response.defer()
     bot.schedule_request(
-        _process_image_action(
+        _process_image_follow_up(
             interaction,
-            action,
             prompt,
             image_paths,
             channel=channel,
@@ -2616,9 +2613,8 @@ async def _run_image_action(
     )
 
 
-async def _process_image_action(
+async def _process_image_follow_up(
     interaction: discord.Interaction,
-    action: str,
     prompt: str,
     image_paths: tuple[Path, ...],
     *,
@@ -2629,10 +2625,6 @@ async def _process_image_action(
     user_only = _is_user_only_install(interaction)
     request_sender = _interaction_request_sender(interaction)
     request_prompt = prompt.strip()
-    if action == "remove_background":
-        request_prompt = (
-            "Remove the background from the attached image and return the edited image."
-        )
     if not request_prompt:
         request_prompt = "Continue working with the attached generated image."
     key = session_key(request_channel, interaction.user.id)
