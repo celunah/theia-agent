@@ -11,6 +11,13 @@
   boundary with direct provider calls or expose raw protocol payloads to Discord.
 - Keep the Python target at 3.10 syntax and preserve compatibility through 3.14.
 
+## Source file size
+
+- Every Python source file, including tests and scripts, must remain at or
+  below 50 KB (51,200 bytes). Split larger files into focused modules or
+  subpackages before handoff; do not work around the limit by excluding the
+  file from validation.
+
 ## Behavioral invariants
 
 - Keep authentication private to Theia's runtime home. Reuse a valid Theia

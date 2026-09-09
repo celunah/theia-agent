@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shlex
@@ -352,9 +353,16 @@ class TestLocalCodexBoundary(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(params_error["id"], 2)
             self.assertEqual(params_error["error"]["code"], -32602)
         finally:
-            if process.returncode is None:
-                process.kill()
-                await asyncio.wait_for(process.wait(), timeout=3)
+            if process.stdin is not None and not process.stdin.is_closing():
+                process.stdin.close()
+            try:
+                await asyncio.wait_for(process.communicate(), timeout=3)
+            except asyncio.TimeoutError:
+                if process.returncode is None:
+                    with contextlib.suppress(ProcessLookupError):
+                        process.kill()
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(process.communicate(), timeout=3)
 
     async def test_rate_limits_and_theia_usage_are_returned(self) -> None:
         """Verify limits and Theia-local usage cross the same request boundary."""

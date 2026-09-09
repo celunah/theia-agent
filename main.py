@@ -2,15 +2,19 @@
 
 import os
 
-from theia.app_server import (
+from theia.server.core import (
     CodexAppServer,
     CodexAppServerError,
+)
+from theia.server.policy import (
     CODEX_STDIO_LIMIT_ENV,
     DEFAULT_CODEX_STDIO_LIMIT,
     MAX_CODEX_STDIO_LIMIT,
     MIN_CODEX_STDIO_LIMIT,
     SESSION_ARCHIVE_AFTER,
     SESSION_DELETE_AFTER,
+)
+from theia.core import (
     _PendingApproval,
     _MoodState,
     _Session,
@@ -23,7 +27,7 @@ from theia.audio import (
     OpenAICompatibleAudio,
     TTSConfig,
 )
-from theia.bot import (
+from theia.bot.core import (
     CodexBot,
     TheiaBot,
     _about_embed,
@@ -42,9 +46,7 @@ from theia.bot import (
     _personality_summary_embed,
     _restart_in_place,
     _should_respond_to_message,
-    _thread_name,
     _typing_indicator,
-    _user_requested_thread,
     _usage_embed,
     bot,
     codex_approve,
@@ -71,6 +73,10 @@ from theia.bot import (
     personality_autocomplete,
     session_key,
     skill_autocomplete,
+)
+from theia.server.threads import (
+    thread_name as _thread_name,
+    user_requested_thread as _user_requested_thread,
 )
 from theia.core import (
     ADAPTIVE_REASONING_ENV,

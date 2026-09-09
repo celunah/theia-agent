@@ -206,6 +206,7 @@ class _RichContext:
     prompt: str
     channel_context: str | None
     last_seen: float
+    last_seen_sequence: int = 0
     recent: deque[str] = field(default_factory=lambda: deque(maxlen=4))
 
 
@@ -306,6 +307,7 @@ class RichPresenceManager:
         self._contexts: dict[str, _RichContext] = {}
         self._active_tasks: dict[str, _RichTask] = {}
         self._sequence = 0
+        self._context_sequence = 0
         self._current_spec: _RichActivity | None = None
         self._current_activity: discord.BaseActivity | None = None
         self._current_source: str | None = None
@@ -402,6 +404,8 @@ class RichPresenceManager:
                     _truncate(channel_context, 1800) if channel_context else None
                 )
                 context.last_seen = now
+            self._context_sequence += 1
+            context.last_seen_sequence = self._context_sequence
             self._sequence += 1
             task = _RichTask(
                 request_id=request_id,
@@ -462,6 +466,8 @@ class RichPresenceManager:
             context = self._contexts[task.session_key]
             context.recent.append(self._completed_context(task, response))
             context.last_seen = self._clock()
+            self._context_sequence += 1
+            context.last_seen_sequence = self._context_sequence
             if not self._active_tasks:
                 publish_next = True
                 next_spec = self._last_idle_spec
@@ -641,7 +647,9 @@ class RichPresenceManager:
 
     def _latest_context_locked(self) -> _RichContext | None:
         return max(
-            self._contexts.values(), key=lambda context: context.last_seen, default=None
+            self._contexts.values(),
+            key=lambda context: (context.last_seen, context.last_seen_sequence),
+            default=None,
         )
 
     @classmethod
