@@ -308,7 +308,11 @@ async def codex_mode(
             return
         if not bot.codex.voice_mode_available or not bot.voice.available:
             reason = (
-                "Voice mode requires configured STT_BASE_URL and TTS_BASE_URL."
+                (
+                    "Voice mode requires configured STT_BASE_URL and TTS_BASE_URL."
+                    if bot.codex.custom_audio_configured
+                    else "Codex Realtime voice is unavailable in this installation."
+                )
                 if not bot.codex.voice_mode_available
                 else "Voice receive support is unavailable in this installation."
             )

@@ -84,7 +84,19 @@ class TheiaBot(commands.Bot):
         self.voice = VoiceModeManager(
             transcribe=self.codex.transcribe_audio,
             synthesize=self.codex.synthesize_response,
+            realtime_available=lambda: self.codex.voice_provider == "codex-realtime",
+            realtime_start=self.codex.start_realtime_voice,
+            realtime_audio=self.codex.append_realtime_audio,
+            realtime_speech=self.codex.append_realtime_speech,
+            realtime_stop=self.codex.stop_realtime_voice,
+            realtime_authorized=self._voice_session_allows_tools,
         )
+
+    def _voice_session_allows_tools(self, session: Any) -> bool:
+        """Recheck voice tool access through the current Discord member."""
+        from .support import _voice_session_allows_tools
+
+        return _voice_session_allows_tools(session)
 
     def schedule_request(self, coroutine: Coroutine[Any, Any, None]) -> None:
         """Run one agentic request independently of its Discord event callback."""

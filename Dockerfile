@@ -15,7 +15,7 @@ RUN git rev-parse --short=7 HEAD > /theia-build-revision
 
 FROM python:3.12-slim-bookworm
 
-ARG THEIA_VERSION=1.0.2
+ARG THEIA_VERSION=1.1.0
 
 LABEL org.opencontainers.image.version="${THEIA_VERSION}"
 

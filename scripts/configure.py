@@ -45,6 +45,8 @@ class ConfigurationValues:
     tts_model: str = "tts-1"
     tts_voice: str = "alloy"
     tts_format: str = "mp3"
+    realtime_model: str = ""
+    realtime_voice: str = ""
 
     def as_environment(self) -> dict[str, str]:
         """Return values using Theia's supported environment variable names."""
@@ -57,14 +59,26 @@ class ConfigurationValues:
                 {
                     "STT_BASE_URL": self.stt_base_url,
                     "STT_TOKEN": self.stt_token,
-                    "STT_MODEL": self.stt_model,
                     "TTS_BASE_URL": self.tts_base_url,
                     "TTS_TOKEN": self.tts_token,
-                    "TTS_MODEL": self.tts_model,
-                    "TTS_VOICE": self.tts_voice,
-                    "TTS_FORMAT": self.tts_format,
                 }
             )
+            if self.stt_base_url and self.tts_base_url:
+                values.update(
+                    {
+                        "STT_MODEL": self.stt_model,
+                        "TTS_MODEL": self.tts_model,
+                        "TTS_VOICE": self.tts_voice,
+                        "TTS_FORMAT": self.tts_format,
+                    }
+                )
+            else:
+                values.update(
+                    {
+                        "THEIA_REALTIME_MODEL": self.realtime_model,
+                        "THEIA_REALTIME_VOICE": self.realtime_voice,
+                    }
+                )
         return values
 
 
@@ -125,6 +139,8 @@ def validate_configuration(
     tts_model: str = "",
     tts_voice: str = "",
     tts_format: str = "",
+    realtime_model: str = "",
+    realtime_voice: str = "",
 ) -> ConfigurationValues:
     """Validate setup input without logging or displaying credential values."""
     selected_mode = mode.strip().casefold()
@@ -137,17 +153,27 @@ def validate_configuration(
     )
     if selected_mode == TEXT_MODE:
         return ConfigurationValues(discord_token=token, mode=selected_mode)
+    stt_value = stt_base_url.strip()
+    tts_value = tts_base_url.strip()
+    if bool(stt_value) != bool(tts_value):
+        raise ConfigurationError(
+            "Provide both audio service URLs, or leave both blank for Codex Realtime."
+        )
+    realtime_model_value = _optional_parameter(realtime_model, "The Realtime model")
+    realtime_voice_value = _optional_parameter(realtime_voice, "The Realtime voice")
     return ConfigurationValues(
         discord_token=token,
         mode=selected_mode,
-        stt_base_url=_url(stt_base_url, "The STT URL"),
+        stt_base_url=_url(stt_value, "The STT URL") if stt_value else "",
         stt_token=_optional_token(stt_token, "The STT token"),
         stt_model=_parameter(stt_model, "The STT model", "whisper-1"),
-        tts_base_url=_url(tts_base_url, "The TTS URL"),
+        tts_base_url=_url(tts_value, "The TTS URL") if tts_value else "",
         tts_token=_optional_token(tts_token, "The TTS token"),
         tts_model=_parameter(tts_model, "The TTS model", "tts-1"),
         tts_voice=_parameter(tts_voice, "The TTS voice", "alloy"),
         tts_format=_tts_format(tts_format),
+        realtime_model=realtime_model_value,
+        realtime_voice=realtime_voice_value,
     )
 
 
@@ -257,7 +283,7 @@ def _choose_mode(
 ) -> str:
     output_fn("Choose Theia's default interaction mode:")
     output_fn("  1. Text (Discord messages only)")
-    output_fn("  2. Voice (Discord plus custom STT and TTS)")
+    output_fn("  2. Voice (Discord plus Codex Realtime or custom STT/TTS)")
     while True:
         choice = input_fn("Mode [1/text]: ").strip().casefold()
         if choice in {"", "1", TEXT_MODE}:
@@ -281,14 +307,28 @@ def collect_configuration(
     token = read_secret("Discord bot token (input hidden): ")
     if mode == TEXT_MODE:
         return validate_configuration(discord_token=token, mode=mode)
-    stt_url = read("STT URL: ")
-    tts_url = read("TTS URL: ")
-    stt_token = read_secret("STT token (blank if not required): ")
-    tts_token = read_secret("TTS token (blank if not required): ")
-    stt_model = read("STT model [whisper-1]: ")
-    tts_model = read("TTS model [tts-1]: ")
-    tts_voice = read("TTS voice [alloy]: ")
-    tts_format = read("TTS format [mp3]: ")
+    stt_url = read("STT URL (blank for Codex Realtime): ")
+    tts_url = read("TTS URL (blank for Codex Realtime): ")
+    stt_token = (
+        read_secret("STT token (blank if not required): ") if stt_url.strip() else ""
+    )
+    tts_token = (
+        read_secret("TTS token (blank if not required): ") if tts_url.strip() else ""
+    )
+    if stt_url.strip():
+        stt_model = read("STT model [whisper-1]: ")
+        tts_model = read("TTS model [tts-1]: ")
+        tts_voice = read("TTS voice [alloy]: ")
+        tts_format = read("TTS format [mp3]: ")
+        realtime_model = ""
+        realtime_voice = ""
+    else:
+        stt_model = ""
+        tts_model = ""
+        tts_voice = ""
+        tts_format = ""
+        realtime_model = read("Realtime model (blank for Codex default): ")
+        realtime_voice = read("Realtime voice (blank for Codex default): ")
     return validate_configuration(
         discord_token=token,
         mode=mode,
@@ -300,6 +340,8 @@ def collect_configuration(
         tts_model=tts_model,
         tts_voice=tts_voice,
         tts_format=tts_format,
+        realtime_model=realtime_model,
+        realtime_voice=realtime_voice,
     )
 
 

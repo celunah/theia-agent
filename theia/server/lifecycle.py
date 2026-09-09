@@ -105,6 +105,7 @@ class CodexLifecycleMixin:
                 },
             )
             await self._send({"method": "initialized", "params": {}})
+            await self._refresh_realtime_capability()
             await self._configure_shared_roots()
             await self.refresh_account()
             if (
@@ -230,6 +231,7 @@ class CodexLifecycleMixin:
                 await self._skills_refresh_task
             self._skills_refresh_task = None
         self._clear_all_pending()
+        await self._close_realtime_sessions()
         for task in self._server_tasks:
             task.cancel()
         self._server_tasks.clear()

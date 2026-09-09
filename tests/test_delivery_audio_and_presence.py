@@ -1,6 +1,8 @@
 # pylint: disable=wildcard-import,unused-wildcard-import,undefined-variable,duplicate-code
 from tests.test_support import *
 
+from theia.voice import _RealtimePCMSource, _normalize_realtime_pcm
+
 
 class AsyncBehaviorTests(AsyncBehaviorTestBase):
     async def test_multiple_choice_request_uses_embed_and_buttons(self) -> None:
@@ -551,6 +553,82 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         self.assertIsNone(manager.current_line)
         manager._current_activity = discord.CustomActivity("watching the moon")
         self.assertEqual(manager.current_line, "watching the moon")
+
+
+class RealtimeVoiceTests(unittest.IsolatedAsyncioTestCase):
+    def test_realtime_output_is_normalized_to_discord_pcm(self) -> None:
+        raw = b"\x64\x00" * 480
+        normalized = _normalize_realtime_pcm(
+            raw,
+            sample_rate=24000,
+            num_channels=1,
+        )
+        self.assertEqual(len(normalized), main.VOICE_FRAME_BYTES)
+
+        source = _RealtimePCMSource()
+        source.feed(normalized)
+        source.finish()
+        self.assertEqual(len(source.read()), main.VOICE_FRAME_BYTES)
+        self.assertEqual(source.read(), b"")
+        source.cleanup()
+
+    async def test_realtime_voice_manager_streams_input_and_output(self) -> None:
+        client = SimpleNamespace(channel=SimpleNamespace(id=8))
+        client.listen = lambda sink: setattr(client, "sink", sink)
+        client.play = lambda source, after: setattr(client, "playing", (source, after))
+        client.stop_playing = lambda: None
+        client.disconnect = AsyncMock()
+        guild = SimpleNamespace(id=42, voice_client=client)
+        voice_channel = SimpleNamespace(id=8, guild=guild)
+        text_channel = SimpleNamespace(send=AsyncMock(), guild=guild)
+        realtime_start = AsyncMock()
+        realtime_audio = AsyncMock()
+        realtime_speech = AsyncMock()
+        realtime_stop = AsyncMock(return_value=True)
+        manager = main.VoiceModeManager(
+            transcribe=AsyncMock(),
+            synthesize=AsyncMock(return_value=()),
+            realtime_available=lambda: True,
+            realtime_start=realtime_start,
+            realtime_audio=realtime_audio,
+            realtime_speech=realtime_speech,
+            realtime_stop=realtime_stop,
+            realtime_authorized=lambda _session: True,
+        )
+
+        await manager.start(
+            session_key="voice",
+            user_id=7,
+            voice_channel=cast(Any, voice_channel),
+            text_channel=text_channel,
+            allow_tools=True,
+            on_transcript=AsyncMock(),
+        )
+        realtime_start.assert_awaited_once()
+        manager._on_audio_packet(42, 8, 7, b"input")
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        realtime_audio.assert_awaited_once_with("voice", b"input", 48000, 2)
+
+        await manager._on_realtime_event(
+            "voice",
+            "output_audio",
+            {
+                "data": b"\x00" * 3840,
+                "sample_rate": 48000,
+                "num_channels": 2,
+            },
+        )
+        self.assertIn("playing", vars(client))
+        await manager._on_realtime_event(
+            "voice",
+            "transcript_done",
+            {"role": "assistant", "text": "spoken response"},
+        )
+        await manager.speak_text("voice", "text response")
+        realtime_speech.assert_awaited_once_with("voice", "text response")
+        await manager.stop("voice")
+        realtime_stop.assert_awaited_once_with("voice")
 
 
 class _AudioHTTPResponse:

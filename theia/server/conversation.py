@@ -62,8 +62,12 @@ class CodexConversationMixin:
 
     @property
     def voice_mode_available(self) -> bool:
-        """Whether both configured audio services can support voice mode."""
-        return self._audio.transcription.enabled and self._audio.tts.enabled
+        """Whether one complete voice provider can support voice mode."""
+        if self._audio.transcription.enabled and self._audio.tts.enabled:
+            return True
+        if self.custom_audio_configured:
+            return False
+        return self.realtime_voice_available
 
     def mode(self, session_key: str) -> str:
         """Return the text or voice mode selected for a Discord session."""
@@ -75,9 +79,12 @@ class CodexConversationMixin:
         if selected not in {TEXT_MODE, VOICE_MODE}:
             raise CodexAppServerError("Mode must be `voice` or `text`.")
         if selected == VOICE_MODE and not self.voice_mode_available:
-            raise CodexAppServerError(
+            reason = (
                 "Voice mode requires both STT_BASE_URL and TTS_BASE_URL."
+                if self.custom_audio_configured
+                else "Codex Realtime voice is unavailable in this installation."
             )
+            raise CodexAppServerError(reason)
         session = self._session(session_key)
         assert session.lock is not None
         async with session.lock:

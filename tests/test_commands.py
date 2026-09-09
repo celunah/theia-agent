@@ -19,6 +19,54 @@ class CommandSurfaceTests(unittest.TestCase):
         self.assertEqual(server.model_name(), "gpt-5.6-luna")
         self.assertEqual(server.status("model-default")["model"], "gpt-5.6-luna")
 
+    def test_realtime_voice_is_the_default_when_custom_audio_is_absent(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "STT_BASE_URL": "",
+                "TTS_BASE_URL": "",
+                "THEIA_TRANSCRIPTION_BASE_URL": "",
+                "THEIA_TTS_BASE_URL": "",
+            },
+        ):
+            server = main.CodexAppServer()
+            server._realtime_feature_enabled = True
+
+        self.assertTrue(server.voice_mode_available)
+        self.assertEqual(server.voice_provider, "codex-realtime")
+
+    def test_custom_audio_provider_takes_precedence_over_realtime(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "STT_BASE_URL": "https://stt.example/v1",
+                "TTS_BASE_URL": "https://tts.example/v1",
+                "THEIA_TRANSCRIPTION_BASE_URL": "",
+                "THEIA_TTS_BASE_URL": "",
+            },
+        ):
+            server = main.CodexAppServer()
+            server._realtime_feature_enabled = True
+
+        self.assertTrue(server.voice_mode_available)
+        self.assertEqual(server.voice_provider, "custom")
+
+    def test_partial_custom_audio_configuration_does_not_fall_back(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "STT_BASE_URL": "https://stt.example/v1",
+                "TTS_BASE_URL": "",
+                "THEIA_TRANSCRIPTION_BASE_URL": "",
+                "THEIA_TTS_BASE_URL": "",
+            },
+        ):
+            server = main.CodexAppServer()
+            server._realtime_feature_enabled = True
+
+        self.assertFalse(server.voice_mode_available)
+        self.assertIsNone(server.voice_provider)
+
     def test_approval_level_defaults_to_high_and_accepts_configured_values(
         self,
     ) -> None:
@@ -1024,7 +1072,7 @@ class CommandSurfaceTests(unittest.TestCase):
         self.assertEqual(
             [(field.name, field.value) for field in embed.fields],
             [
-                ("Theia Agent", "1.0.2 (a1b2c3d)"),
+                ("Theia Agent", "1.1.0 (a1b2c3d)"),
                 ("Codex CLI", "0.153.0"),
                 ("Account", "@username"),
                 ("Plan", "Plus ($20/mo)"),

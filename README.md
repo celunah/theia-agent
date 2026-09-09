@@ -6,7 +6,7 @@ preferences that matter to you.
 
 ## Features
 
-- Natural text conversations with optional voice replies.
+- Natural text conversations with optional Codex Realtime or custom-provider voice.
 - Persistent conversations, attachments, memories, skills, and personality
   character cards.
 - Personality profiles can be selected for yourself, the current server, or
@@ -50,7 +50,8 @@ uv run python main.py
 ```
 
 The setup wizard creates the local `.env` file and can configure text or voice
-mode. Keep `.env` private.
+mode. Voice mode uses Codex Realtime by default, or custom OpenAI-compatible
+STT/TTS services when both endpoints are configured. Keep `.env` private.
 
 To use account installation, enable User Install for the Discord application
 and use its account-install link. Install Theia to a server when you want

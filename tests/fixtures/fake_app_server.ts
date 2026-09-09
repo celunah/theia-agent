@@ -29,6 +29,8 @@ const threadTotalTokens = new Map<
 >();
 const pendingApprovals = new Map<string, ActiveTurn>();
 const pendingQuestions = new Map<string, ActiveTurn>();
+const realtimeThreads = new Set<string>();
+const realtimeResponses = new Set<string>();
 
 function scenarioIs(...names: string[]): boolean {
   return names.includes(scenario);
@@ -72,6 +74,35 @@ function failInvalid(
 
 function notify(method: string, params: JsonObject): void {
   write({ method, params });
+}
+
+function realtimeAudioData(): string {
+  return Buffer.alloc(3840).toString("base64");
+}
+
+function emitRealtimeResponse(threadId: string): void {
+  if (realtimeResponses.has(threadId)) {
+    return;
+  }
+  realtimeResponses.add(threadId);
+  notify("thread/realtime/transcript/done", {
+    threadId,
+    role: "user",
+    text: "hello from realtime",
+  });
+  notify("thread/realtime/transcript/done", {
+    threadId,
+    role: "assistant",
+    text: "realtime response",
+  });
+  notify("thread/realtime/outputAudio/delta", {
+    threadId,
+    audio: {
+      data: realtimeAudioData(),
+      sampleRate: 48000,
+      numChannels: 2,
+    },
+  });
 }
 
 function stringParam(params: JsonObject, name: string): string {
@@ -418,6 +449,18 @@ function handleRequest(request: RpcRequest): void {
     case "skills/list":
       respond(request, { data: [] });
       return;
+    case "experimentalFeature/list":
+      respond(request, {
+        data: [
+          {
+            name: "realtime_conversation",
+            enabled: !scenarioIs("realtime-disabled"),
+            defaultEnabled: false,
+            stage: "underDevelopment",
+          },
+        ],
+      });
+      return;
     case "account/read":
       respond(request, {
         account: scenarioIs("auth-failure") ? null : { type: "chatgpt" },
@@ -453,6 +496,52 @@ function handleRequest(request: RpcRequest): void {
       threadCwds.set(threadId, stringParam(params, "cwd"));
       respond(request, { thread: { id: threadId } });
       notify("thread/started", { thread: { id: threadId }, threadId });
+      return;
+    }
+    case "thread/realtime/start": {
+      const threadId = stringParam(params, "threadId") || "thread-missing";
+      if (
+        scenarioIs("realtime-configured") &&
+        (stringParam(params, "model") !== "realtime-model" ||
+          stringParam(params, "voice") !== "marin")
+      ) {
+        fail(request, -32602, "Realtime model and voice were not configured");
+        return;
+      }
+      realtimeThreads.add(threadId);
+      respond(request, {});
+      setTimeout(
+        () =>
+          notify("thread/realtime/started", {
+            threadId,
+            version: "v3",
+            realtimeSessionId: `realtime-${threadId}`,
+          }),
+        5,
+      );
+      return;
+    }
+    case "thread/realtime/appendAudio": {
+      const threadId = stringParam(params, "threadId") || "thread-missing";
+      respond(request, {});
+      if (scenarioIs("realtime")) {
+        emitRealtimeResponse(threadId);
+      }
+      return;
+    }
+    case "thread/realtime/appendSpeech": {
+      const threadId = stringParam(params, "threadId") || "thread-missing";
+      respond(request, {});
+      if (scenarioIs("realtime")) {
+        emitRealtimeResponse(threadId);
+      }
+      return;
+    }
+    case "thread/realtime/stop": {
+      const threadId = stringParam(params, "threadId") || "thread-missing";
+      realtimeThreads.delete(threadId);
+      respond(request, {});
+      notify("thread/realtime/closed", { threadId });
       return;
     }
     case "turn/start":

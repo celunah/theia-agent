@@ -117,6 +117,14 @@ class CodexNotificationMixin:
             or (thread.get("id") if isinstance(thread, dict) else "")
             or ""
         )
+        realtime_state = self._realtime_for_thread(thread_id)
+        if (
+            realtime_state is not None
+            and isinstance(method, str)
+            and method.startswith("thread/realtime/")
+        ):
+            self._handle_realtime_notification(realtime_state, method, params)
+            return
         if method == "thread/started":
             if thread_id:
                 self._set_thread_loaded(thread_id, True)

@@ -53,6 +53,7 @@ from .personality_state import CodexPersonalityStateMixin
 from .conversation import CodexConversationMixin
 from .lifecycle import CodexLifecycleMixin
 from .requests import CodexRequestMixin
+from .realtime import CodexRealtimeMixin
 from .self_improvement import CodexSelfImprovementMixin
 from .workers import CodexWorkerMixin
 
@@ -62,6 +63,7 @@ logger = _codex_logger()
 class CodexAppServer(  # pylint: disable=too-many-ancestors
     CodexStateMixin,
     CodexPersonalityStateMixin,
+    CodexRealtimeMixin,
     CodexConversationMixin,
     CodexLifecycleMixin,
     CodexRequestMixin,
@@ -99,6 +101,10 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
         self._next_request_id = 1
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._turns: dict[str, _TurnState] = {}
+        self._realtime_sessions: dict[str, Any] = {}
+        self._realtime_feature_enabled = False
+        self._realtime_model = os.getenv("THEIA_REALTIME_MODEL", "").strip()
+        self._realtime_voice = os.getenv("THEIA_REALTIME_VOICE", "").strip()
         self._models: tuple[dict[str, Any], ...] = ()
         self._models_loaded_at = 0.0
         self._provider_capabilities: dict[str, Any] | None = None
