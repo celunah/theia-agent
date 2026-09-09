@@ -6,7 +6,7 @@ import io
 import time
 from collections.abc import Awaitable, Callable, Iterable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import discord
 
@@ -30,7 +30,9 @@ from .ui import (
 SendMessage = Callable[..., Awaitable[Any]]
 SpeakText = Callable[[str], Awaitable[None]]
 ImagePathResolver = Callable[[dict[str, Any]], Path | None]
-ImageAction = Callable[[discord.Interaction, str, tuple[Path, ...]], Awaitable[None]]
+ImageAction = Callable[
+    [discord.Interaction, str, tuple[Path, ...], Any], Awaitable[None]
+]
 ViewRegistrar = Callable[[discord.ui.View, Any], Awaitable[None]]
 INTERMEDIATE_STATUS_LIMIT = 1990
 logger = _codex_logger()
@@ -212,6 +214,7 @@ class _ImageResultView(_PersistentViewMixin, discord.ui.View):
         timeout: float = 900,
         token: str | None = None,
         recovered: bool = False,
+        message_id: int | None = None,
     ) -> None:
         self._init_persistence("image", token, recovered=recovered)
         super().__init__(timeout=None if recovered else timeout)
@@ -221,6 +224,8 @@ class _ImageResultView(_PersistentViewMixin, discord.ui.View):
         self.channel = channel
         self.customizer = customizer
         self.guild_id = guild_id
+        self.message: Any | None = None
+        self.message_id = message_id
 
         follow_up = discord.ui.Button(
             label=_render_frontend_label(
@@ -261,7 +266,7 @@ class _ImageResultView(_PersistentViewMixin, discord.ui.View):
         interaction: discord.Interaction,
         prompt: str,
     ) -> None:
-        await self.on_action(interaction, prompt, self.image_paths)
+        await self.on_action(interaction, prompt, self.image_paths, self)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """Allow image controls only to the user who generated the image."""
@@ -361,6 +366,9 @@ class _ResponseDelivery:
         image_path_resolver: ImagePathResolver | None = None,
         on_image_action: ImageAction | None = None,
         on_view_created: ViewRegistrar | None = None,
+        image_message: Any | None = None,
+        image_view: _ImageResultView | None = None,
+        existing_image_paths: Iterable[Path] = (),
     ) -> None:
         self.send = send
         self.kwargs = kwargs
@@ -373,6 +381,11 @@ class _ResponseDelivery:
         self.image_path_resolver = image_path_resolver
         self.on_image_action = on_image_action
         self.on_view_created = on_view_created
+        self.image_message = image_message
+        self.image_view = image_view
+        self.existing_image_paths = tuple(
+            path for path in existing_image_paths if isinstance(path, Path)
+        )
         self._image_paths: list[Path] = []
         self._image_item_ids: set[str] = set()
         self.status_message: discord.Message | discord.WebhookMessage | None = None
@@ -547,7 +560,7 @@ class _ResponseDelivery:
         image_paths: Iterable[Path] = (),
         on_image_action: ImageAction | None = None,
     ) -> None:
-        """Replace progress status with a safe error or paginated final response."""
+        """Replace progress status with a final response or image-view update."""
         async with self.lock:
             if self.status_message is not None and self.thought_started_at is not None:
                 thought = _format_thought_duration(
@@ -590,25 +603,60 @@ class _ResponseDelivery:
                         )
                 with contextlib.suppress(discord.DiscordException, AttributeError):
                     await self.status_message.edit(content=_subtext(thought))
+        paths = tuple(
+            dict.fromkeys(
+                path
+                for path in (image_paths or self.image_paths)
+                if isinstance(path, Path)
+            )
+        )
+        action = on_image_action or self.on_image_action
         if failed:
             reason = _safe_error_reason(error_reason)
+            embed = _command_embed(
+                "Request failed",
+                f"Codex could not complete this request.\n\nReason: {reason}",
+                color=discord.Color.red(),
+                target="label:request_failed",
+                guild_id=self.guild_id,
+                customizer=self.customizer,
+                context={**self.context, "reason": reason, "status": "failed"},
+            )
+            if self.image_message is not None and await self._edit_image_message(
+                "",
+                self.existing_image_paths,
+                on_image_action=action,
+                speech=(),
+                embed=embed,
+            ):
+                return
             await self.send(
-                embed=_command_embed(
-                    "Request failed",
-                    f"Codex could not complete this request.\n\nReason: {reason}",
-                    color=discord.Color.red(),
-                    target="label:request_failed",
-                    guild_id=self.guild_id,
-                    customizer=self.customizer,
-                    context={**self.context, "reason": reason, "status": "failed"},
-                ),
+                embed=embed,
                 allowed_mentions=discord.AllowedMentions.none(),
                 **self.kwargs,
             )
             return
+        final_response = (
+            response or "Codex completed the request without a text response."
+        )
+        if self.image_message is not None and await self._edit_image_message(
+            final_response,
+            paths or self.existing_image_paths,
+            on_image_action=action,
+            speech=speech,
+        ):
+            return
+        if paths:
+            await self._send_response_with_images(
+                final_response,
+                paths,
+                speech=speech,
+                on_image_action=action,
+            )
+            return
         await send_paginated(
             self.send,
-            response or "Codex completed the request without a text response.",
+            final_response,
             title="Codex",
             owner_id=self.owner_id,
             speech=speech,
@@ -617,58 +665,21 @@ class _ResponseDelivery:
             on_view_created=self.on_view_created,
             **self.kwargs,
         )
-        paths = tuple(
-            dict.fromkeys(
-                path
-                for path in (image_paths or self.image_paths)
-                if isinstance(path, Path)
-            )
-        )
-        if paths:
-            await self._send_images(
-                paths,
-                on_image_action=on_image_action or self.on_image_action,
-                on_view_created=self.on_view_created,
-            )
 
-    async def _send_images(
+    def _new_image_view(
         self,
         image_paths: tuple[Path, ...],
-        *,
         on_image_action: ImageAction | None,
-        on_view_created: ViewRegistrar | None,
-    ) -> None:
-        """Send generated image files and attach their follow-up controls."""
-        files: list[discord.File] = []
-        try:
-            for index, path in enumerate(image_paths[:10], start=1):
-                suffix = path.suffix.casefold()
-                if not suffix or len(suffix) > 12 or not suffix[1:].isalnum():
-                    suffix = ".png"
-                files.append(
-                    discord.File(
-                        str(path),
-                        filename=f"theia-image-{index}{suffix}",
-                    )
-                )
-            message = await self.send(
-                files=files,
-                allowed_mentions=discord.AllowedMentions.none(),
-                **self.kwargs,
-            )
-        except (discord.DiscordException, OSError, TypeError) as exc:
-            logger.info(
-                "Could not deliver a generated image to Discord (error=%s)",
-                type(exc).__name__,
-            )
-            return
-        finally:
-            for file in files:
-                file.close()
-
+    ) -> _ImageResultView | None:
+        if on_image_action is None and self.image_view is not None:
+            on_image_action = self.image_view.on_action
         if on_image_action is None:
-            return
-        view = _ImageResultView(
+            return None
+        if self.image_view is not None:
+            self.image_view.image_paths = image_paths
+            self.image_view.on_action = on_image_action
+            return self.image_view
+        return _ImageResultView(
             self.owner_id,
             image_paths,
             on_action=on_image_action,
@@ -676,20 +687,146 @@ class _ResponseDelivery:
             customizer=self.customizer,
             guild_id=self.guild_id,
         )
-        edit = getattr(message, "edit", None)
-        if not callable(edit):
-            return
+
+    @staticmethod
+    def _image_file(path: Path, index: int) -> discord.File:
+        suffix = path.suffix.casefold()
+        if not suffix or len(suffix) > 12 or not suffix[1:].isalnum():
+            suffix = ".png"
+        return discord.File(str(path), filename=f"theia-image-{index}{suffix}")
+
+    @staticmethod
+    def _speech_files(speech: Iterable[AudioOutput]) -> list[discord.File]:
+        return [
+            discord.File(io.BytesIO(output.data), filename=output.filename)
+            for output in speech
+        ]
+
+    async def _send_response_with_images(
+        self,
+        response: str,
+        image_paths: tuple[Path, ...],
+        *,
+        speech: Iterable[AudioOutput],
+        on_image_action: ImageAction | None,
+    ) -> None:
+        """Send final text, generated files, and controls as one message."""
+        pages = _split_pages(response)
+        speech_outputs = tuple(speech)
+        view = self._new_image_view(image_paths, on_image_action)
+        files: list[discord.File] = [
+            self._image_file(path, index)
+            for index, path in enumerate(image_paths[:10], start=1)
+        ]
+        files.extend(self._speech_files(speech_outputs))
+        values = dict(self.kwargs)
+        values.pop("files", None)
+        values.pop("view", None)
+        values.update(
+            content=pages[0],
+            files=files,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        if view is not None:
+            values["view"] = view
         try:
-            edit_async = cast(Callable[..., Awaitable[Any]], edit)
-            await edit_async(view=view)
-            if on_view_created is not None:
-                with contextlib.suppress(Exception):
-                    await on_view_created(view, message)
-        except (discord.DiscordException, TypeError) as exc:
+            message = await self.send(**values)
+        except (discord.DiscordException, OSError, TypeError) as exc:
             logger.info(
-                "Could not attach generated image controls (error=%s)",
+                "Could not deliver a generated image with its response (error=%s)",
                 type(exc).__name__,
             )
+            await send_paginated(
+                self.send,
+                response,
+                owner_id=self.owner_id,
+                customizer=self.customizer,
+                guild_id=self.guild_id,
+                speech=speech_outputs,
+                on_view_created=self.on_view_created,
+                **self.kwargs,
+            )
+            return
+        finally:
+            for file in files:
+                file.close()
+
+        if view is not None:
+            view.message = message
+            view.message_id = getattr(message, "id", None)
+            if self.on_view_created is not None:
+                with contextlib.suppress(Exception):
+                    await self.on_view_created(view, message)
+        for page in pages[1:]:
+            await self.send(
+                content=page,
+                allowed_mentions=discord.AllowedMentions.none(),
+                **self.kwargs,
+            )
+
+    async def _edit_image_message(
+        self,
+        response: str,
+        image_paths: tuple[Path, ...],
+        *,
+        on_image_action: ImageAction | None,
+        speech: Iterable[AudioOutput],
+        embed: discord.Embed | None = None,
+    ) -> bool:
+        """Edit the original image message after a follow-up completes."""
+        if self.image_message is None:
+            return False
+        pages = _split_pages(response)
+        view = self._new_image_view(image_paths, on_image_action)
+        speech_outputs = tuple(speech)
+        files: list[discord.File] = []
+        new_images = bool(self.image_paths)
+        if new_images:
+            files.extend(
+                self._image_file(path, index)
+                for index, path in enumerate(image_paths[:10], start=1)
+            )
+        files.extend(self._speech_files(speech_outputs))
+        values = dict(self.kwargs)
+        values.pop("files", None)
+        values.pop("view", None)
+        values.update(
+            content=pages[0] or None,
+            embed=embed,
+            view=view,
+        )
+        if files:
+            attachments = (
+                []
+                if new_images
+                else list(getattr(self.image_message, "attachments", ()))
+            )
+            values["attachments"] = [*attachments, *files]
+        try:
+            await self.image_message.edit(**values)
+        except (discord.DiscordException, OSError, TypeError) as exc:
+            logger.info(
+                "Could not edit the original generated image response (error=%s)",
+                type(exc).__name__,
+            )
+            return False
+        finally:
+            for file in files:
+                file.close()
+
+        if view is not None:
+            view.message = self.image_message
+            view.message_id = getattr(self.image_message, "id", None)
+            if self.on_view_created is not None:
+                with contextlib.suppress(Exception):
+                    await self.on_view_created(view, self.image_message)
+        for page in pages[1:]:
+            await self.send(
+                content=page,
+                allowed_mentions=discord.AllowedMentions.none(),
+                **self.kwargs,
+            )
+        return True
 
 
 async def send_response(send: SendMessage, response: str, **kwargs: Any) -> None:

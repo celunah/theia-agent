@@ -5477,14 +5477,55 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
             await delivery.finalize("Here is the image.")
 
         image_call = next(call for call in calls if "files" in call)
+        self.assertEqual(image_call["content"], "Here is the image.")
         self.assertEqual(image_call["files"][0].filename, "theia-image-1.png")
         self.assertEqual(len(image_call["files"]), 1)
-        view = cast(_ImageMessage, sent_messages[-1]).edits[-1]["view"]
+        view = image_call["view"]
         self.assertIsInstance(view, main._ImageResultView)
         self.assertEqual(
             [getattr(item, "label", None) for item in view.children],
             ["Follow up"],
         )
+        self.assertFalse(cast(_ImageMessage, sent_messages[-1]).edits)
+
+    async def test_image_follow_up_edits_original_view_and_keeps_thinking_separate(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "generated.png"
+            image_path.write_bytes(b"image")
+            original = _ImageMessage()
+            status = _Message()
+            calls: list[dict[str, Any]] = []
+
+            async def send(**kwargs: Any) -> Any:
+                calls.append(kwargs)
+                return status
+
+            view = main._ImageResultView(
+                7,
+                (image_path,),
+                on_action=AsyncMock(),
+                channel=_Channel(),
+            )
+            view.message = original
+            view.message_id = original.id
+            delivery = main._ResponseDelivery(
+                send,
+                {},
+                owner_id=7,
+                image_message=original,
+                image_view=view,
+                existing_image_paths=(image_path,),
+            )
+            await delivery.on_event("item_started", {"type": "commandExecution"})
+            await delivery.finalize("The follow-up is complete.")
+
+        self.assertEqual(calls[0]["content"], "-# Thinking")
+        self.assertIsNot(cast(Any, delivery.status_message), original)
+        self.assertEqual(original.edits[-1]["content"], "The follow-up is complete.")
+        self.assertIs(original.edits[-1]["view"], view)
+        self.assertNotIn("attachments", original.edits[-1])
 
     async def test_image_follow_up_control_opens_the_shared_prompt_modal(self) -> None:
         image_path = Path("/tmp/generated.png")
@@ -5505,6 +5546,15 @@ class AsyncBehaviorTests(unittest.IsolatedAsyncioTestCase):
         interaction.response.send_modal.assert_awaited_once()
         self.assertIsInstance(
             interaction.response.send_modal.await_args.args[0], main._PromptModal
+        )
+        await view._follow_up_submit(
+            cast(discord.Interaction, interaction), "make it brighter"
+        )
+        on_action.assert_awaited_once_with(
+            interaction,
+            "make it brighter",
+            (image_path,),
+            view,
         )
 
     async def test_status_does_not_render_path_from_intermediate_message(self) -> None:

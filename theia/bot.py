@@ -813,6 +813,9 @@ async def handle_request(
     thread_source: discord.Message | None = None,
     interaction_sender: SendMessage | None = None,
     allow_discord_tools: bool = True,
+    image_message: Any | None = None,
+    image_view: _ImageResultView | None = None,
+    existing_image_paths: Iterable[Path] = (),
     **kwargs: Any,
 ) -> None:
     """Route one Discord request through Codex and stream its user-facing result."""
@@ -830,6 +833,9 @@ async def handle_request(
         context=customization_context(channel, user=None, user_id=user_id),
         image_path_resolver=bot.codex.image_artifact_path,
         on_view_created=bot.register_view,
+        image_message=image_message,
+        image_view=image_view,
+        existing_image_paths=existing_image_paths,
     )
     request_session_key = session_key(channel, user_id)
     response_for_presence: str | None = None
@@ -939,12 +945,14 @@ async def handle_request(
                 error_reason=error_reason if failed else None,
                 speech=speech,
                 image_paths=delivery.image_paths,
-                on_image_action=lambda image_interaction, action_prompt, paths: (
+                on_image_action=lambda image_interaction, action_prompt, paths, view: (
                     _run_image_follow_up(
                         image_interaction,
                         action_prompt,
                         paths,
                         channel=delivery.channel,
+                        image_view=view,
+                        image_message=view.message,
                     )
                 ),
             )
@@ -1651,12 +1659,15 @@ class TheiaBot(commands.Bot):
                 interaction: discord.Interaction,
                 prompt: str,
                 image_paths: tuple[Path, ...],
+                view: _ImageResultView,
             ) -> None:
                 await _run_image_follow_up(
                     interaction,
                     prompt,
                     image_paths,
                     channel=interaction.channel,
+                    image_view=view,
+                    image_message=view.message,
                 )
 
             return _ImageResultView(
@@ -1667,6 +1678,7 @@ class TheiaBot(commands.Bot):
                 guild_id=guild_id,
                 token=token,
                 recovered=True,
+                message_id=record.get("message_id"),
             )
         if kind == "decision":
             raw_choices = state.get("choices")
@@ -2941,6 +2953,8 @@ async def _run_image_follow_up(
     image_paths: tuple[Path, ...],
     *,
     channel: Any | None,
+    image_view: _ImageResultView,
+    image_message: Any | None,
 ) -> None:
     """Acknowledge an image control and run its follow-up in the same session."""
     if not await _require_login(interaction):
@@ -2952,6 +2966,8 @@ async def _run_image_follow_up(
             prompt,
             image_paths,
             channel=channel,
+            image_view=image_view,
+            image_message=image_message,
         )
     )
 
@@ -2962,11 +2978,22 @@ async def _process_image_follow_up(
     image_paths: tuple[Path, ...],
     *,
     channel: Any | None,
+    image_view: _ImageResultView,
+    image_message: Any | None,
 ) -> None:
     """Run one image action after its Discord interaction is acknowledged."""
     request_channel = channel or interaction.channel
     user_only = _is_user_only_install(interaction)
-    request_sender = _interaction_request_sender(interaction)
+    request_sender = interaction.followup.send
+    if image_message is None:
+        image_message = getattr(image_view, "message", None)
+    if image_message is None:
+        message_id = getattr(image_view, "message_id", None)
+        fetch_message = getattr(request_channel, "fetch_message", None)
+        if isinstance(message_id, int) and callable(fetch_message):
+            with contextlib.suppress(discord.DiscordException, TypeError):
+                fetch = cast(Callable[[int], Awaitable[Any]], fetch_message)
+                image_message = await fetch(message_id)
     request_prompt = prompt.strip()
     if not request_prompt:
         request_prompt = "Continue working with the attached generated image."
@@ -2984,8 +3011,13 @@ async def _process_image_follow_up(
             request_id=f"image:{interaction.id}",
             speak_text=_voice_speak_callback(key),
             use_webhook_thread=True,
-            interaction_sender=request_sender if user_only else None,
+            interaction_sender=(
+                _interaction_request_sender(interaction) if user_only else None
+            ),
             allow_discord_tools=not user_only,
+            image_message=image_message,
+            image_view=image_view,
+            existing_image_paths=image_paths,
         )
     except Exception as exc:  # noqa: BLE001 - an image action must not go silent
         logger.error(

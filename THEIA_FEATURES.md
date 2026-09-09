@@ -293,8 +293,10 @@ not bypass Codex authentication.
 Tool availability still depends on the selected model, account, provider capabilities, and Codex configuration. `modelProvider/capabilities/read` is implemented and cached, but does not currently have a dedicated Discord command.
 
 When Codex completes an image-generation item with a safe saved artifact, Theia
-posts the image to Discord and adds an owner-only `Follow up` control. `Follow
-up` opens the same request modal used by `/btw`.
+delivers the response and image together in one message with an owner-only
+`Follow up` control. `Follow up` opens the same request modal used by `/btw`;
+while it runs, its thinking status stays separate, and the completed follow-up
+edits the original image message.
 
 Interactive Discord views are registered and restored across bot restarts when
 their state is available. In-flight approvals or input requests that were
