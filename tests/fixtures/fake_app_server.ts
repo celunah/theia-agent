@@ -240,6 +240,28 @@ function streamTurn(turn: ActiveTurn, text: string, malformed = false): void {
 
 function responseText(turn: ActiveTurn): string {
   const lowerPrompt = turn.prompt.toLowerCase();
+  if (
+    scenarioIs("attention") &&
+    lowerPrompt.includes("<current_user_message>")
+  ) {
+    return JSON.stringify({
+      relation: "TOPIC_SHIFT",
+      confidence: 0.95,
+      acknowledge: true,
+      preserve_context: true,
+      target_context_id: null,
+      topic_title: "New subject",
+      topic_summary: "A deliberate new conversational subject.",
+      open_loops: ["Answer the new subject."],
+      reason: "The user deliberately changed subjects.",
+    });
+  }
+  if (
+    scenarioIs("attention") &&
+    lowerPrompt.includes("[conversational attention]")
+  ) {
+    return "attention response";
+  }
   if (scenarioIs("mood") && lowerPrompt.includes("<current_user_turn>")) {
     return JSON.stringify({
       changed: true,

@@ -14,6 +14,7 @@ preferences that matter to you.
 - Model selection, web search, approvals, and safe controls for agent actions.
 - Theia-only usage tracking, background work, daily recaps, and optional self-improvement.
 - A temporary, personality-aware mood, Rich Presence, and server-specific customization.
+- Conversational attention that preserves substantial topic changes and follows brief tangents naturally.
 
 Theia can be installed to a Discord account as well as a server. Account
 installations provide slash-command conversations in DMs, group DMs, and

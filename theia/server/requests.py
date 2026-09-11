@@ -78,6 +78,7 @@ class CodexRequestMixin:
                         or session.personality_selected
                         or session.pending_self_improvement_summary
                         or session.tool_policy is not None
+                        or session.attention is not None
                     )
                     if not has_session_metadata and (
                         session.last_activity_at is None
@@ -230,6 +231,11 @@ class CodexRequestMixin:
             await self._prepare_session_for_activity(session)
             prepared_attachments = await self._prepare_attachments(attachment_list)
             mood_input = user_prompt or prompt
+            attention_transition = await self._prepare_attention_for_turn(
+                session,
+                mood_input,
+                recent_global_context=prompt if user_prompt else None,
+            )
             effort = await self._select_reasoning_effort(prompt, attachment_list)
             logger.info(
                 "Starting Codex turn (adaptive_reasoning=%s, effort=%s, attachments=%d)",
@@ -272,6 +278,7 @@ class CodexRequestMixin:
                 session,
                 prompt,
                 memory_context=memory_context,
+                attention_transition=attention_transition,
             )
             turn_params: dict[str, Any] = {
                 "threadId": session.thread_id,
@@ -329,6 +336,7 @@ class CodexRequestMixin:
             response = await self._wait_for_turn(
                 session_key, session, state, str(turn_id)
             )
+            self._record_attention_response(session, response)
             self._schedule_self_improvement_review(
                 session,
                 user_prompt or prompt,

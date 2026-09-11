@@ -208,6 +208,24 @@ class TestLocalCodexBoundary(unittest.IsolatedAsyncioTestCase):
         prompt = "echo preserve this exact prompt: <opaque-value>"
         self.assertEqual(await self._ask(prompt_server, prompt), f"echo: {prompt}")
 
+    async def test_conversational_attention_crosses_the_jsonl_boundary(self) -> None:
+        """Verify classification changes the following normal turn prompt."""
+        server = await self._server(scenario="attention")
+
+        self.assertEqual(
+            await self._ask(server, "We are discussing the memory watchdog."),
+            "streamed response",
+        )
+        self.assertEqual(
+            await self._ask(
+                server,
+                "Now let us discuss conversational attention instead.",
+            ),
+            "attention response",
+        )
+        snapshot = server.conversation_attention("boundary")
+        self.assertEqual(len(snapshot["contexts"]), 2)
+
     async def test_realtime_voice_protocol_round_trip_crosses_jsonl_boundary(
         self,
     ) -> None:

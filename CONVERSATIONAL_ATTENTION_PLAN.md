@@ -20,6 +20,16 @@ Account-installed operation should continue using its existing session-key behav
 
 The classifier should be neutral and semantic. It should receive bounded topic context and recent messages, but it does not need to inherit the character's personality to classify relations. The main character agent will retain the active personality and generate natural transition wording.
 
+The classifier must not be asked to determine which messages are relevant before it performs classification. Its input should contain the active context summary and recent exchanges, bounded metadata for parked contexts, and a small window of the latest global messages. The classifier then decides which context the new message belongs to.
+
+`OFF_TOPIC` should not automatically create a durable context for every random aside. The harness should apply a retention threshold:
+
+- a brief unrelated question remains a temporary aside;
+- a substantial unrelated discussion becomes a parked context;
+- an explicit “remember this thread” request or return cue always preserves the thread.
+
+This threshold is a state-retention decision after semantic classification, not a replacement for semantic classification.
+
 ## Proposed data structures
 
 Add focused dataclasses, likely in a new `theia/server/attention.py` or in shared core types if that is needed to avoid import cycles.

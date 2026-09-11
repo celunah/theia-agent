@@ -59,6 +59,15 @@ resting affect from the active personality, uses a bounded private Codex
 appraisal for meaningful user turns, decays with real elapsed time, and is never
 written to permanent memories, skills, recaps, or personality files.
 
+Theia also tracks conversational attention separately from work tasks and
+permanent memory. A bounded private classifier compares each user turn with the
+active topic, parked topic metadata, and a small latest-message window. It can
+follow related sidetracks, preserve substantial topic changes, and restore
+parked topics when the user returns. Brief unrelated asides remain temporary;
+explicit requests to remember a thread preserve it. The harness owns the
+session-scoped state and the main character agent writes any natural transition
+acknowledgement.
+
 Theia also:
 
 - Responds to DMs and configured guild messages.

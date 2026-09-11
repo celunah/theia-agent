@@ -307,8 +307,9 @@ class CodexSelfImprovementMixin:
         prompt: str,
         *,
         memory_context: dict[str, Any] | None = None,
+        attention_transition: dict[str, Any] | None = None,
     ) -> tuple[str, bool]:
-        """Add transient review, retrieval, and mood context before one turn."""
+        """Add transient review, retrieval, attention, and mood context."""
         summary = self._bound_self_improvement_summary(
             session.pending_self_improvement_summary or ""
         )
@@ -356,6 +357,9 @@ class CodexSelfImprovementMixin:
                     + "\n</memory_retrieval>"
                 )
         parts.append(self._render_mood(session))
+        attention = self._render_attention_transition(attention_transition)
+        if attention:
+            parts.append(attention)
         parts.append(prompt)
         return "\n\n".join(parts), summary is not None
 

@@ -7,7 +7,7 @@ import re
 import subprocess
 import sys
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -582,8 +582,37 @@ class _Session:
     instruction_fingerprint: str | None = None
     tool_policy: bool | None = None
     mood: "_MoodState | None" = None
+    attention: "_ConversationAttentionState | None" = None
     mood_appraisal_task: asyncio.Task[Any] | None = None
     lock: asyncio.Lock | None = None
+
+
+@dataclass
+class _ConversationContext:
+    """A bounded conversational subject owned by one Theia session."""
+
+    context_id: str
+    title: str
+    summary: str
+    recent_exchanges: list[str] = field(default_factory=list)
+    open_loops: list[str] = field(default_factory=list)
+    parent_context_id: str | None = None
+    last_active_at: float = 0.0
+    status: str = "active"
+    transition_history: list[str] = field(default_factory=list)
+
+
+@dataclass
+class _ConversationAttentionState:
+    """Bounded active and parked topics for one normal Theia session."""
+
+    active_context_id: str | None = None
+    contexts: dict[str, _ConversationContext] = field(default_factory=dict)
+    parked_context_ids: list[str] = field(default_factory=list)
+    latest_messages: list[str] = field(default_factory=list)
+    last_transition_signature: str | None = None
+    acknowledged_transition_signature: str | None = None
+    version: int = 1
 
 
 @dataclass

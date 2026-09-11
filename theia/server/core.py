@@ -61,6 +61,7 @@ from .state import CodexStateMixin
 from .notifications import CodexNotificationMixin
 from .personality_state import CodexPersonalityStateMixin
 from .conversation import CodexConversationMixin
+from .attention import CodexAttentionMixin
 from .lifecycle import CodexLifecycleMixin
 from .requests import CodexRequestMixin
 from .realtime import CodexRealtimeMixin
@@ -75,6 +76,7 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
     CodexPersonalityStateMixin,
     CodexRealtimeMixin,
     CodexConversationMixin,
+    CodexAttentionMixin,
     CodexLifecycleMixin,
     CodexRequestMixin,
     CodexSelfImprovementMixin,

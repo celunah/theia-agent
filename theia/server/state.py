@@ -541,6 +541,7 @@ class CodexStateMixin:
                     mood = self._restore_mood_state(
                         value.get("mood"), restored_at=state_now
                     )
+                    attention = self._restore_attention_state(value.get("attention"))
                     mode = value.get("mode")
                     last_activity_at = value.get("last_activity_at")
                     if (
@@ -576,6 +577,7 @@ class CodexStateMixin:
                         or saved_self_improvement_summary
                         or saved_tool_policy is not None
                         or saved_mode != DEFAULT_MODE
+                        or attention is not None
                     )
                     if has_non_mood_state or (
                         mood is not None
@@ -603,6 +605,7 @@ class CodexStateMixin:
                             ),
                             tool_policy=saved_tool_policy,
                             mood=mood,
+                            attention=attention,
                             archived=bool(value.get("archived"))
                             if thread_id
                             else False,
@@ -733,6 +736,7 @@ class CodexStateMixin:
                     "instruction_fingerprint": session.instruction_fingerprint,
                     "tool_policy": session.tool_policy,
                     "mood": self._serialize_mood_state(session.mood),
+                    "attention": self._serialize_attention_state(session.attention),
                     "archived": session.archived,
                     "last_activity_at": session.last_activity_at,
                 }
@@ -745,6 +749,7 @@ class CodexStateMixin:
                     or session.personality_selected
                     or session.pending_self_improvement_summary
                     or session.tool_policy is not None
+                    or session.attention is not None
                     or (
                         session.mood is not None
                         and session.last_activity_at is not None
