@@ -284,6 +284,23 @@ class TestLocalCodexBoundary(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("boundary", server._sessions)
 
+    async def test_mood_classification_crosses_the_jsonl_boundary(self) -> None:
+        """Verify a user turn gets a bounded Codex mood appraisal."""
+        server = await self._server(scenario="mood")
+
+        self.assertEqual(
+            await self._ask(server, "A positive update for you."), "streamed response"
+        )
+        await self._wait_for(
+            lambda: server.mood_state("boundary")["label"] == "pleased"
+        )
+        mood = server.mood_state("boundary")
+        self.assertEqual(mood["traits"], "bright, warmly attentive")
+        self.assertLessEqual(mood["strength"], 0.74)
+        self.assertGreater(mood["strength"], 0.73)
+        self.assertEqual(mood["causes"], ["The user shared a positive development."])
+        self.assertFalse(any(key.startswith("__mood__:") for key in server._sessions))
+
     async def test_intermediates_and_preambles_are_delivered_before_final_text(
         self,
     ) -> None:

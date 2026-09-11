@@ -55,9 +55,9 @@ agent tasks, and does not expose prompts, tool output, credentials, or private
 paths.
 
 Each isolated conversation also has a temporary simulated mood. It derives a
-resting affect from the active personality, responds only to meaningful user
-turns, decays with real elapsed time, and is never written to permanent
-memories, skills, recaps, or personality files.
+resting affect from the active personality, uses a bounded private Codex
+appraisal for meaningful user turns, decays with real elapsed time, and is never
+written to permanent memories, skills, recaps, or personality files.
 
 Theia also:
 

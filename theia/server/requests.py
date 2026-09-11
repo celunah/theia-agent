@@ -230,11 +230,6 @@ class CodexRequestMixin:
             await self._prepare_session_for_activity(session)
             prepared_attachments = await self._prepare_attachments(attachment_list)
             mood_input = user_prompt or prompt
-            self._update_mood_from_turn(
-                session,
-                mood_input,
-                recent_context=prompt if user_prompt else None,
-            )
             effort = await self._select_reasoning_effort(prompt, attachment_list)
             logger.info(
                 "Starting Codex turn (adaptive_reasoning=%s, effort=%s, attachments=%d)",
@@ -326,6 +321,11 @@ class CodexRequestMixin:
             state.interaction_sender = interaction_sender
             state.allow_discord_tools = allow_discord_tools
             session.turn_id = str(turn_id)
+            self._schedule_mood_appraisal(
+                session,
+                mood_input,
+                recent_context=prompt if user_prompt else None,
+            )
             response = await self._wait_for_turn(
                 session_key, session, state, str(turn_id)
             )

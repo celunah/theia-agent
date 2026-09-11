@@ -240,6 +240,15 @@ function streamTurn(turn: ActiveTurn, text: string, malformed = false): void {
 
 function responseText(turn: ActiveTurn): string {
   const lowerPrompt = turn.prompt.toLowerCase();
+  if (scenarioIs("mood") && lowerPrompt.includes("<current_user_turn>")) {
+    return JSON.stringify({
+      changed: true,
+      label: "pleased",
+      traits: "bright, warmly attentive",
+      strength: 0.74,
+      causes: ["The user shared a positive development."],
+    });
+  }
   if (scenarioIs("presence")) {
     return '{"activity_type":"listening","text":"reviewing"}';
   }

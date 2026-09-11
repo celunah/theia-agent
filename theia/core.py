@@ -582,6 +582,7 @@ class _Session:
     instruction_fingerprint: str | None = None
     tool_policy: bool | None = None
     mood: "_MoodState | None" = None
+    mood_appraisal_task: asyncio.Task[Any] | None = None
     lock: asyncio.Lock | None = None
 
 

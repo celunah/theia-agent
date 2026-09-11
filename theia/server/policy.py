@@ -84,6 +84,7 @@ _PERSONALITY_SCOPE_KEY_RE = re.compile(r"^(?:me|server):[1-9][0-9]*$|^everyone$"
 _MOOD_MAX_CAUSES = 3
 _MOOD_CAUSE_MAX_CHARACTERS = 180
 _MOOD_TRAITS_MAX_CHARACTERS = 180
+DEFAULT_MOOD_CLASSIFICATION_TIMEOUT = 5.0
 _USAGE_DAILY_LIMIT = 400
 _TOKEN_USAGE_KEYS = (
     "cacheWriteInputTokens",
@@ -93,33 +94,6 @@ _TOKEN_USAGE_KEYS = (
     "reasoningOutputTokens",
     "totalTokens",
 )
-_MOOD_EVENT_STRENGTHS = {
-    "engaged": 0.58,
-    "pleased": 0.62,
-    "playful": 0.58,
-    "concerned": 0.72,
-    "subdued": 0.65,
-    "focused": 0.68,
-    "relieved": 0.55,
-}
-_MOOD_EVENT_TRAITS = {
-    "engaged": "attentive and engaged",
-    "pleased": "quietly pleased",
-    "playful": "lightly amused and attentive",
-    "concerned": "careful and concerned",
-    "subdued": "quiet and subdued",
-    "focused": "steady and focused",
-    "relieved": "lighter and relieved",
-}
-_MOOD_CAUSES = {
-    "engaged": "The user opened a meaningful line of conversation.",
-    "pleased": "The user signaled a positive development.",
-    "playful": "The user made a playful observation.",
-    "concerned": "The user described a problem or concern.",
-    "subdued": "The user conveyed a subdued or difficult moment.",
-    "focused": "The user shifted the conversation toward focused work.",
-    "relieved": "The user indicated that a difficult situation eased.",
-}
 _MOOD_TRIVIAL_MESSAGES = frozenset(
     {
         "hi",

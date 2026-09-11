@@ -2,6 +2,31 @@
 from tests.test_support import *
 
 
+def _apply_mood_event(
+    server: Any,
+    session: Any,
+    text: str,
+    *,
+    now: float,
+    label: str = "concerned",
+    traits: str = "careful and concerned",
+    strength: float = 0.72,
+    causes: list[str] | None = None,
+) -> bool:
+    return server._update_mood_from_turn(
+        session,
+        text,
+        event={
+            "changed": True,
+            "label": label,
+            "traits": traits,
+            "strength": strength,
+            "causes": causes or ["The user described a problem."],
+        },
+        now=now,
+    )
+
+
 class AsyncBehaviorTests(AsyncBehaviorTestBase):
     async def test_mood_is_after_personality_and_before_user_input(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -41,13 +66,61 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
             "This mood is temporary expressive context. Use it subtly.", turn_prompt
         )
 
+    async def test_mood_classification_uses_ephemeral_low_effort_no_tool_turn(
+        self,
+    ) -> None:
+        server = main.CodexAppServer()
+        requests: list[tuple[str, dict[str, Any]]] = []
+
+        async def request(method: str, params: dict[str, Any], **_kwargs: Any) -> dict:
+            requests.append((method, params))
+            if method == "thread/start":
+                return {"thread": {"id": "mood-thread"}}
+            return {"turn": {"id": "mood-turn"}}
+
+        server._ensure_running = AsyncMock()
+        server._request = AsyncMock(side_effect=request)
+        server._wait_for_turn = AsyncMock(
+            return_value=(
+                '{"changed":true,"label":"playful",'
+                '"traits":"quietly amused and attentive","strength":0.58,'
+                '"causes":["The user made a playful observation."]}'
+            )
+        )
+
+        result = await server.classify_mood(
+            "That was unexpectedly funny.",
+            session_key=_mood_test_key("classified"),
+            recent_context="The conversation was relaxed.",
+            current_mood={
+                "label": "neutral",
+                "traits": "calm and observant",
+                "strength": 0.50,
+                "causes": [],
+            },
+        )
+
+        self.assertEqual(result["label"] if result else None, "playful")
+        self.assertEqual(
+            [method for method, _ in requests], ["thread/start", "turn/start"]
+        )
+        thread_params = requests[0][1]
+        self.assertTrue(thread_params["ephemeral"])
+        self.assertEqual(thread_params["approvalPolicy"], "never")
+        self.assertEqual(thread_params["sandbox"], "read-only")
+        self.assertEqual(thread_params["runtimeWorkspaceRoots"], [])
+        self.assertNotIn("dynamicTools", thread_params)
+        self.assertEqual(requests[1][1]["effort"], "low")
+        self.assertIn("<current_user_turn>", requests[1][1]["input"][0]["text"])
+        self.assertNotIn("classified", " ".join(server._sessions.keys()))
+
     def test_transient_mood_has_traits_label_strength_and_causes(self) -> None:
         server = main.CodexAppServer()
         session = server._session(_mood_test_key("transient"))
 
         self.assertTrue(
-            server._update_mood_from_turn(
-                session, "The deployment failed with an error.", now=100.0
+            _apply_mood_event(
+                server, session, "The deployment failed with an error.", now=100.0
             )
         )
         mood = server.mood_state(_mood_test_key("transient"), now=100.0)
@@ -62,17 +135,17 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         server = main.CodexAppServer()
         session = server._session(_mood_test_key("duplicates"))
 
-        self.assertFalse(server._update_mood_from_turn(session, "okay", now=100.0))
+        self.assertFalse(_apply_mood_event(server, session, "okay", now=100.0))
         self.assertTrue(
-            server._update_mood_from_turn(
-                session, "Please fix the broken build.", now=101.0
+            _apply_mood_event(
+                server, session, "Please fix the broken build.", now=101.0
             )
         )
         before = server.mood_state(_mood_test_key("duplicates"), now=101.0)
 
         self.assertFalse(
-            server._update_mood_from_turn(
-                session, "Please fix the broken build.", now=102.0
+            _apply_mood_event(
+                server, session, "Please fix the broken build.", now=102.0
             )
         )
         self.assertEqual(
@@ -83,9 +156,7 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
     def test_mood_strength_decays_by_three_percentage_points_per_minute(self) -> None:
         server = main.CodexAppServer()
         session = server._session(_mood_test_key("decay"))
-        server._update_mood_from_turn(
-            session, "Please fix the broken build.", now=100.0
-        )
+        _apply_mood_event(server, session, "Please fix the broken build.", now=100.0)
         initial = session.mood
         assert initial is not None
         first_strength = initial.strength
@@ -109,7 +180,7 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
     def test_zero_strength_restores_profile_baseline_and_stops_decay(self) -> None:
         server = main.CodexAppServer()
         session = server._session(_mood_test_key("zero"))
-        server._update_mood_from_turn(session, "The build is broken.", now=100.0)
+        _apply_mood_event(server, session, "The build is broken.", now=100.0)
         baseline = session.mood
         assert baseline is not None
         baseline_traits = baseline.baseline_traits
@@ -126,12 +197,19 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
     def test_new_meaningful_event_reactivates_decay_after_neutral(self) -> None:
         server = main.CodexAppServer()
         session = server._session(_mood_test_key("react"))
-        server._update_mood_from_turn(session, "The build is broken.", now=100.0)
+        _apply_mood_event(server, session, "The build is broken.", now=100.0)
         server.mood_state(_mood_test_key("react"), now=100.0 + 60 * 100)
 
         self.assertTrue(
-            server._update_mood_from_turn(
-                session, "Everything is fixed now.", now=7_000.0
+            _apply_mood_event(
+                server,
+                session,
+                "Everything is fixed now.",
+                label="relieved",
+                traits="lighter and relieved",
+                strength=0.55,
+                causes=["The user reported that the problem eased."],
+                now=7_000.0,
             )
         )
         mood = server.mood_state(_mood_test_key("react"), now=7_060.0)
@@ -143,17 +221,16 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
     def test_mood_strength_and_causes_are_clamped_and_bounded(self) -> None:
         server = main.CodexAppServer()
         session = server._session(_mood_test_key("clamp"))
-        with patch.object(
+        _apply_mood_event(
             server,
-            "_infer_mood_event",
-            return_value={
-                "label": "focused",
-                "traits": "steady and focused",
-                "strength": 2.0,
-                "causes": ["one", "two", "three", "four"],
-            },
-        ):
-            server._update_mood_from_turn(session, "a meaningful event", now=100.0)
+            session,
+            "a meaningful event",
+            label="focused",
+            traits="steady and focused",
+            strength=2.0,
+            causes=["one", "two", "three", "four"],
+            now=100.0,
+        )
 
         mood = server.mood_state(_mood_test_key("clamp"), now=100.0)
         self.assertEqual(mood["strength"], 1.0)
@@ -162,19 +239,16 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
     def test_zero_event_strength_returns_to_neutral(self) -> None:
         server = main.CodexAppServer()
         session = server._session(_mood_test_key("zero-event"))
-        with patch.object(
+        _apply_mood_event(
             server,
-            "_infer_mood_event",
-            return_value={
-                "label": "focused",
-                "traits": "steady and focused",
-                "strength": -1.0,
-                "causes": ["not retained"],
-            },
-        ):
-            server._update_mood_from_turn(
-                session, "another meaningful event", now=100.0
-            )
+            session,
+            "another meaningful event",
+            label="focused",
+            traits="steady and focused",
+            strength=-1.0,
+            causes=["not retained"],
+            now=100.0,
+        )
 
         mood = server.mood_state(_mood_test_key("zero-event"), now=100.0)
         self.assertEqual(mood["label"], "neutral")
@@ -184,14 +258,23 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
     def test_stale_mood_causes_are_replaced(self) -> None:
         server = main.CodexAppServer()
         session = server._session(_mood_test_key("stale"))
-        server._update_mood_from_turn(session, "The build is broken.", now=100.0)
+        _apply_mood_event(server, session, "The build is broken.", now=100.0)
         self.assertEqual(len(session.mood.causes if session.mood else ()), 1)
 
-        server._update_mood_from_turn(session, "Everything is fixed now.", now=101.0)
+        _apply_mood_event(
+            server,
+            session,
+            "Everything is fixed now.",
+            label="relieved",
+            traits="lighter and relieved",
+            strength=0.55,
+            causes=["The user reported that the problem eased."],
+            now=101.0,
+        )
 
         self.assertEqual(
             server.mood_state(_mood_test_key("stale"), now=101.0)["causes"],
-            ["The user indicated that a difficult situation eased."],
+            ["The user reported that the problem eased."],
         )
 
     def test_mood_does_not_create_durable_memory_or_skill_updates(self) -> None:
@@ -205,7 +288,8 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
                 },
             ):
                 server = main.CodexAppServer()
-                server._update_mood_from_turn(
+                _apply_mood_event(
+                    server,
                     server._session(_mood_test_key("durable")),
                     "Please fix this issue.",
                     now=100.0,
@@ -221,8 +305,11 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         other_user = _mood_test_key("guild:1:channel:2:user:5")
         other_guild = _mood_test_key("guild:6:channel:2:user:3")
 
-        server._update_mood_from_turn(
-            server._session(source_key), "The request failed.", now=100.0
+        _apply_mood_event(
+            server,
+            server._session(source_key),
+            "The request failed.",
+            now=100.0,
         )
 
         self.assertEqual(server.mood_state(source_key, now=100.0)["label"], "concerned")
@@ -236,7 +323,7 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         session.thread_id = "existing-thread"
         session.instruction_fingerprint = server._instruction_fingerprint(session)
 
-        server._update_mood_from_turn(session, "Please fix this issue.", now=100.0)
+        _apply_mood_event(server, session, "Please fix this issue.", now=100.0)
 
         self.assertEqual(session.thread_id, "existing-thread")
         self.assertEqual(
@@ -266,7 +353,7 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
                     ),
                 )
                 session = server._session("session")
-                server._update_mood_from_turn(session, "The build failed.", now=100.0)
+                _apply_mood_event(server, session, "The build failed.", now=100.0)
                 session.thread_id = "old-thread"
 
                 await server.configure_personality(
@@ -297,8 +384,11 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
                 },
             ):
                 server = main.CodexAppServer()
-                server._update_mood_from_turn(
-                    server._session("session"), "The build failed.", now=100.0
+                _apply_mood_event(
+                    server,
+                    server._session("session"),
+                    "The build failed.",
+                    now=100.0,
                 )
                 with patch("theia.server.core.time.time", return_value=160.0):
                     restored = main.CodexAppServer().mood_state("session", now=160.0)
@@ -315,7 +405,7 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
             server._state_path = root / "state.json"
             server._codex_home = root
             session = server._session(_mood_test_key("internal"))
-            server._update_mood_from_turn(session, "The build failed.", now=100.0)
+            _apply_mood_event(server, session, "The build failed.", now=100.0)
             before = server.mood_state(_mood_test_key("internal"), now=100.0)
             server._ensure_running = AsyncMock()
             server._request = AsyncMock(
@@ -372,7 +462,7 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         server = main.CodexAppServer()
         session = server._session(_mood_test_key("policy"))
         before = server._thread_instruction_params(session, allow_tools=False)
-        server._update_mood_from_turn(session, "Please inspect this issue.", now=100.0)
+        _apply_mood_event(server, session, "Please inspect this issue.", now=100.0)
 
         after = server._thread_instruction_params(session, allow_tools=False)
         self.assertEqual(after, before)

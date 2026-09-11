@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import math
 import re
 import time
 from collections.abc import Awaitable, Callable, Iterable
@@ -16,6 +17,7 @@ import discord
 
 from .policy import (
     AUDIO_ATTACHMENT_SUFFIXES,
+    DEFAULT_MOOD_CLASSIFICATION_TIMEOUT,
     IMAGE_SUFFIXES,
     MAX_ATTACHMENT_BATCH_BYTES,
     MAX_ATTACHMENT_BYTES,
@@ -29,11 +31,13 @@ from ..core import (
     BASE_PRIORS,
     DEFAULT_REASONING_EFFORT,
     CodexAppServerError,
+    MOOD_LABELS,
     _Session,
     _TurnState,
     _codex_logger,
     _path_from_value,
     _path_is_under,
+    _safe_intermediate_text,
     _truncate,
 )
 from .prompts import (
@@ -42,6 +46,8 @@ from .prompts import (
     _ASSESSMENT_OUTPUT_SCHEMA,
     _NIGHTLY_RECAP_DEVELOPER_INSTRUCTIONS,
     _NIGHTLY_RECAP_OUTPUT_SCHEMA,
+    _MOOD_CLASSIFICATION_DEVELOPER_INSTRUCTIONS,
+    _MOOD_CLASSIFICATION_OUTPUT_SCHEMA,
     _PRESENCE_ACTIVITY_TYPES,
     _PRESENCE_DEVELOPER_INSTRUCTIONS,
     _PRESENCE_OUTPUT_SCHEMA,
@@ -178,6 +184,190 @@ class CodexWorkerMixin:
             recap = re.sub(r"\s+", " ", value["recap"]).strip()
             if recap:
                 return _truncate(recap, 8000)
+        return None
+
+    async def classify_mood(
+        self,
+        text: str,
+        *,
+        session_key: str,
+        recent_context: str | None = None,
+        current_mood: dict[str, Any] | None = None,
+        timeout: float = DEFAULT_MOOD_CLASSIFICATION_TIMEOUT,
+    ) -> dict[str, Any] | None:
+        """Classify one turn in a disposable, no-tool Codex session."""
+        await self._ensure_running()
+        session_id = f"__mood__:{time.monotonic_ns()}"
+        session = _Session(
+            key=session_id,
+            personality_name=self.active_personality(session_key),
+        )
+        self._sessions[session_id] = session
+        state: _TurnState | None = None
+        thread_id: str | None = None
+        turn_id: str | None = None
+        request_timeout = max(1.0, min(timeout, self._request_timeout))
+        try:
+            thread_result = await self._request(
+                "thread/start",
+                {
+                    "cwd": str(self._attachment_root),
+                    "approvalPolicy": "never",
+                    "sandbox": "read-only",
+                    "ephemeral": True,
+                    "runtimeWorkspaceRoots": [],
+                    "baseInstructions": self._system_instructions(
+                        session, allow_tools=False
+                    ),
+                    "developerInstructions": _MOOD_CLASSIFICATION_DEVELOPER_INSTRUCTIONS,
+                    **({"model": self._model} if self._model is not None else {}),
+                },
+                timeout=request_timeout,
+            )
+            thread_id = str((thread_result.get("thread") or {}).get("id") or "")
+            if not thread_id:
+                return None
+            turn_result = await self._request(
+                "turn/start",
+                {
+                    "threadId": thread_id,
+                    "input": [
+                        {
+                            "type": "text",
+                            "text": self._mood_classification_prompt(
+                                text,
+                                recent_context=recent_context,
+                                current_mood=current_mood,
+                            ),
+                        }
+                    ],
+                    "effort": "low",
+                    "outputSchema": _MOOD_CLASSIFICATION_OUTPUT_SCHEMA,
+                    **({"model": self._model} if self._model is not None else {}),
+                },
+                timeout=request_timeout,
+            )
+            turn_id = str((turn_result.get("turn") or {}).get("id") or "")
+            if not turn_id:
+                return None
+            session.thread_id = thread_id
+            session.turn_id = turn_id
+            state = _TurnState(
+                thread_id=thread_id,
+                session=session,
+                allow_tools=False,
+            )
+            self._turns[turn_id] = state
+            response = await self._wait_for_turn(
+                session_id,
+                session,
+                state,
+                turn_id,
+                timeout=timeout,
+            )
+            return self._parse_mood_classification(response)
+        except asyncio.CancelledError:
+            if thread_id and turn_id:
+                with contextlib.suppress(Exception):
+                    await self._request(
+                        "turn/interrupt",
+                        {"threadId": thread_id, "turnId": turn_id},
+                        timeout=2.0,
+                    )
+            raise
+        finally:
+            if turn_id:
+                self._turns.pop(turn_id, None)
+            self._sessions.pop(session_id, None)
+
+    @staticmethod
+    def _mood_classification_prompt(
+        text: str,
+        *,
+        recent_context: str | None,
+        current_mood: dict[str, Any] | None,
+    ) -> str:
+        """Wrap bounded turn context as data for the mood worker."""
+        mood = current_mood if isinstance(current_mood, dict) else {}
+        raw_causes = mood.get("causes")
+        causes = raw_causes if isinstance(raw_causes, (list, tuple)) else ()
+        cause_text = ", ".join(
+            _safe_intermediate_text(item, 180)
+            for item in causes[:3]
+            if _safe_intermediate_text(item, 180)
+        )
+        if not cause_text:
+            cause_text = "none"
+        return (
+            "Classify the temporary expressive mood after the current user turn. "
+            "Use the active personality profile from the system instructions when "
+            "writing traits. Return JSON with changed, label, traits, strength, "
+            "and causes. Set changed to false when the turn does not represent a "
+            "meaningful emotional or situational shift.\n\n"
+            "<current_mood>\n"
+            f"label: {_safe_intermediate_text(mood.get('label'), 32) or 'neutral'}\n"
+            f"traits: {_safe_intermediate_text(mood.get('traits'), 180) or 'resting affect'}\n"
+            f"strength: {mood.get('strength', 0.50)}\n"
+            f"causes: {cause_text}\n"
+            "</current_mood>\n\n"
+            "<current_user_turn>\n"
+            f"{_truncate(text, 4096)}\n"
+            "</current_user_turn>\n\n"
+            "<recent_context>\n"
+            f"{_truncate(recent_context or 'none', 6000)}\n"
+            "</recent_context>"
+        )
+
+    @staticmethod
+    def _parse_mood_classification(text: str) -> dict[str, Any] | None:
+        """Parse and bound one mood object without retaining the worker turn."""
+        candidates = [text.strip()]
+        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        if match:
+            candidates.append(match.group(0))
+        for candidate in candidates:
+            candidate = candidate.removeprefix("```json").removesuffix("```").strip()
+            try:
+                value = json.loads(candidate)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(value, dict) or not isinstance(
+                value.get("changed"), bool
+            ):
+                continue
+            label = str(value.get("label") or "").casefold()
+            if label not in MOOD_LABELS:
+                continue
+            if not value["changed"] or label == "neutral":
+                return {"changed": False}
+            traits = _safe_intermediate_text(value.get("traits"), 180)
+            raw_causes = value.get("causes")
+            if not isinstance(raw_causes, list):
+                continue
+            causes = [
+                cause
+                for item in raw_causes[:3]
+                if (cause := _safe_intermediate_text(item, 180))
+            ]
+            strength = value.get("strength")
+            if (
+                not traits
+                or not causes
+                or not isinstance(strength, (int, float))
+                or isinstance(strength, bool)
+            ):
+                continue
+            if not isinstance(strength, float):
+                strength = float(strength)
+            if not math.isfinite(strength):
+                continue
+            return {
+                "changed": True,
+                "label": label,
+                "traits": traits,
+                "strength": max(0.0, min(1.0, strength)),
+                "causes": causes,
+            }
         return None
 
     async def generate_presence(

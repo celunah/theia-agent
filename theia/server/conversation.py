@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import math
 import re
@@ -13,9 +14,6 @@ from typing import TYPE_CHECKING, Any
 from ..audio import AudioProtocolError
 from .policy import (
     _MOOD_CAUSE_MAX_CHARACTERS,
-    _MOOD_CAUSES,
-    _MOOD_EVENT_STRENGTHS,
-    _MOOD_EVENT_TRAITS,
     _MOOD_MAX_CAUSES,
     _MOOD_TRAITS_MAX_CHARACTERS,
     _MOOD_TRIVIAL_MESSAGES,
@@ -36,7 +34,6 @@ from ..core import (
     _env_bool,
     _Session,
     _MoodState,
-    _truncate,
     TEXT_MODE,
     VOICE_MODE,
 )
@@ -383,125 +380,71 @@ class CodexConversationMixin:
         normalized = re.sub(r"\s+", " ", text).strip().casefold()[:4096]
         return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
-    def _infer_mood_event(
+    def _begin_mood_update(
         self,
         session: _Session,
         text: str,
         *,
-        recent_context: str | None = None,
-    ) -> dict[str, Any] | None:
-        """Infer only coarse, meaningful mood changes from user-facing text."""
-        normalized = re.sub(r"\s+", " ", text).strip()
-        lower = normalized.casefold()
-        if not lower or lower in _MOOD_TRIVIAL_MESSAGES:
-            return None
-        # This guard keeps accidental internal/status strings outside the mood
-        # transition path. Presence, recap, and self-improvement use separate
-        # ephemeral methods and never call this method.
-        if lower.startswith(("<theia_", "[theia internal", "internal status:")):
-            return None
-
-        label: str | None = None
-        if re.search(
-            r"\b(?:fixed|resolved|works now|working now|all good|sorted)\b", lower
-        ):
-            label = "relieved"
-        elif re.search(r"\b(?:haha|hehe|lol|joke|playful|funny)\b|[:;]-?[)d]", lower):
-            label = "playful"
-        elif re.search(
-            r"\b(?:error|failed|failure|broken|problem|issue|wrong|unable|cannot|can't|"
-            r"worried|frustrat(?:ed|ing)|blocked|stuck|urgent)\b",
-            lower,
-        ):
-            label = "concerned"
-        elif re.search(
-            r"\b(?:sad|sorry|tired|disappointed|bad news|ugh|upset|difficult|"
-            r"never mind|nevermind)\b",
-            lower,
-        ):
-            label = "subdued"
-        elif re.search(
-            r"\b(?:great|awesome|excellent|thank(?:s| you)|love|happy|nice|perfect|"
-            r"excited|success)\b",
-            lower,
-        ):
-            label = "pleased"
-        elif re.search(
-            r"\b(?:implement|add|update|remove|fix|check|inspect|test|commit|deploy|"
-            r"build|release|run|configure|create|change|continue|start|set up|do it)\b",
-            lower,
-        ):
-            label = "focused"
-        elif "?" in normalized and len(normalized) >= 12:
-            label = "engaged"
-        if label is None:
-            # A short recent-context reference can be meaningful even when the
-            # current wording itself has no emotional keyword.
-            context_lower = (recent_context or "").casefold()
-            if re.search(r"\b(?:still|again|earlier|that|continue)\b", lower):
-                if re.search(
-                    r"\b(?:error|failed|broken|problem|issue|stuck)\b", context_lower
-                ):
-                    label = "concerned"
-                elif recent_context:
-                    label = "engaged"
-        if label is None:
-            return None
-
-        mood = session.mood
-        assert mood is not None
-        anchor = mood.baseline_traits.split(",", 1)[0].strip()
-        event_traits = _MOOD_EVENT_TRAITS[label]
-        traits = _truncate(
-            f"{anchor}, {event_traits}" if anchor else event_traits,
-            _MOOD_TRAITS_MAX_CHARACTERS,
-        )
-        return {
-            "label": label,
-            "traits": traits,
-            "strength": _MOOD_EVENT_STRENGTHS[label],
-            "causes": (_MOOD_CAUSES[label],),
-        }
-
-    def _update_mood_from_turn(
-        self,
-        session: _Session,
-        text: str,
-        *,
-        recent_context: str | None = None,
         now: float | None = None,
-    ) -> bool:
-        """Apply one bounded event transition without creating durable context."""
+    ) -> tuple[bool, float, bool]:
+        """Advance isolated mood time and decide whether appraisal is needed."""
         changed = self._ensure_mood_state(session)
         mood = session.mood
         assert mood is not None
         event_at = time.time() if now is None else now
         session.last_activity_at = event_at
         changed = self._decay_mood(mood, now=event_at) or changed
+        normalized = re.sub(r"\s+", " ", text).strip()
+        lower = normalized.casefold()
+        if not lower or lower in _MOOD_TRIVIAL_MESSAGES:
+            if changed:
+                self._persist_state()
+            return changed, event_at, False
+        # Internal workers use separate methods and never enter this path. Keep
+        # an explicit guard for callers that pass internal envelopes directly.
+        if lower.startswith(("<theia_", "[theia internal", "internal status:")):
+            if changed:
+                self._persist_state()
+            return changed, event_at, False
         signature = self._mood_event_signature(text)
         if mood.last_event_signature == signature:
             if changed:
                 self._persist_state()
-            return False
+            return changed, event_at, False
         mood.last_event_signature = signature
-        event = self._infer_mood_event(session, text, recent_context=recent_context)
-        if event is None:
-            if changed:
+        return changed, event_at, True
+
+    def _apply_mood_event(
+        self,
+        session: _Session,
+        event: dict[str, Any] | None,
+        *,
+        event_at: float,
+        state_changed: bool = False,
+    ) -> bool:
+        """Apply one validated appraisal without changing the Codex thread."""
+        if not isinstance(event, dict) or event.get("changed") is False:
+            if state_changed:
                 self._persist_state()
             return False
+        mood = session.mood
+        assert mood is not None
         event_label = str(event.get("label") or "").casefold()
         if event_label not in MOOD_LABELS or event_label == "neutral":
-            if changed:
+            if state_changed:
                 self._persist_state()
             return False
         mood.label = event_label
         mood.traits = (
-            self._bounded_mood_text(event["traits"], _MOOD_TRAITS_MAX_CHARACTERS)
+            self._bounded_mood_text(event.get("traits"), _MOOD_TRAITS_MAX_CHARACTERS)
             or mood.baseline_traits
         )
-        try:
-            strength = float(event["strength"])
-        except (KeyError, TypeError, ValueError):
+        raw_strength = event.get("strength")
+        if isinstance(raw_strength, (int, float)) and not isinstance(
+            raw_strength, bool
+        ):
+            strength = float(raw_strength)
+        else:
             strength = 0.0
         if not math.isfinite(strength):
             strength = 0.0
@@ -514,13 +457,92 @@ class CodexConversationMixin:
             if (
                 cause_text := self._bounded_mood_text(cause, _MOOD_CAUSE_MAX_CHARACTERS)
             )
-        )
+        ) or (mood.baseline_cause,)
         mood.updated_at = event_at
         mood.transient = mood.label != "neutral" and mood.strength > 0.0
         if not mood.transient:
             self._restore_neutral_mood(mood)
         self._persist_state()
         return True
+
+    def _update_mood_from_turn(
+        self,
+        session: _Session,
+        text: str,
+        *,
+        event: dict[str, Any] | None = None,
+        now: float | None = None,
+    ) -> bool:
+        """Apply a pre-classified event for deterministic state-transition callers."""
+        state_changed, event_at, should_classify = self._begin_mood_update(
+            session, text, now=now
+        )
+        if not should_classify:
+            return False
+        return self._apply_mood_event(
+            session, event, event_at=event_at, state_changed=state_changed
+        )
+
+    def _schedule_mood_appraisal(
+        self,
+        session: _Session,
+        text: str,
+        *,
+        recent_context: str | None = None,
+    ) -> None:
+        """Start mood appraisal without delaying the user-facing turn."""
+        previous = session.mood_appraisal_task
+        if previous is not None and not previous.done():
+            previous.cancel()
+        task = asyncio.create_task(
+            self._update_mood_from_codex(
+                session,
+                text,
+                recent_context=recent_context,
+            )
+        )
+        session.mood_appraisal_task = task
+        self._server_tasks.add(task)
+
+        def appraisal_done(done: asyncio.Task[Any]) -> None:
+            if session.mood_appraisal_task is done:
+                session.mood_appraisal_task = None
+            self._server_task_done(done)
+
+        task.add_done_callback(appraisal_done)
+
+    async def _update_mood_from_codex(
+        self,
+        session: _Session,
+        text: str,
+        *,
+        recent_context: str | None = None,
+        now: float | None = None,
+    ) -> bool:
+        """Appraise one user turn through an isolated, bounded Codex pass."""
+        state_changed, event_at, should_classify = self._begin_mood_update(
+            session, text, now=now
+        )
+        if not should_classify:
+            return False
+        mood = session.mood
+        assert mood is not None
+        try:
+            event = await self.classify_mood(
+                text,
+                session_key=session.key,
+                recent_context=recent_context,
+                current_mood=self._mood_snapshot(mood),
+            )
+        except Exception as exc:  # noqa: BLE001 - appraisal must not fail a turn
+            logger.debug(
+                "Codex mood appraisal failed; preserving current mood (error=%s)",
+                type(exc).__name__,
+            )
+            event = None
+        return self._apply_mood_event(
+            session, event, event_at=event_at, state_changed=state_changed
+        )
 
     async def configure_personality(
         self,
