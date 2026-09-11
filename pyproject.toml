@@ -6,6 +6,7 @@ requires-python = ">=3.10"
 dependencies = [
     "discord.py>=2.4",
     "discord-ext-voice-recv>=0.5.2a179",
+    "psutil",
     "python-dotenv",
     "tzdata>=2024.1",
     "tomli>=2.0.1",

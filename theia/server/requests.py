@@ -226,6 +226,7 @@ class CodexRequestMixin:
             allow_tools,
         )
         async with session.lock:
+            await self._ensure_running()
             await self._prepare_session_for_activity(session)
             prepared_attachments = await self._prepare_attachments(attachment_list)
             mood_input = user_prompt or prompt

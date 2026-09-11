@@ -13,6 +13,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import psutil
 
 from ..core import (
     AGENT_DISPLAY_NAME,
@@ -20,6 +21,7 @@ from ..core import (
     THEIA_VERSION,
     CodexAppServerError,
     _codex_logger,
+    _TurnState,
 )
 
 logger = _codex_logger()
@@ -34,17 +36,32 @@ class CodexLifecycleMixin:
         _provider_capabilities: dict[str, Any] | None
         _provider_capabilities_key: tuple[str | None, str | None] | None
         _login_user_id: int | None
+        _lifecycle_lock: asyncio.Lock
+        _memory_watchdog_enabled: bool
+        _memory_watchdog_limit: float
+        _memory_watchdog_interval: float
+        _memory_restart_grace: float
+        _memory_breach_samples: int
+        _memory_watchdog_task: asyncio.Task[None] | None
+        _memory_recovery_task: asyncio.Task[None] | None
+        _memory_recovery_active: bool
+        _memory_breach_count: int
 
     def __getattr__(self, name: str) -> Any:
         raise AttributeError(name)
 
     async def start(self) -> None:
+        """Launch and initialize Codex while serializing lifecycle changes."""
+        async with self._lifecycle_lock:
+            await self._start_locked()
+
+    async def _start_locked(self) -> None:
         """Launch and initialize the project-local Codex App Server process."""
         if self._process is not None and self._process.returncode is None:
             if self._reader_task is not None and not self._reader_task.done():
                 logger.debug("Codex App Server is already running")
                 return
-            await self.close()
+            await self._close_locked()
 
         logger.info("Starting Codex App Server")
 
@@ -124,13 +141,15 @@ class CodexLifecycleMixin:
                     "Codex loaded-thread discovery is unavailable (error=%s)",
                     type(exc).__name__,
                 )
+            if not self._memory_recovery_active:
+                self._start_memory_watchdog()
             logger.info("Codex App Server is ready")
         except BaseException as exc:
             logger.error(
                 "Codex App Server failed during startup (error=%s)",
                 type(exc).__name__,
             )
-            await self.close()
+            await self._close_locked()
             raise
 
     def _codex_executable(self) -> str | None:
@@ -214,6 +233,11 @@ class CodexLifecycleMixin:
             return False
 
     async def _ensure_running(self) -> None:
+        if self._memory_recovery_active:
+            raise CodexAppServerError(
+                "Codex is restarting after exceeding its memory limit; "
+                "try again shortly."
+            )
         process = self._process
         if (
             process is None
@@ -223,8 +247,27 @@ class CodexLifecycleMixin:
             await self.start()
 
     async def close(self) -> None:
+        """Stop Codex and cancel any memory recovery in progress."""
+        current = asyncio.current_task()
+        for task in (self._memory_watchdog_task, self._memory_recovery_task):
+            if task is None or task is current or task.done():
+                continue
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        async with self._lifecycle_lock:
+            await self._close_locked()
+
+    async def _close_locked(self) -> None:
         """Stop the Codex process and resolve pending interaction state safely."""
         was_running = self._process is not None
+        watchdog = self._memory_watchdog_task
+        if watchdog is not None and watchdog is not asyncio.current_task():
+            watchdog.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watchdog
+        self._memory_watchdog_task = None
+        self._memory_breach_count = 0
         if self._skills_refresh_task is not None:
             self._skills_refresh_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -249,8 +292,12 @@ class CodexLifecycleMixin:
                 await asyncio.wait_for(process.wait(), timeout=5)
             except asyncio.TimeoutError:
                 process.terminate()
-                with contextlib.suppress(asyncio.TimeoutError):
+                try:
                     await asyncio.wait_for(process.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    process.kill()
+                    with contextlib.suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(process.wait(), timeout=5)
 
         for task in (reader_task, stderr_task):
             if task is not None:
@@ -259,6 +306,150 @@ class CodexLifecycleMixin:
                     await task
         if was_running:
             logger.info("Codex App Server stopped")
+
+    def _start_memory_watchdog(self) -> None:
+        """Start RSS monitoring for the complete Codex child process tree."""
+        if not self._memory_watchdog_enabled or self._memory_watchdog_limit <= 0:
+            return
+        task = self._memory_watchdog_task
+        if task is None or task.done():
+            self._memory_breach_count = 0
+            self._memory_watchdog_task = asyncio.create_task(
+                self._memory_watchdog_loop()
+            )
+
+    def _codex_process_rss(self) -> int | None:
+        """Return RSS for the launcher and every Codex descendant."""
+        process = self._process
+        if process is None or process.returncode is not None:
+            return None
+        try:
+            root = psutil.Process(process.pid)
+            processes = (root, *root.children(recursive=True))
+        except psutil.Error:
+            return None
+        total = 0
+        for candidate in processes:
+            try:
+                total += candidate.memory_info().rss
+            except psutil.Error:
+                continue
+        return total
+
+    async def _memory_watchdog_loop(self) -> None:
+        """Restart Codex after a sustained process-tree RSS limit breach."""
+        try:
+            while True:
+                await asyncio.sleep(self._memory_watchdog_interval)
+                rss = self._codex_process_rss()
+                if rss is None or rss < self._memory_watchdog_limit:
+                    self._memory_breach_count = 0
+                    continue
+                self._memory_breach_count += 1
+                if self._memory_breach_count < self._memory_breach_samples:
+                    continue
+                if self._memory_recovery_task is None:
+                    self._memory_recovery_task = asyncio.create_task(
+                        self._recover_memory_pressure(rss)
+                    )
+                    self._memory_recovery_task.add_done_callback(
+                        self._memory_recovery_done
+                    )
+                return
+        except Exception as exc:  # noqa: BLE001 - monitoring must not kill Theia
+            logger.warning(
+                "Codex memory watchdog stopped (error=%s)", type(exc).__name__
+            )
+
+    async def _recover_memory_pressure(self, rss: int) -> None:
+        """Interrupt current turns, then replace an over-sized Codex process."""
+        self._memory_recovery_active = True
+        started = False
+        try:
+            async with self._lifecycle_lock:
+                if self._process is None or self._process.returncode is not None:
+                    return
+                logger.warning(
+                    "Codex RSS exceeded the watchdog limit; restarting "
+                    "(rss_mb=%.1f, limit_mb=%.1f)",
+                    rss / (1024 * 1024),
+                    self._memory_watchdog_limit / (1024 * 1024),
+                )
+                await self._interrupt_active_turns()
+                await self._close_locked()
+                await self._start_locked()
+                started = True
+                logger.info("Codex App Server recovered after memory pressure")
+        except Exception as exc:  # noqa: BLE001 - recovery is best effort
+            logger.error(
+                "Codex App Server memory recovery failed (error=%s)",
+                type(exc).__name__,
+            )
+        finally:
+            self._memory_recovery_active = False
+            if started:
+                self._memory_recovery_task = None
+                self._start_memory_watchdog()
+
+    def _memory_recovery_done(self, task: asyncio.Task[None]) -> None:
+        """Clear the recovery handle and consume unexpected task failures."""
+        if self._memory_recovery_task is task:
+            self._memory_recovery_task = None
+        if task.cancelled():
+            return
+        try:
+            error = task.exception()
+        except asyncio.InvalidStateError:
+            return
+        if error is not None:
+            logger.error(
+                "Codex App Server memory recovery task failed (error=%s)",
+                type(error).__name__,
+            )
+
+    async def _interrupt_active_turns(self) -> None:
+        """Ask every active turn to stop, bounded by the recovery grace period."""
+        active: list[tuple[_TurnState, str, str]] = []
+        for state in tuple(self._turns.values()):
+            session = state.session
+            thread_id = state.thread_id or (session.thread_id if session else None)
+            turn_id = session.turn_id if session else None
+            if state.done.done() or not thread_id or not turn_id:
+                continue
+            self._clear_pending_for_turn(thread_id, turn_id)
+            active.append((state, thread_id, turn_id))
+        if not active:
+            return
+
+        request_timeout = max(0.5, min(5.0, self._memory_restart_grace))
+        requests = [
+            self._request(
+                "turn/interrupt",
+                {"threadId": thread_id, "turnId": turn_id},
+                timeout=request_timeout,
+            )
+            for _, thread_id, turn_id in active
+        ]
+        results = await asyncio.gather(*requests, return_exceptions=True)
+        failures = sum(isinstance(result, BaseException) for result in results)
+        if failures:
+            logger.warning(
+                "Some Codex turns could not be interrupted before memory recovery "
+                "(failed=%d, active=%d)",
+                failures,
+                len(active),
+            )
+        deadline = time.monotonic() + self._memory_restart_grace
+        while time.monotonic() < deadline and any(
+            not state.done.done() for state, _, _ in active
+        ):
+            await asyncio.sleep(0.1)
+        failure = CodexAppServerError(
+            "Codex restarted because its memory usage exceeded the configured limit."
+        )
+        for state, _, _ in active:
+            if not state.done.done():
+                state.done.set_exception(failure)
 
     async def refresh_account(self) -> dict[str, Any]:
         """Refresh and cache the Codex account authentication state."""

@@ -39,8 +39,18 @@ from ..personality import PersonalityStore
 from ..audio import OpenAICompatibleAudio
 from .policy import (
     CODEX_STDIO_LIMIT_ENV,
+    CODEX_MEMORY_BREACH_SAMPLES_ENV,
+    CODEX_MEMORY_CHECK_INTERVAL_ENV,
+    CODEX_MEMORY_RESTART_GRACE_ENV,
+    CODEX_MEMORY_WATCHDOG_ENV,
+    CODEX_MAX_RSS_MB_ENV,
     DEFAULT_ATTACHMENT_CACHE_LIMIT_BYTES,
     DEFAULT_ATTACHMENT_CACHE_MAX_AGE,
+    DEFAULT_CODEX_MEMORY_BREACH_SAMPLES,
+    DEFAULT_CODEX_MEMORY_CHECK_INTERVAL,
+    DEFAULT_CODEX_MEMORY_RESTART_GRACE,
+    DEFAULT_CODEX_MEMORY_WATCHDOG,
+    DEFAULT_CODEX_MAX_RSS_MB,
     DEFAULT_CODEX_STDIO_LIMIT,
     MAX_CODEX_STDIO_LIMIT,
     MIN_CODEX_STDIO_LIMIT,
@@ -95,6 +105,11 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
         self._process: asyncio.subprocess.Process | None = None  # pylint: disable=no-member
         self._reader_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
+        self._lifecycle_lock = asyncio.Lock()
+        self._memory_watchdog_task: asyncio.Task[None] | None = None
+        self._memory_recovery_task: asyncio.Task[None] | None = None
+        self._memory_recovery_active = False
+        self._memory_breach_count = 0
         self._server_tasks: set[asyncio.Task[Any]] = set()
         self._write_lock = asyncio.Lock()
         self._models_lock = asyncio.Lock()
@@ -155,6 +170,42 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
             MIN_CODEX_STDIO_LIMIT,
             min(MAX_CODEX_STDIO_LIMIT, configured_stdio_limit),
         )
+        self._memory_watchdog_enabled = _env_bool(
+            CODEX_MEMORY_WATCHDOG_ENV,
+            DEFAULT_CODEX_MEMORY_WATCHDOG,
+        )
+        self._memory_watchdog_limit = (
+            max(
+                0.0,
+                _env_float(CODEX_MAX_RSS_MB_ENV, DEFAULT_CODEX_MAX_RSS_MB),
+            )
+            * 1024
+            * 1024
+        )
+        self._memory_watchdog_interval = max(
+            5.0,
+            _env_float(
+                CODEX_MEMORY_CHECK_INTERVAL_ENV,
+                DEFAULT_CODEX_MEMORY_CHECK_INTERVAL,
+            ),
+        )
+        self._memory_restart_grace = max(
+            1.0,
+            _env_float(
+                CODEX_MEMORY_RESTART_GRACE_ENV,
+                DEFAULT_CODEX_MEMORY_RESTART_GRACE,
+            ),
+        )
+        try:
+            configured_breach_samples = int(
+                os.getenv(
+                    CODEX_MEMORY_BREACH_SAMPLES_ENV,
+                    str(DEFAULT_CODEX_MEMORY_BREACH_SAMPLES),
+                )
+            )
+        except ValueError:
+            configured_breach_samples = DEFAULT_CODEX_MEMORY_BREACH_SAMPLES
+        self._memory_breach_samples = max(1, configured_breach_samples)
         try:
             attachment_cache_limit = int(
                 os.getenv(

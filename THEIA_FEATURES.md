@@ -164,6 +164,10 @@ agent state.
 - Users cannot approve or deny another user’s request.
 - Pending approvals are cleared after completion, denial, cancellation, timeout, or interruption.
 - ChatGPT tokens and internal app-server credentials are never sent to Discord.
+- The Codex process tree has an RSS watchdog. After sustained memory growth it
+  interrupts active turns, reports the interruption through the normal error
+  path, and restarts Codex while preserving persisted Theia state. Configure it
+  with `THEIA_CODEX_MAX_RSS_MB` or set that value to `0` to disable it.
 
 ## Models and reasoning
 
