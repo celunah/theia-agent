@@ -640,6 +640,7 @@ class CodexConversationMixin:
     def _reset_session_thread(self, session: _Session) -> None:
         if session.thread_id:
             logger.info("Resetting Codex session because its instructions changed")
+        self._reset_workspace(session)
         session.thread_id = None
         session.loaded = False
         session.archived = False

@@ -308,8 +308,10 @@ class CodexSelfImprovementMixin:
         *,
         memory_context: dict[str, Any] | None = None,
         attention_transition: dict[str, Any] | None = None,
+        self_model: dict[str, Any] | None = None,
+        workspace: dict[str, Any] | None = None,
     ) -> tuple[str, bool]:
-        """Add transient review, retrieval, attention, and mood context."""
+        """Add transient review, retrieval, self-model, attention, and mood context."""
         summary = self._bound_self_improvement_summary(
             session.pending_self_improvement_summary or ""
         )
@@ -356,6 +358,18 @@ class CodexSelfImprovementMixin:
                     + "\n".join(rendered_matches)
                     + "\n</memory_retrieval>"
                 )
+        if self_model is None:
+            self_model = self._self_model_snapshot(
+                session,
+                allow_tools=True,
+                allow_discord_tools=True,
+            )
+        parts.append(self._render_self_model(self_model))
+        if workspace is None:
+            workspace = self._workspace_snapshot(session)
+        rendered_workspace = self._render_workspace_snapshot(workspace)
+        if rendered_workspace:
+            parts.append(rendered_workspace)
         parts.append(self._render_mood(session))
         attention = self._render_attention_transition(attention_transition)
         if attention:

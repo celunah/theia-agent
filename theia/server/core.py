@@ -29,6 +29,7 @@ from ..core import (
     _PendingApproval,
     _Session,
     _skill_entries,
+    _theia_revision,
     _truncate,
     _TurnState,
     SELF_IMPROVEMENT_ENV,
@@ -62,6 +63,8 @@ from .notifications import CodexNotificationMixin
 from .personality_state import CodexPersonalityStateMixin
 from .conversation import CodexConversationMixin
 from .attention import CodexAttentionMixin
+from .self_model import CodexSelfModelMixin
+from .workspace import CodexWorkspaceMixin
 from .lifecycle import CodexLifecycleMixin
 from .requests import CodexRequestMixin
 from .realtime import CodexRealtimeMixin
@@ -77,6 +80,8 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
     CodexRealtimeMixin,
     CodexConversationMixin,
     CodexAttentionMixin,
+    CodexSelfModelMixin,
+    CodexWorkspaceMixin,
     CodexLifecycleMixin,
     CodexRequestMixin,
     CodexSelfImprovementMixin,
@@ -130,6 +135,7 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
         self._view_registrar: Callable[[Any, Any], Awaitable[None]] | None = None
         self._loaded_thread_ids: set[str] = set()
         self._model: str | None = DEFAULT_CODEX_MODEL
+        self._revision = _theia_revision()
         self._login_id: str | None = None
         self._login_channel: discord.abc.Messageable | None = None
         self._login_user_id: int | None = None
@@ -630,6 +636,7 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
         session.last_activity_at = None
         session.instruction_fingerprint = None
         session.tool_policy = None
+        self._reset_workspace(session)
         self._persist_state()
 
     async def resume_session(self, session_key: str, thread_id: str) -> None:

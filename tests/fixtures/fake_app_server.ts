@@ -271,6 +271,24 @@ function responseText(turn: ActiveTurn): string {
       causes: ["The user shared a positive development."],
     });
   }
+  if (scenarioIs("workspace") && lowerPrompt.includes("<user_turn>")) {
+    return JSON.stringify({
+      operations: [
+        {
+          op: "upsert",
+          key: "current_goal",
+          category: "goal",
+          text: "Continue the current design",
+        },
+      ],
+    });
+  }
+  if (
+    scenarioIs("workspace") &&
+    lowerPrompt.includes("## session global workspace")
+  ) {
+    return "workspace response";
+  }
   if (scenarioIs("presence")) {
     return '{"activity_type":"listening","text":"reviewing"}';
   }

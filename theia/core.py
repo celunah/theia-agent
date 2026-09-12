@@ -583,7 +583,9 @@ class _Session:
     tool_policy: bool | None = None
     mood: "_MoodState | None" = None
     attention: "_ConversationAttentionState | None" = None
+    workspace: "_SessionWorkspace | None" = None
     mood_appraisal_task: asyncio.Task[Any] | None = None
+    workspace_review_task: asyncio.Task[Any] | None = None
     lock: asyncio.Lock | None = None
 
 
@@ -613,6 +615,28 @@ class _ConversationAttentionState:
     last_transition_signature: str | None = None
     acknowledged_transition_signature: str | None = None
     version: int = 1
+
+
+@dataclass
+class _WorkspaceEntry:
+    """One bounded, temporary working note owned by a Theia session."""
+
+    key: str
+    category: str
+    text: str
+    created_at: float
+    updated_at: float
+    expires_at: float | None = None
+
+
+@dataclass
+class _SessionWorkspace:
+    """Session-global scratch context, never shared across sessions."""
+
+    generation: int = 1
+    revision: int = 0
+    entries: dict[str, _WorkspaceEntry] = field(default_factory=dict)
+    updated_at: float | None = None
 
 
 @dataclass

@@ -319,6 +319,22 @@ class TestLocalCodexBoundary(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mood["causes"], ["The user shared a positive development."])
         self.assertFalse(any(key.startswith("__mood__:") for key in server._sessions))
 
+    async def test_session_workspace_review_crosses_the_jsonl_boundary(self) -> None:
+        """Verify a bounded review persists context for the following turn."""
+        server = await self._server(scenario="workspace")
+
+        self.assertEqual(
+            await self._ask(server, "Keep track of this design goal."),
+            "streamed response",
+        )
+        await self._wait_for(
+            lambda: bool(server.session_workspace("boundary")["entries"])
+        )
+        self.assertEqual(
+            await self._ask(server, "Continue from the saved workspace."),
+            "workspace response",
+        )
+
     async def test_intermediates_and_preambles_are_delivered_before_final_text(
         self,
     ) -> None:

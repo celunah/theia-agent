@@ -79,6 +79,10 @@ class CodexRequestMixin:
                         or session.pending_self_improvement_summary
                         or session.tool_policy is not None
                         or session.attention is not None
+                        or (
+                            session.workspace is not None
+                            and bool(session.workspace.entries)
+                        )
                     )
                     if not has_session_metadata and (
                         session.last_activity_at is None
@@ -267,6 +271,13 @@ class CodexRequestMixin:
                             "(error=%s)",
                             type(exc).__name__,
                         )
+            self_model = self._self_model_snapshot(
+                session,
+                allow_tools=allow_tools,
+                allow_discord_tools=allow_discord_tools,
+                phase="starting",
+            )
+            workspace = self._workspace_snapshot(session)
             memory_context = None
             if allow_tools and _MEMORY_RETRIEVAL_HINT_RE.search(user_prompt or prompt):
                 memory_context = await self.generate_memory_retrieval(
@@ -279,6 +290,8 @@ class CodexRequestMixin:
                 prompt,
                 memory_context=memory_context,
                 attention_transition=attention_transition,
+                self_model=self_model,
+                workspace=workspace,
             )
             turn_params: dict[str, Any] = {
                 "threadId": session.thread_id,
@@ -337,6 +350,12 @@ class CodexRequestMixin:
                 session_key, session, state, str(turn_id)
             )
             self._record_attention_response(session, response)
+            completed_self_model = self._self_model_snapshot(
+                session,
+                allow_tools=allow_tools,
+                allow_discord_tools=allow_discord_tools,
+                phase="completed",
+            )
             self._schedule_self_improvement_review(
                 session,
                 user_prompt or prompt,
@@ -345,5 +364,12 @@ class CodexRequestMixin:
                 user_id=user_id,
                 user=user,
                 allow_tools=allow_tools,
+            )
+            self._schedule_workspace_review(
+                session,
+                user_prompt or prompt,
+                response,
+                recent_context=prompt if user_prompt else None,
+                self_model=completed_self_model,
             )
             return response
