@@ -27,7 +27,7 @@ from ..core import (
     _env_bool,
     _render_frontend_label,
     _safe_error_reason,
-    _is_always_admin_user,
+    _is_super_admin_user,
     _truncate,
 )
 from ..customization import (
@@ -324,7 +324,7 @@ def _configured_ids(*names: str) -> set[int]:
 
 
 def _is_server_admin(user: discord.abc.User, channel: Any | None) -> bool:
-    if _is_always_admin_user(getattr(user, "id", None)):
+    if _is_super_admin_user(getattr(user, "id", None)):
         return True
     if getattr(channel, "guild", None) is None:
         return False
@@ -362,13 +362,13 @@ def _is_user_only_install(interaction: Any) -> bool:
 def _interaction_allows_tools(interaction: Any) -> bool:
     """Apply the existing tool boundary to both guild and user installations."""
     if _is_user_only_install(interaction):
-        return _is_always_admin_user(getattr(interaction.user, "id", None))
+        return _is_super_admin_user(getattr(interaction.user, "id", None))
     return _is_server_admin(interaction.user, interaction.channel)
 
 
 def _interaction_can_manage_server(interaction: discord.Interaction) -> bool:
-    """Require a guild install for server admins, while honoring trusted users."""
-    if _is_always_admin_user(getattr(interaction.user, "id", None)):
+    """Allow Super Admins globally, or server admins within a guild install."""
+    if _is_super_admin_user(getattr(interaction.user, "id", None)):
         return True
     return _is_guild_install(interaction) and _is_server_admin(
         interaction.user, interaction.channel

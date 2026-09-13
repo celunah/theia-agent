@@ -24,7 +24,7 @@ from ..core import (
     _env_bool,
     _env_float,
     _error_message,
-    _is_always_admin_user,
+    _is_super_admin_user,
     _codex_logger,
     _path_is_under,
     _PendingApproval,
@@ -602,7 +602,7 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
             return False
         if current_user is not None and getattr(current_user, "id", None) != user_id:
             return False
-        if _is_always_admin_user(user_id):
+        if _is_super_admin_user(user_id):
             return True
         guild = getattr(channel, "guild", None)
         if guild is None:

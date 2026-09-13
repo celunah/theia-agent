@@ -73,6 +73,9 @@ Theia keeps her private data and working files in the mounted directories.
 Administrator requests can inspect the private `.theia` runtime when needed,
 but operations there always require approval.
 
+Set `THEIA_SUPER_ADMIN_USERS` to a comma-separated list of trusted Discord user
+IDs when someone needs Super Admin access outside normal server permissions.
+
 Set `THEIA_CODEX_AUTO_UPDATE=true` to let Theia check for and stage official
 Codex CLI updates in her private runtime. Updates are disabled by default and
 are deferred safely around active work. The update interval and timeout can be

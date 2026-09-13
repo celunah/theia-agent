@@ -80,6 +80,8 @@ DEFAULT_PERSONALITY_SCOPE = "me"
 APPROVAL_LEVEL_ENV = "THEIA_APPROVAL_LEVEL"
 APPROVAL_LEVELS = frozenset({"high", "medium", "low"})
 DEFAULT_APPROVAL_LEVEL = "high"
+# Keep the old name as a compatibility alias for existing deployments.
+SUPER_ADMIN_USERS_ENV = "THEIA_SUPER_ADMIN_USERS"
 ALWAYS_ADMIN_USERS_ENV = "THEIA_ALWAYS_ADMIN_USERS"
 SELF_IMPROVEMENT_ENV = "THEIA_SELF_IMPROVEMENT"
 SELF_IMPROVEMENT_TIMEOUT_ENV = "THEIA_SELF_IMPROVEMENT_TIMEOUT"
@@ -123,11 +125,19 @@ def _configured_user_ids(environment_name: str) -> frozenset[int]:
     return frozenset(user_ids)
 
 
-def _is_always_admin_user(user_id: int | None) -> bool:
-    """Return whether configuration grants this user global Theia admin access."""
-    return user_id is not None and user_id in _configured_user_ids(
-        ALWAYS_ADMIN_USERS_ENV
+def _is_super_admin_user(user_id: int | None) -> bool:
+    """Return whether configuration grants this user global Super Admin access."""
+    if user_id is None:
+        return False
+    return any(
+        user_id in _configured_user_ids(environment_name)
+        for environment_name in (SUPER_ADMIN_USERS_ENV, ALWAYS_ADMIN_USERS_ENV)
     )
+
+
+def _is_always_admin_user(user_id: int | None) -> bool:
+    """Compatibility alias for the former always-admin setting."""
+    return _is_super_admin_user(user_id)
 
 
 def _theia_revision() -> str:

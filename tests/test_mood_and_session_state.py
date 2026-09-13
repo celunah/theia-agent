@@ -596,7 +596,8 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         with patch.dict(
             os.environ,
             {
-                main.ALWAYS_ADMIN_USERS_ENV: "7",
+                main.SUPER_ADMIN_USERS_ENV: "7",
+                main.ALWAYS_ADMIN_USERS_ENV: "",
                 "THEIA_APPROVAL_LEVEL": "high",
             },
         ):

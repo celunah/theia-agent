@@ -78,13 +78,16 @@ class CommandSurfaceTests(unittest.TestCase):
             fallback = main.CodexAppServer()
         self.assertEqual(fallback.approval_level(), main.DEFAULT_APPROVAL_LEVEL)
 
-    def test_always_admin_users_parse_and_override_discord_permissions(self) -> None:
+    def test_super_admin_users_parse_and_override_discord_permissions(self) -> None:
         with patch.dict(
             os.environ,
-            {main.ALWAYS_ADMIN_USERS_ENV: "42, 99,invalid,0,42"},
+            {
+                main.SUPER_ADMIN_USERS_ENV: "42, 99,invalid,0,42",
+                main.ALWAYS_ADMIN_USERS_ENV: "",
+            },
         ):
             self.assertEqual(
-                main._configured_user_ids(main.ALWAYS_ADMIN_USERS_ENV),
+                main._configured_user_ids(main.SUPER_ADMIN_USERS_ENV),
                 frozenset({42, 99}),
             )
             configured_user = SimpleNamespace(
@@ -96,6 +99,7 @@ class CommandSurfaceTests(unittest.TestCase):
                 guild_permissions=SimpleNamespace(administrator=False),
             )
 
+            self.assertTrue(main._is_super_admin_user(configured_user.id))
             self.assertTrue(
                 main._is_server_admin(cast(Any, configured_user), _Channel())
             )
@@ -117,6 +121,35 @@ class CommandSurfaceTests(unittest.TestCase):
                     current_user=regular_user,
                 )
             )
+
+    def test_legacy_always_admin_setting_still_grants_super_admin_access(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                main.SUPER_ADMIN_USERS_ENV: "",
+                main.ALWAYS_ADMIN_USERS_ENV: "42",
+            },
+        ):
+            self.assertTrue(main._is_super_admin_user(42))
+            self.assertTrue(main._is_always_admin_user(42))
+
+    def test_super_admin_has_global_access_in_account_install(self) -> None:
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=42),
+            channel=SimpleNamespace(guild=None),
+            guild=None,
+            is_user_integration=lambda: True,
+            is_guild_integration=lambda: False,
+        )
+        with patch.dict(
+            os.environ,
+            {
+                main.SUPER_ADMIN_USERS_ENV: "42",
+                main.ALWAYS_ADMIN_USERS_ENV: "",
+            },
+        ):
+            self.assertTrue(main._interaction_allows_tools(cast(Any, interaction)))
+            self.assertTrue(main._is_server_admin(cast(Any, interaction.user), None))
 
     def test_environment_loads_from_compiled_executable_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -225,7 +258,13 @@ class CommandSurfaceTests(unittest.TestCase):
             is_guild_integration=lambda: False,
         )
         self.assertTrue(main._is_user_only_install(cast(Any, interaction)))
-        with patch.dict(os.environ, {main.ALWAYS_ADMIN_USERS_ENV: ""}):
+        with patch.dict(
+            os.environ,
+            {
+                main.SUPER_ADMIN_USERS_ENV: "",
+                main.ALWAYS_ADMIN_USERS_ENV: "",
+            },
+        ):
             self.assertFalse(main._interaction_allows_tools(cast(Any, interaction)))
 
     def test_guild_install_keeps_server_admin_tool_policy(self) -> None:

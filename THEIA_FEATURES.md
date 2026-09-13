@@ -31,7 +31,9 @@ Account-installed slash requests use the interaction webhook, so `/btw` and
 be a member of the server. Account installations do not receive ordinary
 message events, create Discord threads, or join voice channels. Their ordinary
 users remain on the safe/read-only Codex policy; trusted
-`THEIA_ALWAYS_ADMIN_USERS` can still use Theia's administrative controls.
+`THEIA_SUPER_ADMIN_USERS` can use all Theia administrative controls, including
+from an account-installed app. The former `THEIA_ALWAYS_ADMIN_USERS` setting is
+still accepted for compatibility.
 Server-scoped administrative commands still require a guild installation and
 the appropriate administrator access, unless the trusted-user setting applies.
 Guild-installed operation retains message listening, thread delivery, voice,
@@ -157,8 +159,9 @@ agent state.
 - Login reports `Already logged in`, `Cached authentication imported`,
   `Device code required`, and `Authentication completed` for those states.
 - A server administrator can authenticate the bot for server-wide use.
-- `THEIA_ALWAYS_ADMIN_USERS` can grant trusted Discord user IDs global Theia
-  administrator access even when they are not Discord server administrators.
+- `THEIA_SUPER_ADMIN_USERS` can grant trusted Discord user IDs global Super
+  Admin access even when they are not Discord server administrators. The former
+  `THEIA_ALWAYS_ADMIN_USERS` setting remains accepted for compatibility.
 - Sessions are isolated by Discord user, channel, and thread.
 - Approvals are bound to the Discord user, thread, turn, and approval item.
 - Codex approval requests are surfaced in Discord even when the current policy
@@ -313,10 +316,11 @@ Supported tool categories include:
 - Theia’s Discord messaging tool.
 
 Server administrators receive the configured Codex tool policy, normally workspace-write with approval requests. Normal users are restricted to read-only/safe operation and cannot perform writes, state-changing commands, credential access, external side effects, or unrestricted dynamic Discord actions.
-Users listed in `THEIA_ALWAYS_ADMIN_USERS` receive the same Theia administrator
-authorization for commands, full tool access, approvals, voice rechecks, and
-self-improvement review. The setting is a trusted deployment override and does
-not bypass Codex authentication.
+Users listed in `THEIA_SUPER_ADMIN_USERS` receive Super Admin authorization for
+every Theia administrative action, including account-installed commands, full
+tool access, approvals, voice rechecks, and self-improvement review. This is a
+trusted deployment override and does not bypass Codex authentication. The
+former `THEIA_ALWAYS_ADMIN_USERS` setting is accepted as a compatibility alias.
 
 Tool availability still depends on the selected model, account, provider capabilities, and Codex configuration. `modelProvider/capabilities/read` is implemented and cached, but does not currently have a dedicated Discord command.
 
