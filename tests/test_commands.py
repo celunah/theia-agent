@@ -229,6 +229,7 @@ class CommandSurfaceTests(unittest.TestCase):
                 "btw",
                 "skill",
                 "personality",
+                "memory",
                 "model",
                 "mode",
                 "restart",
@@ -1048,6 +1049,7 @@ class CommandSurfaceTests(unittest.TestCase):
                     "personality_presence",
                     "personality_footer",
                 ),
+                ("memory_total_entries", "memory_page"),
                 (
                     "debug_runtime",
                     "debug_configuration",

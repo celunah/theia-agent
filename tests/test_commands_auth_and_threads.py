@@ -180,6 +180,67 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
             interaction.followup.send.await_args.kwargs["embed"].description,
         )
 
+    async def test_memory_command_pages_an_administrator_memory_database(self) -> None:
+        interaction = SimpleNamespace(
+            channel=SimpleNamespace(id=7, guild=SimpleNamespace(id=42)),
+            guild=SimpleNamespace(id=42),
+            user=SimpleNamespace(
+                id=9,
+                guild_permissions=SimpleNamespace(administrator=True),
+            ),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(
+                send=AsyncMock(return_value=SimpleNamespace(id=123))
+            ),
+        )
+        result = {
+            "character_name": "Celune",
+            "character_slug": "cel",
+            "entries": ["First memory", "Second memory"],
+            "total_entries": 2,
+        }
+        with (
+            patch.object(main.bot.codex, "memory_view", return_value=result),
+            patch.object(main.bot, "register_view", new=AsyncMock()) as register,
+        ):
+            await cast(Any, main.codex_memory.callback)(
+                interaction,
+                scope=discord.app_commands.Choice(name="server", value="server"),
+            )
+
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        kwargs = interaction.followup.send.await_args.kwargs
+        self.assertTrue(kwargs["ephemeral"])
+        self.assertEqual(kwargs["embed"].title, "Celune's Memory")
+        self.assertIn("Total entries: 2", kwargs["embed"].description)
+        self.assertIn("First memory", kwargs["embed"].description)
+        self.assertIsInstance(kwargs["view"], main._MemoryView)
+        register.assert_awaited_once_with(kwargs["view"], SimpleNamespace(id=123))
+
+    async def test_memory_command_requires_administrator_access(self) -> None:
+        interaction = SimpleNamespace(
+            channel=SimpleNamespace(id=7, guild=SimpleNamespace(id=42)),
+            guild=SimpleNamespace(id=42),
+            user=SimpleNamespace(
+                id=9,
+                guild_permissions=SimpleNamespace(administrator=False),
+            ),
+            response=SimpleNamespace(
+                is_done=lambda: False,
+                send_message=AsyncMock(),
+                defer=AsyncMock(),
+            ),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        with patch.object(main.bot.codex, "memory_view") as memory_view:
+            await cast(Any, main.codex_memory.callback)(interaction)
+
+        memory_view.assert_not_called()
+        interaction.response.send_message.assert_awaited_once()
+        self.assertTrue(
+            interaction.response.send_message.await_args.kwargs["ephemeral"]
+        )
+
     async def test_login_messages_cover_each_authentication_path(self) -> None:
         """Expose distinct status messages for cached, imported, and device auth."""
         cases = (

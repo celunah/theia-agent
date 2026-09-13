@@ -201,6 +201,58 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
             any(key.startswith("__personality_summary__") for key in server._sessions)
         )
 
+    async def test_memory_view_uses_scope_character_and_returns_each_entry(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            memory_root = root / "theia" / "memories"
+            memory_root.mkdir(parents=True)
+            (memory_root / "MEMORY.md").write_text(
+                "# Memories\n- First durable fact\n  with more context\n"
+                "- Second durable fact\n",
+                encoding="utf-8",
+            )
+            (memory_root / "USER.md").write_text(
+                "- The user prefers concise replies.\n", encoding="utf-8"
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "THEIA_HOME": str(root / "theia"),
+                    "THEIA_STATE": str(root / "state.json"),
+                },
+            ):
+                server = main.CodexAppServer()
+                await server.configure_personality(
+                    "guild:42:channel:1:user:9",
+                    name="cel",
+                    scope="server",
+                    actor_user_id=9,
+                    guild_id=42,
+                    attachment=SimpleNamespace(
+                        filename="cel.md",
+                        size=32,
+                        read=AsyncMock(
+                            return_value=b"You are Celune, a calm guardian."
+                        ),
+                    ),
+                )
+                result = server.memory_view("guild:42:channel:1:user:9", scope="server")
+
+        self.assertEqual(result["character_name"], "Celune")
+        self.assertEqual(result["character_slug"], "cel")
+        self.assertEqual(result["scope"], "server")
+        self.assertEqual(result["total_entries"], 3)
+        self.assertEqual(
+            result["entries"],
+            [
+                "- First durable fact\nwith more context",
+                "- Second durable fact",
+                "- The user prefers concise replies.",
+            ],
+        )
+
     async def test_about_personality_recovers_one_active_profile_for_user_and_guild(
         self,
     ) -> None:

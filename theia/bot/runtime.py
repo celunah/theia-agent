@@ -23,7 +23,7 @@ from .support import (
 )
 from .embeds import _debug_embed
 from ..customization import FrontendCustomizationStore
-from ..delivery import _ImageResultView, _PaginatorView
+from ..delivery import _ImageResultView, _MemoryView, _PaginatorView
 from ..presence import PresenceManager, RichPresenceManager
 from ..recaps import NightlyRecapManager
 from ..ui import _DecisionView, _DebugView, _FormView, _UserInputView
@@ -136,6 +136,39 @@ class TheiaBot(commands.Bot):
             return _PaginatorView(
                 pages,
                 owner_id=user_id,
+                customizer=customizer,
+                guild_id=guild_id,
+                token=token,
+                recovered=True,
+                index=index,
+            )
+        if kind == "memory":
+            entries = state.get("entries")
+            if (
+                not isinstance(entries, list)
+                or not entries
+                or not all(isinstance(entry, str) for entry in entries)
+            ):
+                return None
+            character_name = state.get("character_name", "Theia")
+            character_slug = state.get("character_slug", "theia")
+            scope = state.get("scope", "me")
+            if not all(
+                isinstance(value, str)
+                for value in (character_name, character_slug, scope)
+            ):
+                return None
+            index = state.get("index", 0)
+            index = index if isinstance(index, int) else 0
+            total_entries = state.get("total_entries")
+            total_entries = total_entries if isinstance(total_entries, int) else None
+            return _MemoryView(
+                entries,
+                character_name=character_name,
+                character_slug=character_slug,
+                scope=scope,
+                owner_id=user_id,
+                total_entries=total_entries,
                 customizer=customizer,
                 guild_id=guild_id,
                 token=token,

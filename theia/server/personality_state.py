@@ -24,6 +24,7 @@ from .policy import (
 from ..core import (
     BASE_PRIORS,
     CodexAppServerError,
+    PERSONALITY_SCOPES,
     _Session,
     _TurnState,
     _codex_logger,
@@ -76,21 +77,105 @@ class CodexPersonalityStateMixin:
         }
 
     @staticmethod
-    def _memory_entry_count(text: str) -> int:
-        """Count durable Markdown memory records without reading their contents out."""
-        bullet_count = sum(
-            1 for line in text.splitlines() if _MEMORY_ENTRY_RE.match(line)
-        )
-        if bullet_count:
-            return bullet_count
-        return sum(
-            1
-            for block in re.split(r"\n\s*\n", text)
-            if any(
-                line.strip() and not line.lstrip().startswith("#")
+    def _memory_entries_from_text(text: str) -> list[str]:
+        """Extract the same bounded Markdown records used by the card counts."""
+        bullets: list[str] = []
+        current: list[str] = []
+        for line in text.splitlines():
+            if _MEMORY_ENTRY_RE.match(line):
+                if current:
+                    bullets.append("\n".join(current))
+                current = [line.strip()]
+            elif current and line.strip() and not line.lstrip().startswith("#"):
+                current.append(line.strip())
+        if current:
+            bullets.append("\n".join(current))
+        if bullets:
+            return bullets
+        entries: list[str] = []
+        for block in re.split(r"\n\s*\n", text):
+            lines = [
+                line.strip()
                 for line in block.splitlines()
+                if line.strip() and not line.lstrip().startswith("#")
+            ]
+            if lines:
+                entries.append("\n".join(lines))
+        return entries
+
+    @classmethod
+    def _memory_entry_count(cls, text: str) -> int:
+        """Count durable Markdown memory records without reading their contents out."""
+        return len(cls._memory_entries_from_text(text))
+
+    def memory_view(self, session_key: str, scope: str = "me") -> dict[str, Any]:
+        """Return one scoped character identity and its complete memory snapshot."""
+        normalized_scope = scope.strip().casefold()
+        if normalized_scope not in PERSONALITY_SCOPES:
+            raise CodexAppServerError(
+                "Memory scope must be `me`, `server`, or `everyone`."
             )
+        canonical_key = self._canonical_session_key(session_key)
+        guild_id, user_id = self._personality_scope_identity(canonical_key)
+        if normalized_scope == "server" and (guild_id is None or guild_id <= 0):
+            raise CodexAppServerError("The `server` memory scope requires a server.")
+
+        scope_key = {
+            "me": f"me:{user_id}" if user_id is not None and user_id > 0 else None,
+            "server": (
+                f"server:{guild_id}" if guild_id is not None and guild_id > 0 else None
+            ),
+            "everyone": "everyone",
+        }[normalized_scope]
+        record = self._personality_scopes.get(scope_key) if scope_key else None
+        profile_name = (
+            record.get("name")
+            if isinstance(record, dict) and isinstance(record.get("name"), str)
+            else self.active_personality(canonical_key)
         )
+        character_name = "Theia"
+        character_slug = "theia"
+        if profile_name:
+            try:
+                summary = self._personalities.summary(profile_name)
+            except PersonalityError:
+                summary = None
+            if summary is not None:
+                character_name = summary.character_name
+                character_slug = summary.identifier
+
+        entries: list[str] = []
+        seen: set[Path] = set()
+        for root in self._memory_roots:
+            if root == self._global_codex_home / "memories" and not _env_bool(
+                "THEIA_INCLUDE_GLOBAL_MEMORY"
+            ):
+                continue
+            for filename in ("MEMORY.md", "USER.md"):
+                path = root / filename
+                if path in seen:
+                    continue
+                seen.add(path)
+                try:
+                    if not path.is_file() or path.stat().st_size > MEMORY_FILE_LIMIT:
+                        continue
+                    text = path.read_text(encoding="utf-8-sig").strip()
+                except (OSError, UnicodeDecodeError) as exc:
+                    logger.debug(
+                        "Could not read memory viewer source (error=%s)",
+                        type(exc).__name__,
+                    )
+                    continue
+                if text:
+                    entries.extend(self._memory_entries_from_text(text))
+        return {
+            "scope": normalized_scope,
+            "resolved_scope": record.get("scope") if isinstance(record, dict) else None,
+            "character_name": character_name,
+            "character_slug": character_slug,
+            "entries": entries,
+            "total_entries": len(entries),
+        }
 
     def _personality_memory_stats(self) -> dict[str, int]:
         """Count the character's private memory snapshots and referenced users."""

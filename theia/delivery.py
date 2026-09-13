@@ -196,6 +196,158 @@ class _PaginatorView(_PersistentViewMixin, discord.ui.View):
             _reaction_paginators.pop(self.message.id, None)
 
 
+class _MemoryView(_PersistentViewMixin, discord.ui.View):
+    """Owner-only embed pagination for one character's memory snapshot."""
+
+    def __init__(
+        self,
+        entries: list[str],
+        *,
+        character_name: str,
+        character_slug: str = "theia",
+        scope: str = "me",
+        owner_id: int | None,
+        total_entries: int | None = None,
+        customizer: Any | None = None,
+        guild_id: int | None = None,
+        timeout: float = 900,
+        token: str | None = None,
+        recovered: bool = False,
+        index: int = 0,
+    ) -> None:
+        self._init_persistence("memory", token, recovered=recovered)
+        super().__init__(timeout=None if recovered else timeout)
+        self.total_entries = max(
+            0,
+            total_entries
+            if isinstance(total_entries, int) and not isinstance(total_entries, bool)
+            else len(entries),
+        )
+        self.entries = entries or ["No memories recorded."]
+        self.character_name = character_name or "Theia"
+        self.character_slug = character_slug or "theia"
+        self.scope = scope
+        self.owner_id = owner_id
+        self.customizer = customizer
+        self.guild_id = guild_id
+        self.index = max(0, min(index, len(self.entries) - 1))
+        self.message: discord.Message | discord.WebhookMessage | None = None
+        previous = discord.ui.Button(
+            label=_render_frontend_label(
+                customizer,
+                guild_id,
+                "label:previous_button",
+                "Previous",
+            ),
+            style=discord.ButtonStyle.secondary,
+            custom_id=self._custom_id("previous"),
+        )
+        following = discord.ui.Button(
+            label=_render_frontend_label(
+                customizer,
+                guild_id,
+                "label:next_button",
+                "Next",
+            ),
+            style=discord.ButtonStyle.primary,
+            custom_id=self._custom_id("next"),
+        )
+
+        async def previous_callback(interaction: discord.Interaction) -> None:
+            if not await self.interaction_check(interaction):
+                return
+            self.index = max(0, self.index - 1)
+            await interaction.response.edit_message(
+                embed=self.embed(), view=self._view()
+            )
+            await self._notify_state_change()
+
+        async def next_callback(interaction: discord.Interaction) -> None:
+            if not await self.interaction_check(interaction):
+                return
+            self.index = min(len(self.entries) - 1, self.index + 1)
+            await interaction.response.edit_message(
+                embed=self.embed(), view=self._view()
+            )
+            await self._notify_state_change()
+
+        previous.callback = previous_callback
+        following.callback = next_callback
+        self.add_item(previous)
+        self.add_item(following)
+        self._sync_buttons()
+
+    def _view(self) -> "_MemoryView":
+        self._sync_buttons()
+        return self
+
+    def _sync_buttons(self) -> None:
+        buttons = [
+            child for child in self.children if isinstance(child, discord.ui.Button)
+        ]
+        if len(buttons) == 2:
+            buttons[0].disabled = self.index == 0
+            buttons[1].disabled = self.index == len(self.entries) - 1
+
+    def embed(self) -> discord.Embed:
+        """Render the selected memory as one structured Discord embed."""
+        character_name = _safe_intermediate_text(self.character_name, 120) or "Theia"
+        character_slug = _safe_intermediate_text(self.character_slug, 80) or "theia"
+        context = {
+            "character_name": character_name,
+            "character_slug": character_slug,
+            "count": self.total_entries,
+            "page": self.index + 1,
+            "pages": len(self.entries),
+            "scope": self.scope,
+        }
+        entry = _safe_intermediate_text(self.entries[self.index], 3500)
+        entry = entry or "Memory entry unavailable."
+        total = context["count"]
+        total_label = _render_frontend_label(
+            self.customizer,
+            self.guild_id,
+            "label:memory_total_entries",
+            "Total entries",
+            context=context,
+        )
+        embed = _command_embed(
+            f"{character_name}'s Memory",
+            f"{total_label}: {total}\n\n{entry}",
+            target="command:memory",
+            guild_id=self.guild_id,
+            customizer=self.customizer,
+            context=context,
+        )
+        if len(self.entries) > 1:
+            embed.set_footer(
+                text=_render_frontend_label(
+                    self.customizer,
+                    self.guild_id,
+                    "label:memory_page",
+                    f"Page {self.index + 1} of {len(self.entries)}",
+                    context=context,
+                )
+            )
+        return embed
+
+    def persistence_data(self) -> dict[str, Any]:
+        return {
+            "entries": self.entries,
+            "character_name": self.character_name,
+            "character_slug": self.character_slug,
+            "scope": self.scope,
+            "user_id": self.owner_id,
+            "guild_id": self.guild_id,
+            "index": self.index,
+            "total_entries": self.total_entries,
+        }
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Allow memory pagination only to the requesting administrator."""
+        return await _check_interaction_owner(interaction, self.owner_id)
+
+
 _reaction_paginators: dict[int, _PaginatorView] = {}
 
 

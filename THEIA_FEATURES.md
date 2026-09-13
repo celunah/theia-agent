@@ -20,6 +20,7 @@ The current commands are:
 - `/btw [prompt] [file]` (a blank prompt opens a request modal)
 - `/skill <skill_name>`
 - `/personality [file] [name]`
+- `/memory [scope]`
 - `/model <model>`
 - `/mode text|voice`
 - `/restart`
@@ -55,6 +56,10 @@ duration is rounded to whole seconds.
 state. It refreshes independently while the view is open, including during other
 agent tasks, and does not expose prompts, tool output, credentials, or private
 paths.
+
+`/memory` is an administrator-only private paginated view of the selected
+character's complete configured memory database. Choose `me`, `server`, or
+`everyone`; each memory entry appears on its own embed page.
 
 Each isolated conversation also has a temporary simulated mood. It derives a
 resting affect from the active personality, uses a bounded private Codex
