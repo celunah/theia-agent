@@ -20,10 +20,12 @@ from ..core import (
     AGENT_NAME,
     THEIA_VERSION,
     CodexAppServerError,
+    CodexTransientRestartError,
     _codex_logger,
     _TurnState,
 )
 from .codex_update import CodexUpdateResult
+from .policy import MAX_CODEX_MEMORY_RESTART_BACKOFF
 
 logger = _codex_logger()
 
@@ -43,6 +45,9 @@ class CodexLifecycleMixin:
         _memory_watchdog_interval: float
         _memory_restart_grace: float
         _memory_breach_samples: int
+        _memory_restart_backoff: float
+        _memory_restart_backoff_until: float
+        _memory_restart_streak: int
         _memory_watchdog_task: asyncio.Task[None] | None
         _memory_recovery_task: asyncio.Task[None] | None
         _memory_recovery_active: bool
@@ -276,11 +281,13 @@ class CodexLifecycleMixin:
             return False
 
     async def _ensure_running(self) -> None:
-        if self._memory_recovery_active:
-            raise CodexAppServerError(
-                "Codex is restarting after exceeding its memory limit; "
-                "try again shortly."
-            )
+        while self._memory_recovery_active:
+            recovery = self._memory_recovery_task
+            if recovery is not None and recovery is not asyncio.current_task():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.shield(recovery)
+            else:
+                await asyncio.sleep(0.05)
         process = self._process
         if (
             process is None
@@ -387,6 +394,11 @@ class CodexLifecycleMixin:
                 rss = self._codex_process_rss()
                 if rss is None or rss < self._memory_watchdog_limit:
                     self._memory_breach_count = 0
+                    self._memory_restart_streak = 0
+                    self._memory_restart_backoff_until = 0.0
+                    continue
+                if time.monotonic() < self._memory_restart_backoff_until:
+                    self._memory_breach_count = 0
                     continue
                 self._memory_breach_count += 1
                 if self._memory_breach_count < self._memory_breach_samples:
@@ -408,6 +420,10 @@ class CodexLifecycleMixin:
         """Interrupt current turns, then replace an over-sized Codex process."""
         self._memory_recovery_active = True
         started = False
+        backoff = min(
+            self._memory_restart_backoff * (2 ** min(self._memory_restart_streak, 8)),
+            MAX_CODEX_MEMORY_RESTART_BACKOFF,
+        )
         try:
             async with self._lifecycle_lock:
                 if self._process is None or self._process.returncode is not None:
@@ -422,6 +438,8 @@ class CodexLifecycleMixin:
                 await self._close_locked()
                 await self._start_locked()
                 started = True
+                self._memory_restart_streak += 1
+                self._memory_restart_backoff_until = time.monotonic() + backoff
                 logger.info("Codex App Server recovered after memory pressure")
         except Exception as exc:  # noqa: BLE001 - recovery is best effort
             logger.error(
@@ -430,7 +448,9 @@ class CodexLifecycleMixin:
             )
         finally:
             self._memory_recovery_active = False
-            if started:
+            if started or (
+                self._process is not None and self._process.returncode is None
+            ):
                 self._memory_recovery_task = None
                 self._start_memory_watchdog()
 
@@ -487,7 +507,7 @@ class CodexLifecycleMixin:
             not state.done.done() for state, _, _ in active
         ):
             await asyncio.sleep(0.1)
-        failure = CodexAppServerError(
+        failure = CodexTransientRestartError(
             "Codex restarted because its memory usage exceeded the configured limit."
         )
         for state, _, _ in active:

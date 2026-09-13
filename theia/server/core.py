@@ -26,6 +26,7 @@ from ..core import (
     _error_message,
     _is_always_admin_user,
     _codex_logger,
+    _path_is_under,
     _PendingApproval,
     _Session,
     _skill_entries,
@@ -43,6 +44,7 @@ from .policy import (
     CODEX_MEMORY_BREACH_SAMPLES_ENV,
     CODEX_MEMORY_CHECK_INTERVAL_ENV,
     CODEX_MEMORY_RESTART_GRACE_ENV,
+    CODEX_MEMORY_RESTART_BACKOFF_ENV,
     CODEX_MEMORY_WATCHDOG_ENV,
     CODEX_MAX_RSS_MB_ENV,
     DEFAULT_ATTACHMENT_CACHE_LIMIT_BYTES,
@@ -50,6 +52,7 @@ from .policy import (
     DEFAULT_CODEX_MEMORY_BREACH_SAMPLES,
     DEFAULT_CODEX_MEMORY_CHECK_INTERVAL,
     DEFAULT_CODEX_MEMORY_RESTART_GRACE,
+    DEFAULT_CODEX_MEMORY_RESTART_BACKOFF,
     DEFAULT_CODEX_MEMORY_WATCHDOG,
     DEFAULT_CODEX_MAX_RSS_MB,
     DEFAULT_CODEX_STDIO_LIMIT,
@@ -126,6 +129,8 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
         self._memory_recovery_task: asyncio.Task[None] | None = None
         self._memory_recovery_active = False
         self._memory_breach_count = 0
+        self._memory_restart_streak = 0
+        self._memory_restart_backoff_until = 0.0
         self._codex_update_skip_once = False
         self._server_tasks: set[asyncio.Task[Any]] = set()
         self._write_lock = asyncio.Lock()
@@ -223,6 +228,13 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
             _env_float(
                 CODEX_MEMORY_RESTART_GRACE_ENV,
                 DEFAULT_CODEX_MEMORY_RESTART_GRACE,
+            ),
+        )
+        self._memory_restart_backoff = max(
+            1.0,
+            _env_float(
+                CODEX_MEMORY_RESTART_BACKOFF_ENV,
+                DEFAULT_CODEX_MEMORY_RESTART_BACKOFF,
             ),
         )
         try:
@@ -327,17 +339,24 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
             dict.fromkeys(
                 (
                     Path(self._cwd),
+                    self._codex_home,
                     self._attachment_root,
                     *self._memory_roots,
                     *workspace_skill_roots,
                 )
             )
         )
+        self._approval_required_workspace_roots = (self._codex_home,)
         # Codex stores native image-generation artifacts here. Keep this as a
         # delivery-only root rather than exposing the private directory to
         # ordinary tool authorization.
+        image_workspace_roots = tuple(
+            path
+            for path in self._shared_workspace_roots
+            if not _path_is_under(path, (self._codex_home,))
+        )
         self._image_artifact_roots = tuple(
-            dict.fromkeys((*self._shared_workspace_roots, self._generated_image_root))
+            dict.fromkeys((*image_workspace_roots, self._generated_image_root))
         )
         self._safe_workspace_roots = tuple(
             dict.fromkeys(

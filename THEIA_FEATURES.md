@@ -174,9 +174,15 @@ agent state.
 - Pending approvals are cleared after completion, denial, cancellation, timeout, or interruption.
 - ChatGPT tokens and internal app-server credentials are never sent to Discord.
 - The Codex process tree has an RSS watchdog. After sustained memory growth it
-  interrupts active turns, reports the interruption through the normal error
-  path, and restarts Codex while preserving persisted Theia state. Configure it
-  with `THEIA_CODEX_MAX_RSS_MB` or set that value to `0` to disable it.
+  interrupts active turns, retries them after recovery with bounded backoff, and
+  restarts Codex while preserving persisted Theia state. Repeated recoveries use
+  an exponential backoff to prevent a restart loop. Configure the initial delay
+  with `THEIA_CODEX_MEMORY_RESTART_BACKOFF`; configure the memory limit with
+  `THEIA_CODEX_MAX_RSS_MB` or set that value to `0` to disable the watchdog.
+- Administrator threads can access Theia's private `.theia` runtime directory
+  when needed. Any command, file change, permission change, or Discord file
+  delivery involving that directory requires explicit approval; regular users
+  cannot access it through Codex tools.
 - Codex CLI updates are opt-in with `THEIA_CODEX_AUTO_UPDATE=true`. Theia uses
   the official standalone installer in a private, versioned runtime directory,
   verifies the candidate version and App Server handshake, then activates it

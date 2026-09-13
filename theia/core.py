@@ -165,6 +165,10 @@ class CodexAppServerError(RuntimeError):
     """A Codex App Server operation failed or returned an unusable result."""
 
 
+class CodexTransientRestartError(CodexAppServerError):
+    """A turn was interrupted for automatic Codex recovery and may be retried."""
+
+
 class _CodexColorFormatter(logging.Formatter):
     """Use the same layout and ANSI palette as discord.py's logger."""
 

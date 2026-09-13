@@ -571,6 +571,73 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
             "Discord could not send the message.",
         )
 
+    def test_runtime_directory_commands_always_require_manual_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(
+                os.environ,
+                {"THEIA_HOME": str(root / "theia")},
+            ):
+                server = main.CodexAppServer()
+            command = f"ls {server._codex_home / 'sessions.json'}"
+
+        self.assertEqual(
+            server._approval_risk("command", {"command": command}),
+            "very_dangerous",
+        )
+
+    async def test_runtime_file_delivery_requires_manual_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(os.environ, {"THEIA_HOME": str(root / "theia")}):
+                server = main.CodexAppServer()
+            server._codex_home.mkdir()
+            runtime_file = server._codex_home / "diagnostic.txt"
+            runtime_file.write_text("private", encoding="utf-8")
+            server._approval_request = AsyncMock(return_value={"decision": "decline"})
+            channel = _Channel()
+            channel.guild = _admin_guild()
+            state = main._TurnState(
+                thread_id="thread",
+                channel=channel,
+                user_id=7,
+                allow_tools=True,
+            )
+
+            result = await server._dynamic_tool_call(
+                state,
+                {
+                    "tool": "send_message",
+                    "namespace": "discord",
+                    "arguments": {
+                        "content": "private file",
+                        "files": [{"path": str(runtime_file)}],
+                    },
+                },
+            )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(channel.sent, [])
+        server._approval_request.assert_awaited_once()  # type: ignore[attr-defined]
+
+    def test_runtime_files_cannot_be_disguised_as_generated_images(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(os.environ, {"THEIA_HOME": str(root / "theia")}):
+                server = main.CodexAppServer()
+            runtime_file = server._codex_home / "private.png"
+            runtime_file.parent.mkdir()
+            runtime_file.write_bytes(b"not an image")
+
+            result = server.image_artifact_path(
+                {
+                    "type": "imageGeneration",
+                    "savedPath": str(runtime_file),
+                }
+            )
+
+        self.assertIsNone(result)
+
     def test_safe_text_redacts_windows_and_unc_paths(self) -> None:
         windows = r"failed at C:\Users\user\PrivateProject\secret.db"
         unc = r"failed at \\server\share\PrivateProject\secret.db"

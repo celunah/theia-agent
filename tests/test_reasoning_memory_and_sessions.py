@@ -499,6 +499,21 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
             )["baseInstructions"],
         )
 
+    def test_only_administrator_threads_receive_the_private_runtime_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(
+                os.environ,
+                {
+                    "THEIA_HOME": str(root / "theia"),
+                    "THEIA_STATE": str(root / "state.json"),
+                },
+            ):
+                server = main.CodexAppServer()
+
+        self.assertIn(server._codex_home, server._workspace_roots(True))
+        self.assertNotIn(server._codex_home, server._workspace_roots(False))
+
     async def test_voice_transcript_rechecks_current_administrator_access(self) -> None:
         member = SimpleNamespace(
             guild_permissions=SimpleNamespace(administrator=False),

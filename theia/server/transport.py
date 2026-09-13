@@ -8,6 +8,7 @@ import json
 import re
 import time
 from collections.abc import Awaitable, Callable, Coroutine, Iterable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import discord
@@ -45,6 +46,7 @@ class CodexTransportMixin:
     if TYPE_CHECKING:
         _next_request_id: int
         _skills_refresh_task: asyncio.Task[Any] | None
+        _approval_required_workspace_roots: tuple[Path, ...]
 
     def __getattr__(self, name: str) -> Any:
         raise AttributeError(name)
@@ -518,6 +520,8 @@ class CodexTransportMixin:
             return _APPROVAL_RISK_VERY_DANGEROUS
         if params.get("networkApprovalContext"):
             return _APPROVAL_RISK_VERY_DANGEROUS
+        if params.get("runtimeDirectoryApproval"):
+            return _APPROVAL_RISK_VERY_DANGEROUS
 
         actions = params.get("commandActions")
         if isinstance(actions, list) and any(
@@ -541,6 +545,8 @@ class CodexTransportMixin:
                     if ":\\" in candidate or candidate.startswith("\\\\"):
                         return _APPROVAL_RISK_VERY_DANGEROUS
                     continue
+                if _path_is_under(path, self._approval_required_workspace_roots):
+                    return _APPROVAL_RISK_VERY_DANGEROUS
                 if not _path_is_under(path, self._shared_workspace_roots):
                     return _APPROVAL_RISK_VERY_DANGEROUS
 
@@ -601,6 +607,8 @@ class CodexTransportMixin:
             return "provide input to an existing command"
         if params.get("networkApprovalContext"):
             return "access an external network resource"
+        if params.get("runtimeDirectoryApproval"):
+            return "send a file from Theia's private runtime directory to Discord"
         return "run a command using the configured Codex tools"
 
     @staticmethod
@@ -1009,6 +1017,7 @@ class CodexTransportMixin:
                 "success": False,
             }
         files: list[discord.File] = []
+        protected_paths: list[Path] = []
         raw_files = arguments.get("files") or arguments.get("attachments") or []
         if isinstance(raw_files, (str, dict)):
             raw_files = [raw_files]
@@ -1031,9 +1040,45 @@ class CodexTransportMixin:
                         continue
                     if resolved.stat().st_size > MAX_ATTACHMENT_BYTES:
                         continue
-                    files.append(discord.File(str(resolved), filename=resolved.name))
+                    if _path_is_under(
+                        resolved, self._approval_required_workspace_roots
+                    ):
+                        protected_paths.append(resolved)
+                    else:
+                        files.append(
+                            discord.File(str(resolved), filename=resolved.name)
+                        )
                 except OSError:
                     continue
+        if protected_paths:
+            approval = await self._approval_request(
+                state.channel,
+                state.user_id,
+                state,
+                {
+                    "itemId": f"runtime-files-{time.monotonic_ns()}",
+                    "reason": (
+                        "send a file from Theia's private runtime directory to Discord"
+                    ),
+                    "runtimeDirectoryApproval": True,
+                },
+                kind="command",
+            )
+            if approval.get("decision") != "accept":
+                for file in files:
+                    file.close()
+                return {
+                    "contentItems": [
+                        {
+                            "type": "inputText",
+                            "text": "The runtime file attachment was not approved.",
+                        }
+                    ],
+                    "success": False,
+                }
+            files.extend(
+                discord.File(str(path), filename=path.name) for path in protected_paths
+            )
         logger.debug("Codex Discord tool prepared (files=%d)", len(files))
         try:
             await state.channel.send(

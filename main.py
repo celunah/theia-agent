@@ -7,7 +7,9 @@ from theia.server.core import (
     CodexAppServerError,
 )
 from theia.server.policy import (
+    CODEX_MEMORY_RESTART_BACKOFF_ENV,
     CODEX_STDIO_LIMIT_ENV,
+    DEFAULT_CODEX_MEMORY_RESTART_BACKOFF,
     DEFAULT_CODEX_STDIO_LIMIT,
     MAX_CODEX_STDIO_LIMIT,
     MIN_CODEX_STDIO_LIMIT,
@@ -15,6 +17,7 @@ from theia.server.policy import (
     SESSION_DELETE_AFTER,
 )
 from theia.core import (
+    CodexTransientRestartError,
     _PendingApproval,
     _MoodState,
     _Session,
@@ -215,12 +218,14 @@ __all__ = [
     "BASE_PRIORS",
     "CODEX_AUTO_UPDATE_ENV",
     "CODEX_LOG_COLORS_ENV",
+    "CODEX_MEMORY_RESTART_BACKOFF_ENV",
     "CODEX_STDIO_LIMIT_ENV",
     "CODEX_UPDATE_INTERVAL_ENV",
     "CODEX_UPDATE_TIMEOUT_ENV",
     "COMMAND_TARGETS",
     "DEFAULT_APPROVAL_LEVEL",
     "DEFAULT_CODEX_AUTO_UPDATE",
+    "DEFAULT_CODEX_MEMORY_RESTART_BACKOFF",
     "DEFAULT_CODEX_MODEL",
     "DEFAULT_CODEX_STDIO_LIMIT",
     "DEFAULT_CODEX_UPDATE_INTERVAL",
@@ -271,6 +276,7 @@ __all__ = [
     "CodexAppServer",
     "CodexAppServerError",
     "CodexBot",
+    "CodexTransientRestartError",
     "CodexUpdateResult",
     "CodexUpdater",
     "CustomizationError",
