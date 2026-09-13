@@ -63,6 +63,15 @@ from .notifications import CodexNotificationMixin
 from .personality_state import CodexPersonalityStateMixin
 from .conversation import CodexConversationMixin
 from .attention import CodexAttentionMixin
+from .codex_update import (
+    CODEX_AUTO_UPDATE_ENV,
+    CODEX_UPDATE_INTERVAL_ENV,
+    CODEX_UPDATE_TIMEOUT_ENV,
+    DEFAULT_CODEX_AUTO_UPDATE,
+    DEFAULT_CODEX_UPDATE_INTERVAL,
+    DEFAULT_CODEX_UPDATE_TIMEOUT,
+    CodexUpdater,
+)
 from .self_model import CodexSelfModelMixin
 from .workspace import CodexWorkspaceMixin
 from .lifecycle import CodexLifecycleMixin
@@ -117,6 +126,7 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
         self._memory_recovery_task: asyncio.Task[None] | None = None
         self._memory_recovery_active = False
         self._memory_breach_count = 0
+        self._codex_update_skip_once = False
         self._server_tasks: set[asyncio.Task[Any]] = set()
         self._write_lock = asyncio.Lock()
         self._models_lock = asyncio.Lock()
@@ -145,6 +155,17 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
         self._request_timeout = _env_float("CODEX_REQUEST_TIMEOUT", 60)
         self._turn_timeout = _env_float("CODEX_TURN_TIMEOUT", 1800)
         self._assessment_timeout = _env_float("CODEX_ASSESSMENT_TIMEOUT", 60)
+        self._codex_auto_update = _env_bool(
+            CODEX_AUTO_UPDATE_ENV, DEFAULT_CODEX_AUTO_UPDATE
+        )
+        self._codex_update_interval = max(
+            0.0,
+            _env_float(CODEX_UPDATE_INTERVAL_ENV, DEFAULT_CODEX_UPDATE_INTERVAL),
+        )
+        self._codex_update_timeout = max(
+            10.0,
+            _env_float(CODEX_UPDATE_TIMEOUT_ENV, DEFAULT_CODEX_UPDATE_TIMEOUT),
+        )
         self._adaptive_reasoning = _env_bool(ADAPTIVE_REASONING_ENV, True)
         self._self_improvement_enabled = _env_bool(
             SELF_IMPROVEMENT_ENV, DEFAULT_SELF_IMPROVEMENT
@@ -264,6 +285,14 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
         )
         self._codex_environment = self._build_codex_environment()
         self._codex_environment["CODEX_HOME"] = str(self._codex_home)
+        self._codex_updater = CodexUpdater(
+            self._codex_home,
+            cwd=Path(self._cwd),
+            environment=self._codex_environment,
+            enabled=self._codex_auto_update,
+            interval=self._codex_update_interval,
+            timeout=self._codex_update_timeout,
+        )
         self._personalities = PersonalityStore(self._codex_home)
         self._audio = OpenAICompatibleAudio.from_environment()
         self._hermes_memory_root = self._codex_home / "memories" / "hermes"
@@ -365,11 +394,13 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
             self._state_needs_cleanup = False
         logger.debug(
             "Codex layer initialized (adaptive_reasoning=%s, approval_level=%s, "
-            "self_improvement=%s, memory_roots=%d, skill_roots=%d, "
+            "self_improvement=%s, codex_auto_update=%s, memory_roots=%d, "
+            "skill_roots=%d, "
             "transcription=%s, tts=%s)",
             self._adaptive_reasoning,
             self._approval_level,
             self._self_improvement_enabled,
+            self._codex_auto_update,
             len(self._memory_roots),
             len(self._skill_roots),
             self._audio.transcription.enabled,
@@ -924,6 +955,7 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
                 "approval_level": self._approval_level,
                 "adaptive_reasoning": self._adaptive_reasoning,
                 "self_improvement": self._self_improvement_enabled,
+                "codex_update": self._codex_updater.status(),
             },
             "session": {
                 "mode": session.mode,

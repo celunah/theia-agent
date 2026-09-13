@@ -23,6 +23,7 @@ from ..core import (
     _codex_logger,
     _TurnState,
 )
+from .codex_update import CodexUpdateResult
 
 logger = _codex_logger()
 
@@ -46,6 +47,8 @@ class CodexLifecycleMixin:
         _memory_recovery_task: asyncio.Task[None] | None
         _memory_recovery_active: bool
         _memory_breach_count: int
+        _codex_updater: Any
+        _codex_update_skip_once: bool
 
     def __getattr__(self, name: str) -> Any:
         raise AttributeError(name)
@@ -70,12 +73,6 @@ class CodexLifecycleMixin:
             session.turn_id = None
         self._loaded_thread_ids.clear()
 
-        executable = self._codex_executable()
-        if executable is None:
-            raise CodexAppServerError(
-                "The Codex CLI is not installed. Run the project bootstrap command "
-                "or install Codex CLI on PATH."
-            )
         try:
             self._codex_home.mkdir(parents=True, exist_ok=True)
             self._codex_home.chmod(0o700)
@@ -87,6 +84,13 @@ class CodexLifecycleMixin:
         self._migrate_legacy_home()
         self._ensure_web_search_config()
         self._auth_imported = self._import_global_auth()
+        update_result = await self._maybe_update_codex()
+        executable = self._codex_executable()
+        if executable is None:
+            raise CodexAppServerError(
+                "The Codex CLI is not installed. Run the project bootstrap command "
+                "or install Codex CLI on PATH."
+            )
 
         try:
             self._process = await asyncio.create_subprocess_exec(
@@ -103,6 +107,8 @@ class CodexLifecycleMixin:
                 "Codex App Server process could not be launched (error=%s)",
                 type(exc).__name__,
             )
+            if await self._retry_after_codex_update(update_result):
+                return
             raise CodexAppServerError(
                 "The Codex App Server could not be started."
             ) from None
@@ -150,7 +156,39 @@ class CodexLifecycleMixin:
                 type(exc).__name__,
             )
             await self._close_locked()
+            if await self._retry_after_codex_update(update_result):
+                return
             raise
+
+    async def _maybe_update_codex(self) -> CodexUpdateResult:
+        """Stage a configured Codex update before launching the child process."""
+        if self._codex_update_skip_once:
+            self._codex_update_skip_once = False
+            return self._codex_updater_result("skipped")
+        if os.getenv("THEIA_CODEX_CLI", "").strip():
+            logger.debug("Codex CLI auto-update skipped for an explicit executable")
+            return self._codex_updater_result("skipped")
+        result = await self._codex_updater.maybe_update()
+        if result.status == "updated":
+            logger.info("Codex CLI updated (version=%s)", result.version or "unknown")
+        elif result.status == "failed":
+            logger.warning("Codex CLI auto-update failed; using the current CLI")
+        return result
+
+    async def _retry_after_codex_update(self, result: CodexUpdateResult) -> bool:
+        """Retry startup with the previous CLI when a fresh candidate fails."""
+        if not result.activated or not self._codex_updater.rollback(result.install_dir):
+            return False
+        self._codex_update_skip_once = True
+        logger.warning(
+            "Codex App Server startup failed after an update; retrying the previous CLI"
+        )
+        await self._start_locked()
+        return True
+
+    def _codex_updater_result(self, status: str) -> CodexUpdateResult:
+        """Create a no-op result for a skipped update attempt."""
+        return CodexUpdateResult(status)
 
     def _codex_executable(self) -> str | None:
         """Find Theia's bundled CLI before accepting a system installation."""
@@ -165,6 +203,11 @@ class CodexLifecycleMixin:
                 logger.debug("Using explicitly configured Codex CLI from PATH")
                 return configured_executable
             logger.warning("Configured Codex CLI is unavailable; continuing search")
+
+        managed = self._codex_updater.active_executable()
+        if managed is not None:
+            logger.debug("Using Theia-managed Codex CLI")
+            return managed
 
         project_root = Path(__file__).resolve().parent.parent
         roots = tuple(dict.fromkeys((project_root, Path(self._cwd))))

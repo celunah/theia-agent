@@ -177,6 +177,15 @@ agent state.
   interrupts active turns, reports the interruption through the normal error
   path, and restarts Codex while preserving persisted Theia state. Configure it
   with `THEIA_CODEX_MAX_RSS_MB` or set that value to `0` to disable it.
+- Codex CLI updates are opt-in with `THEIA_CODEX_AUTO_UPDATE=true`. Theia uses
+  the official standalone installer in a private, versioned runtime directory,
+  verifies the candidate version and App Server handshake, then activates it
+  only before a new child process starts. Failed startup rolls back to the
+  previous CLI. Set `THEIA_CODEX_UPDATE_INTERVAL` and
+  `THEIA_CODEX_UPDATE_TIMEOUT` to control checks. An explicit
+  `THEIA_CODEX_CLI` path is never overwritten. The staged installation is
+  persisted in Theia's private home and is independent of sessions,
+  authentication, memories, and personality data.
 
 ## Models and reasoning
 

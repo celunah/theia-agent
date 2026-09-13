@@ -15,6 +15,7 @@ preferences that matter to you.
 - Theia-only usage tracking, background work, daily recaps, and optional self-improvement.
 - A temporary, personality-aware mood, Rich Presence, and server-specific customization.
 - Conversational attention that preserves substantial topic changes and follows brief tangents naturally.
+- Optional automatic Codex CLI updates with staged verification and rollback.
 
 Theia can be installed to a Discord account as well as a server. Account
 installations provide slash-command conversations in DMs, group DMs, and
@@ -68,3 +69,8 @@ docker compose up --build -d
 ```
 
 Theia keeps her private data and working files in the mounted directories.
+
+Set `THEIA_CODEX_AUTO_UPDATE=true` to let Theia check for and stage official
+Codex CLI updates in her private runtime. Updates are disabled by default and
+are deferred safely around active work. The update interval and timeout can be
+adjusted with `THEIA_CODEX_UPDATE_INTERVAL` and `THEIA_CODEX_UPDATE_TIMEOUT`.
