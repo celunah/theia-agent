@@ -399,6 +399,11 @@ class AttentionWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(requests[0][1]["baseInstructions"], main.BASE_PRIORS)
         self.assertNotIn("dynamicTools", requests[0][1])
         self.assertEqual(requests[1][1]["effort"], "low")
+        server._wait_for_turn.assert_awaited_once()
+        await_args = server._wait_for_turn.await_args
+        self.assertIsNotNone(await_args)
+        assert await_args is not None
+        self.assertEqual(await_args.kwargs["timeout"], 2.0)
         worker_prompt = requests[1][1]["input"][0]["text"]
         self.assertIn("Active summary", worker_prompt)
         self.assertIn("Parked summary", worker_prompt)

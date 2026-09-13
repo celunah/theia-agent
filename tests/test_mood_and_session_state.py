@@ -111,6 +111,11 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         self.assertEqual(thread_params["runtimeWorkspaceRoots"], [])
         self.assertNotIn("dynamicTools", thread_params)
         self.assertEqual(requests[1][1]["effort"], "low")
+        server._wait_for_turn.assert_awaited_once()
+        await_args = server._wait_for_turn.await_args
+        self.assertIsNotNone(await_args)
+        assert await_args is not None
+        self.assertEqual(await_args.kwargs["timeout"], 8.0)
         self.assertIn("<current_user_turn>", requests[1][1]["input"][0]["text"])
         self.assertNotIn("classified", " ".join(server._sessions.keys()))
 
