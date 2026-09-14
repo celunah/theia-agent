@@ -782,6 +782,10 @@ class CodexPersonalityStateMixin:
             "known_users": len(user_ids) or int(has_user_profile),
         }
 
+    def memory_statistics(self) -> dict[str, int]:
+        """Return bounded memory counts for read-only operator diagnostics."""
+        return dict(self._personality_memory_stats())
+
     @staticmethod
     def _personality_summary_prompt(prompt: str) -> str:
         """Wrap one profile as untrusted data for the disposable summary turn."""

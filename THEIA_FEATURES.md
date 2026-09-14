@@ -11,7 +11,6 @@ The current commands are:
 - `/login`
 - `/about`
 - `/usage`
-- `/debug`
 - `/improvements [action] [change_id]`
 - `/credits`
 - `/approve`
@@ -58,13 +57,11 @@ reveals bounded prompt-category estimates and retry/failure counts in the same
 ephemeral response. Provider-reported token totals remain separate from local
 category estimates, and the estimate is not subscription billing.
 
-`/debug` is an administrator-only ephemeral view of sanitized Theia runtime
-state. It refreshes independently while the view is open, including during other
-agent tasks, and does not expose prompts, tool output, credentials, or private
-paths.
-It also shows bounded latest-turn worker timings, timeout/cancellation/failure
-counts, and an approximate internal-request count; background reviews never
-hold up the user response.
+The Lighthouse View is a read-only Rich terminal dashboard of live harness
+state. It shows Codex health, active work, character, presence, voice,
+attention, mood, workspace, approvals, memory counts, watchdog recovery, and
+bounded recent events. It uses normal Python logging when no interactive TTY
+is available and never creates model requests beyond its transport heartbeat.
 
 `/improvements` is an administrator-only ephemeral audit view of recent
 self-improvement changes. Administrators can list and preview bounded change

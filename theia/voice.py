@@ -408,6 +408,7 @@ class VoiceSession:
         self.on_transcript = on_transcript
         self.provider = provider
         self.partial_transcript = ""
+        self.state = "idle"
 
 
 class VoiceModeManager:
@@ -674,12 +675,32 @@ class VoiceModeManager:
         """Return whether a Discord session currently has voice mode enabled."""
         return session_key in self._sessions
 
+    def snapshot(self) -> dict[str, Any]:
+        """Return provider and activity state without exposing Discord IDs."""
+        sessions = tuple(self._sessions.values())
+        states = [session.state for session in sessions]
+        if "speaking" in states:
+            state = "speaking"
+        elif "listening" in states:
+            state = "listening"
+        elif sessions:
+            state = "idle"
+        else:
+            state = "disabled"
+        providers = tuple(sorted({session.provider for session in sessions}))
+        return {
+            "state": state,
+            "providers": providers,
+            "sessions": len(sessions),
+        }
+
     async def speak_text(self, session_key: str, text: str) -> None:
         """Synthesize and play one text response for a voice session."""
         session = self._sessions.get(session_key)
         if session is not None and session.provider == AUDIO_PROVIDER_QWEN:
             if self._audio_provider is None:
                 return
+            session.state = "speaking"
             try:
                 await self._audio_provider.speak_text(session_key, text)
             except (AudioProviderError, RuntimeError) as exc:
@@ -694,10 +715,14 @@ class VoiceModeManager:
                         reason=f"provider output failed: {_safe_error_reason(exc)}",
                     ),
                 )
+            finally:
+                if session_key in self._sessions and session.state == "speaking":
+                    session.state = "idle"
             return
         if session is not None and session.provider == "codex-realtime":
             if self._realtime_speech is None:
                 return
+            session.state = "speaking"
             try:
                 await self._realtime_speech(session_key, text)
             except (CodexAppServerError, RuntimeError) as exc:
@@ -705,6 +730,9 @@ class VoiceModeManager:
                     "Realtime speech request failed (error=%s)",
                     type(exc).__name__,
                 )
+            finally:
+                if session_key in self._sessions and session.state == "speaking":
+                    session.state = "idle"
             return
         outputs = await self._synthesize(text)
         await self.speak_outputs(session_key, outputs)
@@ -721,11 +749,16 @@ class VoiceModeManager:
             return
         lock = self._play_locks.setdefault(session.guild_id, asyncio.Lock())
         async with lock:
+            session.state = "speaking"
             generation = self._playback_generation.get(session.guild_id, 0)
-            for output in outputs:
-                if generation != self._playback_generation.get(session.guild_id, 0):
-                    return
-                await self._play_output(client, output)
+            try:
+                for output in outputs:
+                    if generation != self._playback_generation.get(session.guild_id, 0):
+                        return
+                    await self._play_output(client, output)
+            finally:
+                if session.session_key in self._sessions:
+                    session.state = "idle"
 
     async def stop_playback(
         self, guild_id: int, *, session_keys: set[str] | None = None
@@ -887,12 +920,17 @@ class VoiceModeManager:
         if session is None:
             return
         if event.type == "speech_started":
+            session.state = "listening"
             await self.stop_playback(session.guild_id)
             return
         if event.type == "transcript_partial":
+            session.state = "listening"
             session.partial_transcript = event.text
             return
         if event.type == "transcript_final":
+            session.state = (
+                "speaking" if event.role.casefold() == "assistant" else "idle"
+            )
             text = event.text.strip()
             session.partial_transcript = ""
             if not text:
@@ -910,12 +948,15 @@ class VoiceModeManager:
                 self._schedule_realtime_playback_finish(session_key)
             return
         if event.type == "audio_output":
+            session.state = "speaking"
             self._feed_provider_audio(session, event)
             return
         if event.type == "output_interrupted":
+            session.state = "idle"
             self._close_realtime_source(session_key)
             return
         if event.type == "provider_error":
+            session.state = "idle"
             label = (
                 "Qwen audio middleware failed"
                 if session.provider == AUDIO_PROVIDER_QWEN
@@ -1122,6 +1163,8 @@ class VoiceModeManager:
         if self._loop is None or self._loop.is_closed():
             return
         sessions = self._sessions_for_audio(guild_id, channel_id, speaker_id)
+        for session in sessions:
+            session.state = "listening"
         qwen_sessions = {
             session.session_key
             for session in sessions

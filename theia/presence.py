@@ -192,6 +192,14 @@ class PresenceManager:
         """Return the status last published by this manager."""
         return self._current_status
 
+    def snapshot(self) -> dict[str, Any]:
+        """Return a small read-only status projection for Lighthouse View."""
+        status = self._current_status
+        return {
+            "status": status.name if status is not None else "unknown",
+            "active_requests": len(self._active_requests),
+        }
+
 
 @dataclass(frozen=True)
 class _RichActivity:
@@ -333,6 +341,15 @@ class RichPresenceManager:
         if not isinstance(value, str) or not value.strip():
             return None
         return value.strip()
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return safe Rich Presence state without session identifiers."""
+        return {
+            "enabled": self.enabled,
+            "line": self.current_line or "none",
+            "state": "processing" if self._active_tasks else "idle",
+            "active_tasks": len(self._active_tasks),
+        }
 
     async def start(self) -> None:
         """Start periodic idle activity generation."""

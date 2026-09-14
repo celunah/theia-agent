@@ -384,6 +384,7 @@ class CodexRequestMixin:
                 effort,
                 len(attachment_list),
             )
+            self._record_runtime_event("turn_started")
             previous_thread_id = session.thread_id
             await self._ensure_thread(
                 session,

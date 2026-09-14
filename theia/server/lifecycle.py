@@ -54,6 +54,9 @@ class CodexLifecycleMixin:
         _memory_breach_count: int
         _codex_updater: Any
         _codex_update_skip_once: bool
+        _heartbeat_last_success_at: float | None
+        _heartbeat_last_attempt_at: float | None
+        _heartbeat_latency_ms: float | None
 
     def __getattr__(self, name: str) -> Any:
         raise AttributeError(name)
@@ -72,6 +75,7 @@ class CodexLifecycleMixin:
             await self._close_locked()
 
         logger.info("Starting Codex App Server")
+        self._record_runtime_event("codex_starting")
 
         for session in self._sessions.values():
             session.loaded = False
@@ -96,6 +100,8 @@ class CodexLifecycleMixin:
                 "The Codex CLI is not installed. Run the project bootstrap command "
                 "or install Codex CLI on PATH."
             )
+
+        self._codex_version = self.codex_cli_version()
 
         try:
             self._process = await asyncio.create_subprocess_exec(
@@ -155,11 +161,13 @@ class CodexLifecycleMixin:
             if not self._memory_recovery_active:
                 self._start_memory_watchdog()
             logger.info("Codex App Server is ready")
+            self._record_runtime_event("codex_connected")
         except BaseException as exc:
             logger.error(
                 "Codex App Server failed during startup (error=%s)",
                 type(exc).__name__,
             )
+            self._record_runtime_event("codex_start_failed")
             await self._close_locked()
             if await self._retry_after_codex_update(update_result):
                 return
@@ -363,6 +371,48 @@ class CodexLifecycleMixin:
                     await task
         if was_running:
             logger.info("Codex App Server stopped")
+            self._record_runtime_event("codex_stopped")
+
+    async def heartbeat(self, *, timeout: float = 1.5) -> dict[str, Any]:
+        """Check the live App Server transport without starting a model turn."""
+        attempted_at = time.time()
+        self._heartbeat_last_attempt_at = attempted_at
+        started_at = time.monotonic()
+        process = self._process
+        reader = self._reader_task
+        if (
+            process is None
+            or process.returncode is not None
+            or reader is None
+            or reader.done()
+        ):
+            self._heartbeat_consecutive_failures = min(
+                1000, self._heartbeat_consecutive_failures + 1
+            )
+            self._heartbeat_latency_ms = None
+            return self.heartbeat_snapshot()
+        try:
+            # account/read is an App Server transport probe. Its response is
+            # deliberately discarded so the heartbeat cannot alter account,
+            # session, thread, usage, or prompt state.
+            await self._request(
+                "account/read",
+                {"refreshToken": False},
+                timeout=max(0.1, min(5.0, timeout)),
+            )
+        except Exception as exc:  # noqa: BLE001 - heartbeat is best effort
+            self._heartbeat_consecutive_failures = min(
+                1000, self._heartbeat_consecutive_failures + 1
+            )
+            self._heartbeat_latency_ms = None
+            logger.debug("Codex heartbeat failed (error=%s)", type(exc).__name__)
+            return self.heartbeat_snapshot()
+        self._heartbeat_last_success_at = time.time()
+        self._heartbeat_latency_ms = max(
+            0.0, min(60_000.0, (time.monotonic() - started_at) * 1000.0)
+        )
+        self._heartbeat_consecutive_failures = 0
+        return self.heartbeat_snapshot()
 
     def _start_memory_watchdog(self) -> None:
         """Start RSS monitoring for the complete Codex child process tree."""
@@ -448,6 +498,7 @@ class CodexLifecycleMixin:
                 self._memory_restart_streak += 1
                 self._memory_restart_backoff_until = time.monotonic() + backoff
                 logger.info("Codex App Server recovered after memory pressure")
+                self._record_runtime_event("codex_recovered")
         except Exception as exc:  # noqa: BLE001 - recovery is best effort
             logger.error(
                 "Codex App Server memory recovery failed (error=%s)",
@@ -628,6 +679,7 @@ class CodexLifecycleMixin:
         self._model = model
         self._persist_state()
         logger.info("Codex model selection updated (changed=%s)", changed)
+        self._record_runtime_event("model_changed")
 
     def model_name(self) -> str | None:
         """Return the configured Codex model."""

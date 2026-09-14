@@ -39,7 +39,6 @@ COMMAND_TARGETS = (
     "mode",
     "customize",
     "about",
-    "debug",
     "improvements",
 )
 
@@ -121,13 +120,6 @@ LABEL_TARGETS = (
     "personality_mood",
     "personality_presence",
     "personality_footer",
-    "debug_runtime",
-    "debug_configuration",
-    "debug_session",
-    "debug_counts",
-    "debug_usage",
-    "debug_live_footer",
-    "debug_stop_updates",
     "image_follow_up",
 )
 

@@ -392,6 +392,7 @@ class CodexTransportMixin:
             return self._approval_result(kind, params, approved=True)
 
         logger.info("Codex requested user approval (kind=%s)", _safe_log_label(kind))
+        self._record_runtime_event("approval_requested")
 
         key = ":".join((str(user_id), thread_id, turn_id, item_id, approval_id or ""))
         pending = _PendingApproval(

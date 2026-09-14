@@ -101,7 +101,6 @@ class CodexAttentionMixin:
         _turns: dict[str, _TurnState]
 
         def status(self, session_key: str) -> dict[str, Any]:
-            """Declare the existing App Server status surface for type checking."""
             raise NotImplementedError
 
     def __getattr__(self, name: str) -> Any:
@@ -646,7 +645,7 @@ class CodexAttentionMixin:
                     historical_context=historical_context,
                 ),
             )
-        except Exception as exc:  # noqa: BLE001 - attention must not fail a turn
+        except Exception as exc:  # noqa: BLE001
             logger.debug(
                 "Codex attention classification failed; continuing normally (error=%s)",
                 type(exc).__name__,
@@ -654,9 +653,12 @@ class CodexAttentionMixin:
             result = None
         if state.version != expected_version:
             return None
-        return self._apply_attention_result(
+        event = self._apply_attention_result(
             session, current_text, result, now=checked_at
         )
+        if event is not None:
+            self._record_runtime_event("attention_changed")
+        return event
 
     def _record_attention_response(self, session: _Session, response: str) -> None:
         state = session.attention

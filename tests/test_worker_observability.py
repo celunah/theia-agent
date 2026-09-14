@@ -104,11 +104,9 @@ class WorkerObservabilityTests(AsyncBehaviorTestBase):
         self.assertIn("diagnostics", debug)
         self.assertNotIn("normal-turn", repr(debug["diagnostics"]))
         self.assertNotIn(first.key, repr(debug["diagnostics"]))
-        embed = main._debug_embed(debug)
-        self.assertIn(
-            "Internal requests (approx.)",
-            "\n".join(field.value or "" for field in embed.fields),
-        )
+        rendered = main.render_lighthouse(server.lighthouse_snapshot(first.key))
+        self.assertIn("Runtime", rendered)
+        self.assertIn("Workers", rendered)
 
     async def test_workspace_review_is_non_blocking_and_only_latest_is_pending(self):
         server = main.CodexAppServer()

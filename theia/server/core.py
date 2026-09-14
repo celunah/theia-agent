@@ -3,7 +3,9 @@
 import asyncio
 import contextlib
 import os
+import re
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -30,6 +32,7 @@ from ..core import (
     _PendingApproval,
     _Session,
     _skill_entries,
+    _safe_intermediate_text,
     _theia_revision,
     _truncate,
     _TurnState,
@@ -78,6 +81,7 @@ from .codex_update import (
     CodexUpdater,
 )
 from .self_model import CodexSelfModelMixin
+from .lighthouse import CodexLighthouseMixin
 from .workspace import CodexWorkspaceMixin
 from .commitments import CodexCommitmentMixin
 from .lifecycle import CodexLifecycleMixin
@@ -98,6 +102,7 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
     CodexConversationMixin,
     CodexAttentionMixin,
     CodexSelfModelMixin,
+    CodexLighthouseMixin,
     CodexCommitmentMixin,
     CodexWorkspaceMixin,
     CodexLifecycleMixin,
@@ -139,6 +144,12 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
         self._memory_restart_backoff_until = 0.0
         self._codex_update_skip_once = False
         self._server_tasks: set[asyncio.Task[Any]] = set()
+        self._runtime_events: deque[dict[str, Any]] = deque(maxlen=100)
+        self._heartbeat_last_success_at: float | None = None
+        self._heartbeat_last_attempt_at: float | None = None
+        self._heartbeat_latency_ms: float | None = None
+        self._heartbeat_consecutive_failures = 0
+        self._codex_version: str | None = None
         self._write_lock = asyncio.Lock()
         self._models_lock = asyncio.Lock()
         self._next_request_id = 1
@@ -445,6 +456,52 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
             self._audio.tts.enabled,
         )
 
+    def _record_runtime_event(self, event: str, detail: str | None = None) -> None:
+        """Append one bounded, safe lifecycle event for operator observability."""
+        event_name = re.sub(r"[^a-z0-9_.-]", "", event.casefold())[:48]
+        if not event_name:
+            return
+        safe_detail = _safe_intermediate_text(detail, 120) if detail else ""
+        now = time.time()
+        previous = self._runtime_events[-1] if self._runtime_events else None
+        if (
+            previous is not None
+            and previous.get("event") == event_name
+            and previous.get("detail") == safe_detail
+            and now - float(previous.get("timestamp") or 0) < 1.0
+        ):
+            return
+        self._runtime_events.append(
+            {"timestamp": now, "event": event_name, "detail": safe_detail}
+        )
+
+    def runtime_events(self, *, limit: int = 20) -> tuple[dict[str, Any], ...]:
+        """Return bounded, read-only runtime events without protocol payloads."""
+        try:
+            bounded = max(0, min(100, limit))
+        except (TypeError, ValueError):
+            bounded = 20
+        if bounded == 0:
+            return ()
+        return tuple(dict(item) for item in list(self._runtime_events)[-bounded:])
+
+    def heartbeat_snapshot(self) -> dict[str, Any]:
+        """Return transport heartbeat state without exposing protocol details."""
+        return {
+            "last_success_at": self._heartbeat_last_success_at,
+            "last_attempt_at": self._heartbeat_last_attempt_at,
+            "latency_ms": self._heartbeat_latency_ms,
+            "consecutive_failures": self._heartbeat_consecutive_failures,
+            "state": (
+                "connected"
+                if self._heartbeat_last_success_at is not None
+                and self._heartbeat_consecutive_failures == 0
+                else "degraded"
+                if self._heartbeat_last_attempt_at is not None
+                else "unknown"
+            ),
+        }
+
     @staticmethod
     def _approval_policy(allow_tools: bool) -> str:
         if not allow_tools:
@@ -505,6 +562,7 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
                 len(state.items),
                 (time.monotonic() - started_at) * 1000,
             )
+            self._record_runtime_event("turn_completed")
             return result
         except asyncio.CancelledError:
             if state.diagnostics is not None:
@@ -518,6 +576,7 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
                 "Codex turn timed out; interrupting it (duration_ms=%.1f)",
                 (time.monotonic() - started_at) * 1000,
             )
+            self._record_runtime_event("turn_timed_out")
             with contextlib.suppress(CodexAppServerError):
                 await self.interrupt(session_key)
             raise CodexAppServerError(
@@ -616,6 +675,7 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
             result = {"decision": "accept" if approved else "decline"}
         pending.future.set_result(result)
         logger.info("Codex approval request resolved (approved=%s)", approved)
+        self._record_runtime_event("approval_resolved")
         return True
 
     @staticmethod

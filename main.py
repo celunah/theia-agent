@@ -35,7 +35,6 @@ from theia.bot.core import (
     TheiaBot,
     _about_embed,
     _credits_embed,
-    _debug_embed,
     _interaction_allows_tools,
     _interaction_request_sender,
     _is_guild_install,
@@ -60,7 +59,6 @@ from theia.bot.core import (
     codex_credits,
     codex_customize,
     codex_deny,
-    codex_debug,
     codex_improvements,
     codex_login,
     codex_mode,
@@ -95,6 +93,7 @@ from theia.server.codex_update import (
     CodexUpdateResult,
     CodexUpdater,
 )
+from theia.server.lighthouse import LighthouseView, render_lighthouse
 from theia.core import (
     ADAPTIVE_REASONING_ENV,
     AGENT_DISPLAY_NAME,
@@ -224,7 +223,6 @@ from theia.audio_provider import (
     QwenAudioProvider,
 )
 from theia.ui import (
-    _DebugView,
     _DecisionView,
     _FormView,
     _JsonModal,
@@ -322,6 +320,7 @@ __all__ = [
     "CodexUpdater",
     "CustomizationError",
     "FrontendCustomizationStore",
+    "LighthouseView",
     "NightlyRecapManager",
     "OpenAICompatibleAudio",
     "PersonalityError",
@@ -339,7 +338,6 @@ __all__ = [
     "VoiceModeManager",
     "VoiceSegment",
     "VoiceSession",
-    "_DebugView",
     "_DecisionView",
     "_FormView",
     "_ImageResultView",
@@ -361,7 +359,6 @@ __all__ = [
     "_configured_paths",
     "_configured_user_ids",
     "_credits_embed",
-    "_debug_embed",
     "_env_bool",
     "_env_float",
     "_error_message",
@@ -406,7 +403,6 @@ __all__ = [
     "codex_btw",
     "codex_credits",
     "codex_customize",
-    "codex_debug",
     "codex_deny",
     "codex_improvements",
     "codex_login",
@@ -427,6 +423,7 @@ __all__ = [
     "handle_request",
     "model_autocomplete",
     "personality_autocomplete",
+    "render_lighthouse",
     "render_template",
     "send_paginated",
     "send_response",

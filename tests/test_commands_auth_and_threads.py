@@ -79,7 +79,7 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         self.assertEqual(
             [(field.name, field.value) for field in kwargs["embed"].fields],
             [
-                ("Theia Agent", "1.2.0 (a1b2c3d)"),
+                ("Theia Agent", "2.0.0 (a1b2c3d)"),
                 ("Codex CLI", "0.153.0"),
                 ("Account", "@username"),
                 ("Plan", "Plus ($20/mo)"),
@@ -510,71 +510,6 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
                 ),
                 "Usage for Example",
             )
-
-    async def test_debug_command_is_admin_only_and_starts_live_refresh(self) -> None:
-        guild = SimpleNamespace(id=42)
-        channel = SimpleNamespace(id=7, guild=guild)
-        response = SimpleNamespace(send_message=AsyncMock())
-        message = SimpleNamespace(edit=AsyncMock())
-        interaction = SimpleNamespace(
-            guild=guild,
-            channel=channel,
-            response=response,
-            original_response=AsyncMock(return_value=message),
-            user=SimpleNamespace(
-                id=1,
-                name="admin",
-                guild_permissions=SimpleNamespace(administrator=True),
-            ),
-        )
-        state = {
-            "runtime": {"process": "running", "authenticated": True},
-            "configuration": {"model": "gpt-5.6-luna", "approval_level": "high"},
-            "session": {"mode": "text", "personality": "Cel", "mood": {}},
-            "counts": {},
-            "usage": {},
-        }
-        with (
-            patch.object(main.bot.codex, "debug_state", return_value=state),
-            patch.object(main.bot, "schedule_debug_refresh") as schedule,
-        ):
-            await cast(Any, main.codex_debug.callback)(interaction)
-
-        kwargs = response.send_message.await_args.kwargs
-        self.assertTrue(kwargs["ephemeral"])
-        self.assertIsInstance(kwargs["view"], main._DebugView)
-        schedule.assert_called_once_with(
-            message,
-            kwargs["view"],
-            session_key_value=main.session_key(channel, 1),
-            channel=channel,
-            user=interaction.user,
-        )
-
-    async def test_debug_command_rejects_non_administrators(self) -> None:
-        guild = SimpleNamespace(id=42)
-        channel = SimpleNamespace(id=7, guild=guild)
-        response = SimpleNamespace(
-            is_done=lambda: False,
-            send_message=AsyncMock(),
-        )
-        interaction = SimpleNamespace(
-            guild=guild,
-            channel=channel,
-            response=response,
-            user=SimpleNamespace(
-                id=2,
-                guild_permissions=SimpleNamespace(administrator=False),
-            ),
-        )
-        with patch.object(main.bot, "schedule_debug_refresh") as schedule:
-            await cast(Any, main.codex_debug.callback)(interaction)
-
-        self.assertEqual(
-            response.send_message.await_args.kwargs["embed"].title,
-            "Administrator access required",
-        )
-        schedule.assert_not_called()
 
     async def test_model_selection_confirmation_is_public(self) -> None:
         interaction = SimpleNamespace(

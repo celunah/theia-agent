@@ -39,12 +39,10 @@ from ..delivery import (
 from ..voice import VoiceModeError
 from ..server.threads import thread_name, user_requested_thread
 from ..ui import (
-    _DebugView,
     _PromptModal,
 )
 from .support import (
     BARE_MENTION_PROMPT,
-    DEBUG_VIEW_TIMEOUT,
     STALE_INTERACTION_FALLBACK_DELAY,  # noqa: F401 - compatibility export
     _GeneratedImageAttachment,
     _channel_context,
@@ -76,7 +74,6 @@ from .runtime import TheiaBot
 from .embeds import (
     _about_embed,
     _credits_embed,
-    _debug_embed,
     _login_required_embed,  # noqa: F401 - compatibility export used by main.py
     _personality_summary_embed,
     _usage_embed,
@@ -283,49 +280,6 @@ async def codex_commitments(
 ) -> None:
     """List or update the invoking user's private session open loops."""
     await handle_commitments_command(bot, interaction, action, commitment_id)
-
-
-@_user_installable_command
-@bot.tree.command(name="debug", description="Show live runtime diagnostics")
-async def codex_debug(interaction: discord.Interaction) -> None:
-    """Show sanitized live runtime diagnostics to the invoking administrator."""
-    if not await _require_server_admin(
-        interaction,
-        message="Only Theia administrators can view debug state.",
-    ):
-        return
-    key = session_key(interaction.channel, interaction.user.id)
-    view = _DebugView(
-        interaction.user.id,
-        channel=interaction.channel,
-        customizer=bot.customizations,
-        timeout=DEBUG_VIEW_TIMEOUT,
-    )
-    await interaction.response.send_message(
-        embed=_debug_embed(
-            bot.codex.debug_state(key),
-            channel=interaction.channel,
-            user=interaction.user,
-        ),
-        view=view,
-        ephemeral=True,
-    )
-    try:
-        message = await interaction.original_response()
-    except (discord.DiscordException, AttributeError) as exc:
-        logger.debug(
-            "Could not attach live debug refresh (error=%s)", type(exc).__name__
-        )
-        return
-    if message is not None:
-        await bot.register_view(view, message)
-        bot.schedule_debug_refresh(
-            message,
-            view,
-            session_key_value=key,
-            channel=interaction.channel,
-            user=interaction.user,
-        )
 
 
 @_user_installable_command

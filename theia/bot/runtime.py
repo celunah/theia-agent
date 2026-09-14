@@ -17,11 +17,9 @@ from discord.ext import commands
 
 from ..server.core import CodexAppServer, CodexAppServerError
 from .support import (
-    DEBUG_REFRESH_INTERVAL,
     PERSISTENT_VIEW_FILE,
     _PersistentViewStore,
 )
-from .embeds import _debug_embed
 from .usage import _UsageView
 from ..customization import FrontendCustomizationStore
 from ..delivery import (
@@ -32,8 +30,9 @@ from ..delivery import (
 )
 from ..presence import PresenceManager, RichPresenceManager
 from ..recaps import NightlyRecapManager
-from ..ui import _DecisionView, _DebugView, _FormView, _UserInputView
+from ..ui import _DecisionView, _FormView, _UserInputView
 from ..voice import VoiceModeManager
+from ..server.lighthouse import LighthouseView
 from ..core import _codex_logger
 from .memory import _mutation_callback
 
@@ -77,7 +76,6 @@ class TheiaBot(commands.Bot):
         self._participating_threads: set[int] = set()
         self._known_channels: dict[int, Any] = {}
         self._request_tasks: set[asyncio.Task[Any]] = set()
-        self._debug_tasks: set[asyncio.Task[Any]] = set()
         self._restart_task: asyncio.Task[None] | None = None
         self._retention_task: asyncio.Task[None] | None = None
         self._nightly_recap_task: asyncio.Task[None] | None = None
@@ -99,6 +97,12 @@ class TheiaBot(commands.Bot):
             realtime_speech=self.codex.append_realtime_speech,
             realtime_stop=self.codex.stop_realtime_voice,
             realtime_authorized=self._voice_session_allows_tools,
+        )
+        self.lighthouse = LighthouseView(
+            self.codex,
+            presence=self.presence,
+            rich_presence=self.rich_presence,
+            voice=self.voice,
         )
 
     def _voice_session_allows_tools(self, session: Any) -> bool:
@@ -358,14 +362,6 @@ class TheiaBot(commands.Bot):
                 token=token,
                 recovered=True,
             )
-        if kind == "debug":
-            return _DebugView(
-                user_id,
-                customizer=customizer,
-                guild_id=guild_id,
-                token=token,
-                recovered=True,
-            )
         if kind == "form":
             prompt = state.get("prompt")
             if not isinstance(prompt, str):
@@ -458,76 +454,6 @@ class TheiaBot(commands.Bot):
         }:
             self._schedule_interaction_recovery(interaction)
 
-    def schedule_debug_refresh(
-        self,
-        message: Any,
-        view: _DebugView,
-        *,
-        session_key_value: str,
-        channel: Any | None,
-        user: discord.abc.User | None,
-    ) -> None:
-        """Refresh one diagnostic message independently of agent request tasks."""
-        task = asyncio.create_task(
-            self._refresh_debug_message(
-                message,
-                view,
-                session_key_value=session_key_value,
-                channel=channel,
-                user=user,
-            )
-        )
-        self._debug_tasks.add(task)
-        task.add_done_callback(self._debug_task_done)
-
-    def _debug_task_done(self, task: asyncio.Task[Any]) -> None:
-        self._debug_tasks.discard(task)
-        if task.cancelled():
-            return
-        with contextlib.suppress(asyncio.InvalidStateError):
-            error = task.exception()
-            if error is not None:
-                logger.debug("Live debug view stopped (error=%s)", type(error).__name__)
-
-    async def _refresh_debug_message(
-        self,
-        message: Any,
-        view: _DebugView,
-        *,
-        session_key_value: str,
-        channel: Any | None,
-        user: discord.abc.User | None,
-    ) -> None:
-        while not view.is_finished():
-            await asyncio.sleep(DEBUG_REFRESH_INTERVAL)
-            if view.is_finished():
-                return
-            try:
-                await message.edit(
-                    embed=_debug_embed(
-                        self.codex.debug_state(session_key_value),
-                        channel=channel,
-                        user=user,
-                    ),
-                    view=view,
-                )
-            except (discord.DiscordException, AttributeError) as exc:
-                logger.debug(
-                    "Live debug view could not be refreshed (error=%s)",
-                    type(exc).__name__,
-                )
-                view.stop()
-                return
-
-    async def _cancel_debug_tasks(self) -> None:
-        """Stop live diagnostic refreshes before shared resources close."""
-        tasks = tuple(self._debug_tasks)
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        self._debug_tasks.clear()
-
     async def _change_presence_when_ready(self, **kwargs: Any) -> None:
         """Defer presence changes until Discord has established the gateway."""
         if not self.is_ready():
@@ -557,6 +483,7 @@ class TheiaBot(commands.Bot):
         await self.tree.sync()
         await self.presence.start()
         await self.rich_presence.start()
+        await self.lighthouse.start()
         self._retention_task = asyncio.create_task(self._retention_loop())
         if self.recaps.enabled:
             self._nightly_recap_task = asyncio.create_task(self._nightly_recap_loop())
@@ -564,7 +491,6 @@ class TheiaBot(commands.Bot):
     async def close(self) -> None:
         """Stop background services and close Discord and Codex resources in order."""
         await self._cancel_interaction_recovery_tasks()
-        await self._cancel_debug_tasks()
         await self._cancel_request_tasks()
         if self._retention_task is not None:
             self._retention_task.cancel()
@@ -576,6 +502,7 @@ class TheiaBot(commands.Bot):
             with contextlib.suppress(asyncio.CancelledError):
                 await self._nightly_recap_task
             self._nightly_recap_task = None
+        await self.lighthouse.close()
         await self.rich_presence.close()
         await self.presence.close()
         await self.voice.close()

@@ -26,13 +26,14 @@ threads, and voice.
 ## Commands
 
 ```text
-/login  /about  /usage  /debug  /credits  /model  /mode
+/login  /about  /usage  /credits  /model  /mode
 /approve  /deny  /stop  /undo  /btw [prompt] [file]
 /skill  /personality  /memory [scope]  /commitments [action] [id]
 /improvements  /customize  /restart
 ```
 
-`/debug`, `/improvements`, `/restart`, and `/customize` are for administrators.
+The Lighthouse View is an operator-facing terminal dashboard; `/improvements`,
+`/restart`, and `/customize` are for administrators.
 `/memory` is a
 private, owner-locked explorer: users can inspect their own entries, server
 administrators can inspect the current server, and Super Admins can inspect

@@ -649,6 +649,7 @@ class CodexConversationMixin:
             self._reset_mood(session)
             self._reset_session_thread(session)
             self._persist_state()
+            self._record_runtime_event("character_loaded")
             return selected_name
 
     def _reset_session_thread(self, session: _Session) -> None:

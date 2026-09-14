@@ -6,8 +6,8 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        THEIA_VERSION: 1.2.0
-    image: theia-agent:1.2.0
+        THEIA_VERSION: 2.0.0
+    image: theia-agent:2.0.0
     env_file:
       - .env
     environment:
@@ -21,6 +21,8 @@ services:
       - type: bind
         source: ${HOME}/theia-workspace
         target: /workspace
+    stdin_open: true
+    tty: true
     restart: unless-stopped
 
 x-podman:

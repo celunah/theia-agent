@@ -274,6 +274,8 @@ class CodexNotificationMixin:
                         self._record_failed_usage_turn(state, turn)
                     state.usage_outcome_recorded = True
                 self._emit(state, "turn_completed", turn)
+                if state.session is not None and not state.session.key.startswith("__"):
+                    self._record_runtime_event("turn_completed")
                 logger.debug(
                     "Codex turn notification completed (status=%s, items=%d)",
                     turn.get("status") or "unknown",

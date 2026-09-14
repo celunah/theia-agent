@@ -235,7 +235,6 @@ class CommandSurfaceTests(unittest.TestCase):
                 "mode",
                 "restart",
                 "customize",
-                "debug",
                 "improvements",
             },
         )
@@ -1052,15 +1051,6 @@ class CommandSurfaceTests(unittest.TestCase):
                     "personality_footer",
                 ),
                 ("memory_total_entries", "memory_page"),
-                (
-                    "debug_runtime",
-                    "debug_configuration",
-                    "debug_session",
-                    "debug_counts",
-                    "debug_usage",
-                    "debug_live_footer",
-                    "debug_stop_updates",
-                ),
                 ("image_follow_up",),
             )
             for name in group
@@ -1115,7 +1105,7 @@ class CommandSurfaceTests(unittest.TestCase):
         self.assertEqual(
             [(field.name, field.value) for field in embed.fields],
             [
-                ("Theia Agent", "1.2.0 (a1b2c3d)"),
+                ("Theia Agent", "2.0.0 (a1b2c3d)"),
                 ("Codex CLI", "0.153.0"),
                 ("Account", "@username"),
                 ("Plan", "Plus ($20/mo)"),
@@ -1187,7 +1177,6 @@ class CommandSurfaceTests(unittest.TestCase):
                 7,
                 [("Approve", "accept", discord.ButtonStyle.success)],
             ),
-            main._DebugView(7),
             main._FormView(7, prompt="Provide JSON"),
             main._UserInputView(
                 7,

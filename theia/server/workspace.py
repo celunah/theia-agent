@@ -456,6 +456,7 @@ class CodexWorkspaceMixin:
         workspace.updated_at = event_at
         _prune_workspace(workspace, now=event_at)
         self._persist_state()
+        self._record_runtime_event("workspace_updated")
         return True
 
     def _schedule_workspace_review(
