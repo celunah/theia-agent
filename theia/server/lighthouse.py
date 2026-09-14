@@ -75,37 +75,26 @@ class CodexLighthouseMixin:
     def __getattr__(self, name: str) -> Any:
         raise AttributeError(name)
 
-    def _lighthouse_session(self, session_key: str | None) -> _Session | None:
-        sessions = getattr(self, "_sessions", {})
-        if isinstance(session_key, str) and session_key:
-            canonical = self._canonical_session_key(session_key)
-            session = sessions.get(canonical)
-            if session is not None and not canonical.startswith("__"):
-                return session
-        active = [
-            state.session
-            for state in getattr(self, "_turns", {}).values()
-            if getattr(state, "session", None) is not None
-            and not state.session.key.startswith("__")
-        ]
-        if active:
-            return active[-1]
-        normal = [
-            session for session in sessions.values() if not session.key.startswith("__")
-        ]
-        return max(
-            normal,
-            key=lambda item: item.last_activity_at or 0.0,
-            default=None,
-        )
-
-    def _lighthouse_turn(self, session: _Session | None) -> _TurnState | None:
-        if session is None:
-            return None
-        for state in getattr(self, "_turns", {}).values():
-            if state.session is session and not state.done.done():
-                return state
-        return None
+    def _lighthouse_active_sessions(self) -> list[tuple[_Session, _TurnState]]:
+        """Return unfinished normal turns grouped by their actual sessions."""
+        active: dict[str, tuple[int, _Session, _TurnState]] = {}
+        for order, state in enumerate(getattr(self, "_turns", {}).values()):
+            session = getattr(state, "session", None)
+            if session is None:
+                continue
+            key = getattr(session, "key", None)
+            if not isinstance(key, str) or key.startswith("__"):
+                continue
+            done = getattr(state, "done", None)
+            done_check = getattr(done, "done", None)
+            if callable(done_check) and done_check():
+                continue
+            try:
+                canonical = self._canonical_session_key(key)
+            except Exception:  # noqa: BLE001 - dashboard state is best effort
+                canonical = key
+            active[canonical] = (order, session, state)
+        return [item[1:] for item in sorted(active.values(), key=lambda item: item[0])]
 
     @staticmethod
     def _lighthouse_mood(session: _Session | None) -> dict[str, Any]:
@@ -127,8 +116,10 @@ class CodexLighthouseMixin:
 
     @staticmethod
     def _lighthouse_session_label(
-        _session: _Session | None, turn: _TurnState | None
-    ) -> str:
+        session: _Session | None, turn: _TurnState | None
+    ) -> str | None:
+        if session is None or turn is None:
+            return None
         channel = getattr(turn, "channel", None)
         channel_name = _safe_intermediate_text(getattr(channel, "name", None), 60)
         user = getattr(turn, "user", None)
@@ -136,13 +127,18 @@ class CodexLighthouseMixin:
             getattr(user, "display_name", None) or getattr(user, "name", None),
             60,
         )
-        if getattr(channel, "guild", None) is not None:
+        guild = getattr(channel, "guild", None)
+        if guild is not None:
             return (
                 f"Server conversation · #{channel_name}"
                 if channel_name
                 else "Server conversation"
             )
-        return f"User conversation · {user_name}" if user_name else "User conversation"
+        if channel is None:
+            return "Active session"
+        if channel_name:
+            return f"User conversation · #{channel_name}"
+        return f"User conversation · @{user_name}" if user_name else "User conversation"
 
     def _lighthouse_character(self, session: _Session | None) -> dict[str, str]:
         if session is None:
@@ -222,8 +218,30 @@ class CodexLighthouseMixin:
 
     def lighthouse_snapshot(self, session_key: str | None = None) -> dict[str, Any]:
         """Return safe live state for the operator dashboard."""
-        session = self._lighthouse_session(session_key)
-        turn = self._lighthouse_turn(session)
+        active_sessions = self._lighthouse_active_sessions()
+        requested_key = None
+        if isinstance(session_key, str) and session_key:
+            try:
+                requested_key = self._canonical_session_key(session_key)
+            except Exception:  # noqa: BLE001 - dashboard state is best effort
+                requested_key = session_key
+        current: tuple[_Session, _TurnState] | None = None
+        if requested_key is not None:
+            current = next(
+                (
+                    item
+                    for item in active_sessions
+                    if getattr(item[0], "key", None) == requested_key
+                ),
+                None,
+            )
+        if current is None and active_sessions:
+            current = active_sessions[-1]
+        session, turn = current or (None, None)
+        session_snapshot = {
+            "active_count": len(active_sessions),
+            "current": self._lighthouse_session_label(session, turn),
+        }
         recovery = bool(getattr(self, "_memory_recovery_active", False))
         if recovery:
             action = "Recovering Codex"
@@ -297,7 +315,7 @@ class CodexLighthouseMixin:
             "voice": {},
             "attention": self._lighthouse_attention(session),
             "mood": self._lighthouse_mood(session),
-            "session": self._lighthouse_session_label(session, turn),
+            "session": session_snapshot,
             "workspace": self._lighthouse_workspace(session),
             "runtime": {
                 "codex": connection,
@@ -340,6 +358,29 @@ def _dashboard_session_label(value: Any) -> str:
     ):
         return "unknown"
     return text or "unknown"
+
+
+def _render_session_lines(value: Any) -> list[str]:
+    """Render only the current session state supplied by the harness."""
+    if isinstance(value, dict):
+        try:
+            active_count = max(0, int(value.get("active_count", 0)))
+        except (TypeError, ValueError):
+            active_count = 0
+        if active_count == 0:
+            return ["Session      No active session"]
+        current = _dashboard_session_label(value.get("current"))
+        if current == "unknown":
+            current = "Active session"
+        if active_count == 1:
+            return [f"Session      {current}"]
+        return [
+            f"Session      {active_count} active sessions",
+            f"Current      {current}",
+        ]
+    if isinstance(value, str) and value.strip():
+        return [f"Session      {_dashboard_session_label(value)}"]
+    return ["Session      No active session"]
 
 
 def _model_label(value: Any) -> str:
@@ -462,8 +503,8 @@ def render_lighthouse(snapshot: dict[str, Any]) -> str:
         f"Voice        {_voice_label(snapshot.get('voice') if isinstance(snapshot.get('voice'), dict) else {})}",
         f"Attention    {attention_line}",
         f"Mood         {mood_line}",
-        f"Session      {_dashboard_session_label(snapshot.get('session'))}",
     ]
+    lines.extend(_render_session_lines(snapshot.get("session")))
     if session_objective:
         # A separately named objective is not part of the workspace and must
         # never be presented as a workspace goal.

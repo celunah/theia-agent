@@ -69,6 +69,68 @@ class _TTYBuffer:
 
 
 class LighthouseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_live_session_display_tracks_active_turn_ownership(self) -> None:
+        server = main.CodexAppServer()
+        no_session = server.lighthouse_snapshot()
+        self.assertEqual(no_session["session"]["active_count"], 0)
+        self.assertIn("Session      No active session", render_lighthouse(no_session))
+        restored_session = server._session("restored-session")
+        restored_session.thread_id = "restored-thread"
+        restored_session.last_activity_at = time.time()
+        self.assertIn(
+            "Session      No active session",
+            render_lighthouse(server.lighthouse_snapshot()),
+        )
+
+        first_session = server._session("first-session")
+        first_channel = SimpleNamespace(name="general", guild=SimpleNamespace(id=1))
+        first_turn = main._TurnState(
+            session=first_session,
+            channel=first_channel,
+            user=SimpleNamespace(display_name="Alice"),
+        )
+        server._turns["first-turn"] = first_turn
+        first_snapshot = server.lighthouse_snapshot()
+        self.assertEqual(first_snapshot["session"]["active_count"], 1)
+        self.assertEqual(
+            first_snapshot["session"]["current"],
+            "Server conversation · #general",
+        )
+        self.assertIn(
+            "Session      Server conversation · #general",
+            render_lighthouse(first_snapshot),
+        )
+
+        second_session = server._session("second-session")
+        second_channel = SimpleNamespace(name="private", guild=None)
+        second_turn = main._TurnState(
+            session=second_session,
+            channel=second_channel,
+            user=SimpleNamespace(display_name="Bob"),
+        )
+        server._turns["second-turn"] = second_turn
+        concurrent = server.lighthouse_snapshot()
+        self.assertEqual(concurrent["session"]["active_count"], 2)
+        self.assertEqual(
+            concurrent["session"]["current"],
+            "User conversation · #private",
+        )
+        rendered = render_lighthouse(concurrent)
+        self.assertIn("Session      2 active sessions", rendered)
+        self.assertIn("Current      User conversation · #private", rendered)
+
+        selected = server.lighthouse_snapshot("first-session")
+        self.assertEqual(
+            selected["session"]["current"],
+            "Server conversation · #general",
+        )
+
+        first_turn.done.set_result(None)
+        second_turn.done.set_result(None)
+        ended = server.lighthouse_snapshot()
+        self.assertEqual(ended["session"]["active_count"], 0)
+        self.assertIn("Session      No active session", render_lighthouse(ended))
+
     def test_render_contains_all_sections_and_redacts_unsafe_values(self) -> None:
         rendered = render_lighthouse(
             _snapshot(
