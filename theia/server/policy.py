@@ -8,6 +8,9 @@ MAX_ATTACHMENT_TEXT_BYTES = 100 * 1024
 MAX_ATTACHMENTS_PER_REQUEST = 10
 MAX_ATTACHMENT_BATCH_BYTES = 64 * 1024 * 1024
 IMAGE_SUFFIXES = frozenset({".gif", ".jpeg", ".jpg", ".png", ".webp"})
+VIDEO_ATTACHMENT_SUFFIXES = frozenset(
+    {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".webm"}
+)
 MESSAGE_LEDGER_LIMIT = 2000
 MESSAGE_LEDGER_RETRY_AFTER = 15 * 60
 CHANNEL_CHECKPOINT_LIMIT = 200

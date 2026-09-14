@@ -24,6 +24,18 @@ from .policy import (
     MAX_ATTACHMENT_TEXT_BYTES,
     MAX_ATTACHMENTS_PER_REQUEST,
     TEXT_ATTACHMENT_SUFFIXES,
+    VIDEO_ATTACHMENT_SUFFIXES,
+)
+from .attachments import (
+    AttachmentManifest,
+    AttachmentPreparation,
+    attachment_capabilities,
+    attachment_media_category,
+    safe_attachment_content_type,
+    safe_attachment_filename,
+    unavailable_attachment_note,
+    unsupported_attachment_note,
+    validate_cached_attachment,
 )
 from ..audio import AudioOutput, AudioProtocolError
 from ..core import (
@@ -692,63 +704,188 @@ class CodexWorkerMixin:
             values[0] if values else None
         )
 
-    async def _prepare_attachments(
+    def _attachment_semantic_audio_available(self) -> bool:
+        try:
+            return bool(self.realtime_voice_available) and (
+                self.voice_provider == "codex-realtime"
+            )
+        except (AttributeError, CodexAppServerError):
+            return False
+
+    @staticmethod
+    def _attachment_failure(
+        filename: str,
+        content_type: str,
+        category: str,
+        reason: str,
+    ) -> AttachmentManifest:
+        return AttachmentManifest(
+            filename=filename,
+            media_category=category,
+            content_type=content_type,
+            cached=False,
+            readable=False,
+            supported_semantic_capabilities=attachment_capabilities(
+                category, readable=False
+            ),
+            failure_reason=reason,
+        )
+
+    async def _prepare_attachment_manifest(
         self, attachments: Iterable[Any]
-    ) -> list[dict[str, Any]]:
+    ) -> AttachmentPreparation:
         prepared: list[dict[str, Any]] = []
+        manifest: list[AttachmentManifest] = []
         total_bytes = 0
+        semantic_audio_available = self._attachment_semantic_audio_available()
         for index, attachment in enumerate(attachments, start=1):
             if index > MAX_ATTACHMENTS_PER_REQUEST:
                 raise CodexAppServerError(
                     f"A request may include at most {MAX_ATTACHMENTS_PER_REQUEST} attachments."
                 )
-            filename = str(
-                getattr(attachment, "filename", "attachment") or "attachment"
+            filename = safe_attachment_filename(
+                getattr(attachment, "filename", "attachment")
+            )
+            content_type = safe_attachment_content_type(
+                getattr(attachment, "content_type", "")
+            )
+            suffix = Path(filename).suffix.casefold()
+            category = attachment_media_category(
+                content_type,
+                suffix,
+                image_suffixes=IMAGE_SUFFIXES,
+                audio_suffixes=AUDIO_ATTACHMENT_SUFFIXES,
+                text_suffixes=TEXT_ATTACHMENT_SUFFIXES,
+                video_suffixes=VIDEO_ATTACHMENT_SUFFIXES,
             )
             size = getattr(attachment, "size", None)
             if isinstance(size, int) and size > MAX_ATTACHMENT_BYTES:
-                raise CodexAppServerError("An attachment is too large to process.")
+                manifest.append(
+                    self._attachment_failure(
+                        filename, content_type, category, "attachment too large"
+                    )
+                )
+                prepared.append(
+                    {"type": "text", "text": unavailable_attachment_note(category)}
+                )
+                continue
             if (
                 isinstance(size, int)
                 and size >= 0
                 and total_bytes + size > MAX_ATTACHMENT_BATCH_BYTES
             ):
-                raise CodexAppServerError(
-                    "The attachments are too large to process together."
+                manifest.append(
+                    self._attachment_failure(
+                        filename, content_type, category, "attachment batch too large"
+                    )
                 )
+                prepared.append(
+                    {"type": "text", "text": unavailable_attachment_note(category)}
+                )
+                continue
             read = getattr(attachment, "read", None)
             if not callable(read):
+                manifest.append(
+                    self._attachment_failure(
+                        filename, content_type, category, "attachment unavailable"
+                    )
+                )
                 prepared.append(
-                    {
-                        "type": "text",
-                        "text": f"Attachment `{filename}` is available at {getattr(attachment, 'url', '')}.",
-                    }
+                    {"type": "text", "text": unavailable_attachment_note(category)}
                 )
                 continue
             try:
                 read_async = cast(Callable[[], Awaitable[Any]], read)
                 raw = await read_async()
-            except Exception as exc:
-                raise CodexAppServerError(
-                    "An attachment could not be downloaded."
-                ) from exc
+            except Exception:  # noqa: BLE001 - attachment failures are user-safe
+                manifest.append(
+                    self._attachment_failure(
+                        filename, content_type, category, "download failed"
+                    )
+                )
+                prepared.append(
+                    {"type": "text", "text": unavailable_attachment_note(category)}
+                )
+                continue
             if not isinstance(raw, bytes) or len(raw) > MAX_ATTACHMENT_BYTES:
-                raise CodexAppServerError("An attachment is too large or invalid.")
+                manifest.append(
+                    self._attachment_failure(
+                        filename,
+                        content_type,
+                        category,
+                        "attachment too large or invalid",
+                    )
+                )
+                prepared.append(
+                    {"type": "text", "text": unavailable_attachment_note(category)}
+                )
+                continue
             total_bytes += len(raw)
             if total_bytes > MAX_ATTACHMENT_BATCH_BYTES:
-                raise CodexAppServerError(
-                    "The attachments are too large to process together."
+                manifest.append(
+                    self._attachment_failure(
+                        filename, content_type, category, "attachment batch too large"
+                    )
                 )
-            path = self._store_attachment(filename, raw)
-            content_type = str(getattr(attachment, "content_type", "") or "")
-            suffix = Path(filename).suffix.casefold()
-            if content_type.casefold().startswith("image/"):
-                prepared.append({"type": "localImage", "path": str(path)})
-            elif (
-                content_type.casefold().startswith("audio/")
-                or suffix in AUDIO_ATTACHMENT_SUFFIXES
-            ):
-                prepared.append({"type": "localAudio", "path": str(path)})
+                prepared.append(
+                    {"type": "text", "text": unavailable_attachment_note(category)}
+                )
+                continue
+            try:
+                path = self._store_attachment(filename, raw)
+            except CodexAppServerError:
+                manifest.append(
+                    self._attachment_failure(
+                        filename, content_type, category, "cache write failed"
+                    )
+                )
+                prepared.append(
+                    {"type": "text", "text": unavailable_attachment_note(category)}
+                )
+                continue
+            checked = validate_cached_attachment(
+                path,
+                self._attachment_root,
+                max_age=self._attachment_cache_max_age,
+            )
+            if not checked.readable or checked.path is None:
+                manifest.append(
+                    AttachmentManifest(
+                        filename=filename,
+                        media_category=category,
+                        content_type=content_type,
+                        cached=checked.cached,
+                        readable=False,
+                        supported_semantic_capabilities=attachment_capabilities(
+                            category, readable=False
+                        ),
+                        failure_reason=checked.failure_reason
+                        or "cached file unavailable",
+                    )
+                )
+                prepared.append(
+                    {"type": "text", "text": unavailable_attachment_note(category)}
+                )
+                continue
+            if category == "image":
+                prepared.append({"type": "localImage", "path": str(checked.path)})
+                manifest.append(
+                    AttachmentManifest(
+                        filename=filename,
+                        media_category=category,
+                        content_type=content_type,
+                        cached=True,
+                        readable=True,
+                        supported_semantic_capabilities=attachment_capabilities(
+                            category, readable=True
+                        ),
+                    )
+                )
+                continue
+            if category == "audio":
+                prepared.append({"type": "localAudio", "path": str(checked.path)})
+                transcript: str | None = None
+                transcription_failure: str | None = None
                 if self._audio.transcription.enabled:
                     try:
                         transcript = await self._audio.transcribe(
@@ -756,42 +893,85 @@ class CodexWorkerMixin:
                             raw,
                             content_type,
                         )
-                    except AudioProtocolError as exc:
-                        raise CodexAppServerError(
-                            f"Audio transcription failed: {exc}"
-                        ) from exc
-                    if transcript:
+                    except (AudioProtocolError, OSError):
+                        transcription_failure = "transcription unavailable"
+                    if isinstance(transcript, str) and transcript.strip():
                         prepared.append(
                             {
                                 "type": "text",
                                 "text": (
                                     f"Transcript of attached audio `{filename}`:\n"
-                                    f"{transcript}"
+                                    f"{_truncate(transcript, MAX_ATTACHMENT_TEXT_BYTES)}"
                                 ),
                             }
                         )
-            elif (
-                content_type.casefold().startswith("text/")
-                or suffix in TEXT_ATTACHMENT_SUFFIXES
-            ):
+                transcribed = bool(isinstance(transcript, str) and transcript.strip())
+                manifest.append(
+                    AttachmentManifest(
+                        filename=filename,
+                        media_category=category,
+                        content_type=content_type,
+                        cached=True,
+                        readable=True,
+                        supported_semantic_capabilities=attachment_capabilities(
+                            category,
+                            readable=True,
+                            transcription_produced=transcribed,
+                            semantic_audio_available=semantic_audio_available,
+                        ),
+                        failure_reason=transcription_failure,
+                        transcription_produced=transcribed,
+                    )
+                )
+                continue
+            if category == "text":
                 text = raw[:MAX_ATTACHMENT_TEXT_BYTES].decode("utf-8", errors="replace")
                 prepared.append(
                     {
                         "type": "text",
                         "text": (
-                            f"Attachment `{filename}` is available at {path}.\n"
+                            f"Attachment `{filename}` is available.\n"
                             f"Its text content follows:\n{text}"
                         ),
                     }
                 )
-            else:
-                prepared.append(
-                    {
-                        "type": "text",
-                        "text": f"Attachment `{filename}` is available at {path}.",
-                    }
+                manifest.append(
+                    AttachmentManifest(
+                        filename=filename,
+                        media_category=category,
+                        content_type=content_type,
+                        cached=True,
+                        readable=True,
+                        supported_semantic_capabilities=attachment_capabilities(
+                            category, readable=True
+                        ),
+                    )
                 )
-        return prepared
+                continue
+            manifest.append(
+                AttachmentManifest(
+                    filename=filename,
+                    media_category=category,
+                    content_type=content_type,
+                    cached=True,
+                    readable=True,
+                    failure_reason="unsupported media",
+                )
+            )
+            prepared.append(
+                {
+                    "type": "text",
+                    "text": unsupported_attachment_note(filename, category),
+                }
+            )
+        return AttachmentPreparation(tuple(prepared), tuple(manifest))
+
+    async def _prepare_attachments(
+        self, attachments: Iterable[Any]
+    ) -> list[dict[str, Any]]:
+        """Compatibility wrapper returning only the validated Codex inputs."""
+        preparation = await self._prepare_attachment_manifest(attachments)
+        return list(preparation.inputs)
 
     def _store_attachment(self, filename: str, raw: bytes) -> Path:
         suffix = Path(filename).suffix.casefold()
@@ -854,21 +1034,43 @@ class CodexWorkerMixin:
     ) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
         if prepared is not None:
-            result.extend(prepared)
+            for item in prepared:
+                item_type = item.get("type") if isinstance(item, dict) else None
+                if item_type in {"localImage", "localAudio"}:
+                    raw_path = item.get("path")
+                    path = Path(raw_path) if isinstance(raw_path, str) else None
+                    checked = (
+                        validate_cached_attachment(
+                            path,
+                            self._attachment_root,
+                            max_age=self._attachment_cache_max_age,
+                        )
+                        if path is not None
+                        else None
+                    )
+                    if checked is None or not checked.readable or checked.path is None:
+                        category = "image" if item_type == "localImage" else "audio"
+                        result.append(
+                            {
+                                "type": "text",
+                                "text": unavailable_attachment_note(category),
+                            }
+                        )
+                        continue
+                    result.append({**item, "path": str(checked.path)})
+                    continue
+                result.append(item)
             return result
         for attachment in attachments:
             content_type = (attachment.content_type or "").casefold()
-            if content_type.startswith("image/"):
-                result.append({"type": "image", "url": attachment.url})
-            elif content_type.startswith("audio/"):
-                result.append({"type": "audio", "url": attachment.url})
-            else:
-                result.append(
-                    {
-                        "type": "text",
-                        "text": f"Attachment `{attachment.filename}`: {attachment.url}",
-                    }
-                )
+            category = (
+                "image"
+                if content_type.startswith("image/")
+                else ("audio" if content_type.startswith("audio/") else "attachment")
+            )
+            result.append(
+                {"type": "text", "text": unavailable_attachment_note(category)}
+            )
         return result
 
     async def _ensure_thread(

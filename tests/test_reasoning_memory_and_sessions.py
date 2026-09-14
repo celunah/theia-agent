@@ -1,5 +1,6 @@
 # pylint: disable=wildcard-import,unused-wildcard-import,undefined-variable,duplicate-code
 from tests.test_support import *
+from theia.server.policy import MAX_ATTACHMENT_BYTES
 
 
 class AsyncBehaviorTests(AsyncBehaviorTestBase):
@@ -628,8 +629,237 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
 
                 self.assertEqual(prepared[0]["type"], "localImage")
                 self.assertIn("hello", prepared[1]["text"])
+                self.assertNotIn(str(root), prepared[1]["text"])
                 cached = list((root / "theia" / "attachments").iterdir())
                 self.assertEqual(len(cached), 2)
+
+    async def test_attachment_manifest_has_safe_metadata_and_deduplicates_cache(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(
+                os.environ,
+                {
+                    "THEIA_HOME": str(root / "theia"),
+                    "THEIA_STATE": str(root / "state.json"),
+                },
+            ):
+                server = main.CodexAppServer()
+                server._realtime_feature_enabled = True
+                image = SimpleNamespace(
+                    filename="nested/photo.png",
+                    content_type="image/png; evil",
+                    size=4,
+                    read=AsyncMock(return_value=b"data"),
+                )
+                audio = SimpleNamespace(
+                    filename="voice.ogg",
+                    content_type="audio/ogg",
+                    size=5,
+                    read=AsyncMock(return_value=b"audio"),
+                )
+                preparation = await server._prepare_attachment_manifest(
+                    (image, image, audio)
+                )
+
+        self.assertEqual(len(preparation.manifest), 3)
+        self.assertEqual(preparation.inputs[0]["type"], "localImage")
+        self.assertEqual(preparation.inputs[1]["type"], "localImage")
+        self.assertEqual(preparation.inputs[0]["path"], preparation.inputs[1]["path"])
+        self.assertEqual(preparation.manifest[0].filename, "photo.png")
+        self.assertEqual(preparation.manifest[0].content_type, "image/png")
+        self.assertIn(
+            "image_understanding",
+            preparation.manifest[0].supported_semantic_capabilities,
+        )
+        self.assertIn(
+            "audio_input", preparation.manifest[2].supported_semantic_capabilities
+        )
+        self.assertIn(
+            "semantic_audio_understanding",
+            preparation.manifest[2].supported_semantic_capabilities,
+        )
+        self.assertTrue(
+            all("path" not in item for item in preparation.manifest[0].to_dict())
+        )
+
+    async def test_invalid_cached_attachment_never_reaches_codex(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(
+                os.environ,
+                {
+                    "THEIA_HOME": str(root / "theia"),
+                    "THEIA_STATE": str(root / "state.json"),
+                },
+            ):
+                server = main.CodexAppServer()
+                attachment = SimpleNamespace(
+                    filename="photo.png",
+                    content_type="image/png",
+                    size=4,
+                    read=AsyncMock(return_value=b"data"),
+                )
+                missing = root / "theia" / "attachments" / "missing.png"
+                with patch.object(server, "_store_attachment", return_value=missing):
+                    preparation = await server._prepare_attachment_manifest(
+                        (attachment,)
+                    )
+                valid = await server._prepare_attachment_manifest((attachment,))
+                cached_path = Path(valid.inputs[0]["path"])
+                cached_path.unlink()
+                rechecked = server._user_input("request", (), valid.inputs)
+
+        self.assertFalse(preparation.manifest[0].cached)
+        self.assertFalse(preparation.manifest[0].readable)
+        self.assertEqual(
+            preparation.manifest[0].failure_reason, "cached file is unavailable"
+        )
+        self.assertNotIn(
+            "localImage", {item.get("type") for item in preparation.inputs}
+        )
+        self.assertIn("upload it again", preparation.inputs[0]["text"])
+        self.assertNotIn("localImage", {item.get("type") for item in rechecked})
+        self.assertIn("upload it again", rechecked[-1]["text"])
+
+    async def test_traversal_symlink_and_expired_cache_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            attachment_root = root / "theia" / "attachments"
+            outside = root / "outside.png"
+            attachment_root.mkdir(parents=True)
+            outside.write_bytes(b"outside")
+            symlink = attachment_root / "symlink.png"
+            try:
+                symlink.symlink_to(outside)
+            except OSError as exc:
+                self.skipTest(f"symlink creation unavailable: {exc}")
+            with patch.dict(
+                os.environ,
+                {
+                    "THEIA_HOME": str(root / "theia"),
+                    "THEIA_STATE": str(root / "state.json"),
+                },
+            ):
+                server = main.CodexAppServer()
+                attachment = SimpleNamespace(
+                    filename="photo.png",
+                    content_type="image/png",
+                    size=4,
+                    read=AsyncMock(return_value=b"data"),
+                )
+                for invalid_path, reason in (
+                    (root / "outside.png", "cached path is invalid"),
+                    (symlink, "cached file is a symlink"),
+                ):
+                    with (
+                        self.subTest(reason=reason),
+                        patch.object(
+                            server, "_store_attachment", return_value=invalid_path
+                        ),
+                    ):
+                        preparation = await server._prepare_attachment_manifest(
+                            (attachment,)
+                        )
+                        self.assertEqual(preparation.manifest[0].failure_reason, reason)
+                expired = attachment_root / "expired.png"
+                expired.write_bytes(b"old")
+                os.utime(expired, (0, 0))
+                with patch.object(server, "_store_attachment", return_value=expired):
+                    server._attachment_cache_max_age = 1
+                    preparation = await server._prepare_attachment_manifest(
+                        (attachment,)
+                    )
+
+        self.assertEqual(preparation.manifest[0].failure_reason, "cached file expired")
+        self.assertTrue(preparation.manifest[0].cached)
+        self.assertFalse(preparation.manifest[0].readable)
+
+    async def test_oversized_and_unsupported_video_are_truthful(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(
+                os.environ,
+                {
+                    "THEIA_HOME": str(root / "theia"),
+                    "THEIA_STATE": str(root / "state.json"),
+                },
+            ):
+                server = main.CodexAppServer()
+                oversized = SimpleNamespace(
+                    filename="huge.png",
+                    content_type="image/png",
+                    size=MAX_ATTACHMENT_BYTES + 1,
+                    read=AsyncMock(),
+                )
+                video = SimpleNamespace(
+                    filename="clip.mp4",
+                    content_type="video/mp4",
+                    size=4,
+                    read=AsyncMock(return_value=b"video"),
+                )
+                oversized_preparation = await server._prepare_attachment_manifest(
+                    (oversized,)
+                )
+                video_preparation = await server._prepare_attachment_manifest((video,))
+
+        self.assertEqual(
+            oversized_preparation.manifest[0].failure_reason, "attachment too large"
+        )
+        self.assertNotIn(
+            "localImage",
+            {item.get("type") for item in oversized_preparation.inputs},
+        )
+        self.assertEqual(video_preparation.manifest[0].media_category, "video")
+        self.assertEqual(
+            video_preparation.manifest[0].failure_reason, "unsupported media"
+        )
+        self.assertEqual(
+            video_preparation.manifest[0].supported_semantic_capabilities, ()
+        )
+        self.assertNotIn(
+            "localVideo", {item.get("type") for item in video_preparation.inputs}
+        )
+        self.assertNotIn("watched", video_preparation.inputs[0]["text"])
+
+    async def test_attachment_manifest_reaches_self_model_without_private_paths(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(
+                os.environ,
+                {
+                    "THEIA_HOME": str(root / "theia"),
+                    "THEIA_STATE": str(root / "state.json"),
+                },
+            ):
+                server = main.CodexAppServer()
+                server._realtime_feature_enabled = False
+                attachment = SimpleNamespace(
+                    filename="voice.ogg",
+                    content_type="audio/ogg",
+                    size=5,
+                    read=AsyncMock(return_value=b"audio"),
+                )
+                preparation = await server._prepare_attachment_manifest((attachment,))
+                session = server._session("attachment-self-model")
+                snapshot = server._self_model_snapshot(
+                    session,
+                    allow_tools=True,
+                    allow_discord_tools=False,
+                    attachment_manifest=preparation.manifest,
+                )
+
+        rendered = server._render_self_model(snapshot)
+        self.assertIn("Attachment manifest:", rendered)
+        self.assertIn("voice.ogg", rendered)
+        self.assertNotIn(str(root), rendered)
+        self.assertNotIn(
+            "semantic_audio_understanding",
+            preparation.manifest[0].supported_semantic_capabilities,
+        )
 
     async def test_attachment_cache_repairs_a_partial_or_corrupt_existing_file(
         self,

@@ -341,6 +341,11 @@ delivers the response and image together in one message with an owner-only
 while it runs, its thinking status stays separate, and the completed follow-up
 edits the original image message.
 
+Uploaded images and audio are cached privately and revalidated before they are
+sent to Codex. Stale, missing, oversized, unsupported, or unreadable uploads
+receive a safe re-upload note; video is not described as understood unless the
+current pipeline has produced usable media evidence.
+
 Interactive Discord views are registered and restored across bot restarts when
 their state is available. In-flight approvals or input requests that were
 interrupted by the restart are acknowledged and marked for a new request.

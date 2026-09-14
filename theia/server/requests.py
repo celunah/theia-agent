@@ -343,7 +343,11 @@ class CodexRequestMixin:
         async with session.lock:
             await self._ensure_running()
             await self._prepare_session_for_activity(session)
-            prepared_attachments = await self._prepare_attachments(attachment_list)
+            attachment_preparation = await self._prepare_attachment_manifest(
+                attachment_list
+            )
+            prepared_attachments = list(attachment_preparation.inputs)
+            attachment_manifest = attachment_preparation.manifest
             mood_input = user_prompt or prompt
             attention_transition = await self._prepare_attention_for_turn(
                 session,
@@ -399,6 +403,7 @@ class CodexRequestMixin:
                 allow_discord_tools=allow_discord_tools,
                 phase="starting",
                 memory_retrieval_used=memory_retrieval_used,
+                attachment_manifest=attachment_manifest,
             )
             turn_prompt, summary_injected = self._turn_prompt_with_summary(
                 session,
@@ -436,6 +441,7 @@ class CodexRequestMixin:
                 allow_discord_tools=allow_discord_tools,
                 phase="completed",
                 memory_retrieval_used=memory_retrieval_used,
+                attachment_manifest=attachment_manifest,
             )
             self._schedule_self_improvement_review(
                 session,

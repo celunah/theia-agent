@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from ..core import (
@@ -12,6 +13,11 @@ from ..core import (
     _codex_logger,
     _safe_intermediate_text,
     _theia_revision,
+)
+from .attachments import (
+    AttachmentManifest,
+    safe_attachment_content_type,
+    safe_attachment_filename,
 )
 from .policy import WORKSPACE_MAX_ENTRIES
 
@@ -43,6 +49,7 @@ class CodexSelfModelMixin:
         allow_discord_tools: bool,
         phase: str = "starting",
         memory_retrieval_used: bool = False,
+        attachment_manifest: Iterable[AttachmentManifest] = (),
     ) -> dict[str, Any]:
         """Return only facts that are available from the current server state."""
         selection = self.personality_selection(session.key)
@@ -104,7 +111,10 @@ class CodexSelfModelMixin:
             if audio_capable
             else "unavailable"
         )
-        semantic_audio_capable = voice_provider == "codex-realtime"
+        semantic_audio_capable = (
+            bool(getattr(self, "realtime_voice_available", False))
+            and voice_provider == "codex-realtime"
+        )
         semantic_audio_status = (
             "available"
             if semantic_audio_capable and transport_available
@@ -140,6 +150,11 @@ class CodexSelfModelMixin:
                 "active" if session.background_review_count > 0 else "inactive"
             ),
         }
+        safe_manifest = tuple(
+            item.to_dict()
+            for item in attachment_manifest
+            if isinstance(item, AttachmentManifest)
+        )[:10]
 
         capabilities = ["text responses"]
         if allow_tools:
@@ -194,6 +209,7 @@ class CodexSelfModelMixin:
             "approval_required_for_protected_actions": allow_tools,
             "protected_actions": protected_status,
             "background_review": capability_status["background_review"],
+            "attachment_manifest": safe_manifest,
         }
 
     @staticmethod
@@ -288,7 +304,45 @@ class CodexSelfModelMixin:
                 else:
                     value = _safe_intermediate_text(str(value or "unknown"), 80)
                 status_lines.append(f"{label}: {value}")
+        manifest = snapshot.get("attachment_manifest")
+        if isinstance(manifest, (list, tuple)) and manifest:
+            status_lines.append("Attachment manifest:")
+            for item in manifest[:10]:
+                if not isinstance(item, dict):
+                    continue
+                filename = safe_attachment_filename(item.get("filename"))
+                category = (
+                    _safe_intermediate_text(item.get("media_category"), 32) or "unknown"
+                )
+                content_type = safe_attachment_content_type(item.get("content_type"))
+                if content_type:
+                    category = f"{category}/{content_type}"
+                cached = "cached" if item.get("cached") else "not cached"
+                readable = "readable" if item.get("readable") else "not readable"
+                attachment_capabilities = item.get("supported_semantic_capabilities")
+                if isinstance(attachment_capabilities, (list, tuple)):
+                    capability_text = (
+                        ", ".join(
+                            _safe_intermediate_text(value, 48)
+                            for value in attachment_capabilities[:6]
+                            if _safe_intermediate_text(value, 48)
+                        )
+                        or "none"
+                    )
+                else:
+                    capability_text = "none"
+                line = (
+                    f"- {filename}: {category}; {cached}, {readable}; "
+                    f"capabilities: {capability_text}; transcription: "
+                    f"{'produced' if item.get('transcription_produced') else 'not produced'}"
+                )
+                failure = _safe_intermediate_text(item.get("failure_reason"), 80)
+                if failure:
+                    line += f"; status: {failure}"
+                status_lines.append(line)
         rendered_status = ("Capability status:", *status_lines)
+        if not isinstance(capabilities, (list, tuple)):
+            capabilities = ("text responses",)
         return "\n".join(
             (
                 "## Theia self-model",

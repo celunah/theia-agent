@@ -135,3 +135,40 @@ class AudioProtocolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prepared[0]["type"], "localAudio")
         self.assertEqual(prepared[1]["type"], "text")
         self.assertIn("spoken request", prepared[1]["text"])
+
+    async def test_unavailable_transcription_keeps_audio_and_reports_manifest_status(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(
+                os.environ,
+                self._environment()
+                | {
+                    "THEIA_HOME": str(root / "theia"),
+                    "THEIA_STATE": str(root / "state.json"),
+                },
+                clear=False,
+            ):
+                server = main.CodexAppServer()
+                server._audio.transcribe = AsyncMock(
+                    side_effect=main.AudioProtocolError("provider unavailable")
+                )
+                attachment = SimpleNamespace(
+                    filename="voice.ogg",
+                    content_type="audio/ogg",
+                    size=5,
+                    read=AsyncMock(return_value=b"audio"),
+                )
+                preparation = await server._prepare_attachment_manifest((attachment,))
+
+        manifest = preparation.manifest[0]
+        self.assertTrue(manifest.cached)
+        self.assertTrue(manifest.readable)
+        self.assertFalse(manifest.transcription_produced)
+        self.assertEqual(manifest.failure_reason, "transcription unavailable")
+        self.assertIn("audio_input", manifest.supported_semantic_capabilities)
+        self.assertNotIn(
+            "speech_transcription", manifest.supported_semantic_capabilities
+        )
+        self.assertEqual(preparation.inputs[0]["type"], "localAudio")
