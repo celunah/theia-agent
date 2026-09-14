@@ -26,6 +26,8 @@ def _classification(
     acknowledge: bool = True,
     confidence: float = 0.9,
     loops: list[str] | None = None,
+    topic_repeated: bool = False,
+    repeated_topic: str | None = None,
 ) -> dict[str, Any]:
     return {
         "relation": relation,
@@ -37,6 +39,8 @@ def _classification(
         "topic_summary": summary,
         "open_loops": loops or [],
         "reason": "The user introduced a meaningful conversational change.",
+        "topic_repeated": topic_repeated,
+        "repeated_topic": repeated_topic,
     }
 
 
@@ -261,6 +265,89 @@ class AttentionStateTests(unittest.TestCase):
         self.assertTrue(first["acknowledge"])
         self.assertFalse(second["acknowledge"])
 
+    def test_repeated_topic_is_acknowledged_once_per_active_context(self) -> None:
+        server = main.CodexAppServer()
+        session = server._session(_attention_key("recurrence"))
+        server._apply_attention_result(
+            session,
+            "Memory watchdog design",
+            _classification("CONTINUE", title="Memory watchdog"),
+            now=10.0,
+        )
+        first = server._apply_attention_result(
+            session,
+            "How should the watchdog report sustained pressure?",
+            _classification(
+                "CONTINUE",
+                title="Memory watchdog",
+                topic_repeated=True,
+                repeated_topic="Memory watchdog",
+            ),
+            now=20.0,
+        )
+        second = server._apply_attention_result(
+            session,
+            "And how should it recover?",
+            _classification(
+                "CONTINUE",
+                title="Memory watchdog",
+                topic_repeated=True,
+                repeated_topic="Memory watchdog",
+            ),
+            now=30.0,
+        )
+
+        assert first is not None
+        self.assertEqual(first["type"], "conversation_recurrence")
+        self.assertEqual(first["repeated_topic"], "Memory watchdog")
+        self.assertIsNone(second)
+
+        other = server._apply_attention_result(
+            session,
+            "What about the personality's status?",
+            _classification(
+                "CONTINUE",
+                title="Memory watchdog",
+                topic_repeated=True,
+                repeated_topic="Personality status",
+            ),
+            now=35.0,
+        )
+        self.assertIsNotNone(other)
+        self.assertIsNone(
+            server._apply_attention_result(
+                session,
+                "And that personality status again?",
+                _classification(
+                    "CONTINUE",
+                    title="Memory watchdog",
+                    topic_repeated=True,
+                    repeated_topic="Memory watchdog",
+                ),
+                now=36.0,
+            )
+        )
+
+        server._apply_attention_result(
+            session,
+            "Now let us discuss personality behavior.",
+            _classification("TOPIC_SHIFT", title="Personality behavior"),
+            now=40.0,
+        )
+        returned = server._apply_attention_result(
+            session,
+            "The watchdog should also expose memory pressure visually.",
+            _classification(
+                "RELATED_EXTENSION",
+                title="Personality behavior",
+                topic_repeated=True,
+                repeated_topic="Memory watchdog",
+            ),
+            now=50.0,
+        )
+        assert returned is not None
+        self.assertEqual(returned["type"], "conversation_recurrence")
+
     def test_explicit_remember_preserves_even_a_short_topic(self) -> None:
         server = main.CodexAppServer()
         session = server._session(_attention_key("remember"))
@@ -339,6 +426,45 @@ class AttentionPromptTests(unittest.TestCase):
         self.assertNotIn("TOPIC_SHIFT", prompt)
         self.assertIn("then answer the new subject directly", prompt)
 
+    def test_recurrence_prompt_requests_a_brief_acknowledgement_and_answer(
+        self,
+    ) -> None:
+        server = main.CodexAppServer()
+        prompt = server._render_attention_transition(
+            {
+                "type": "conversation_recurrence",
+                "relation": "CONTINUE",
+                "repeated_topic": "Memory watchdog",
+                "acknowledge": True,
+            }
+        )
+        self.assertIn("meaningfully revisits", prompt)
+        self.assertIn("answer the current request", prompt)
+        self.assertNotIn("conversation_recurrence", prompt)
+
+    def test_classifier_parses_a_repeated_topic(self) -> None:
+        server = main.CodexAppServer()
+        parsed = server._parse_attention_classification(
+            json.dumps(
+                {
+                    "relation": "CONTINUE",
+                    "confidence": 0.86,
+                    "acknowledge": True,
+                    "preserve_context": False,
+                    "target_context_id": None,
+                    "topic_title": "Current topic",
+                    "topic_summary": "The current discussion.",
+                    "open_loops": [],
+                    "reason": "The earlier topic is substantively relevant again.",
+                    "topic_repeated": True,
+                    "repeated_topic": "Memory watchdog",
+                }
+            )
+        )
+        assert parsed is not None
+        self.assertTrue(parsed["topic_repeated"])
+        self.assertEqual(parsed["repeated_topic"], "Memory watchdog")
+
 
 class AttentionWorkerTests(unittest.IsolatedAsyncioTestCase):
     async def test_classifier_is_ephemeral_low_effort_and_receives_all_windows(
@@ -361,7 +487,8 @@ class AttentionWorkerTests(unittest.IsolatedAsyncioTestCase):
                 '"acknowledge":true,"preserve_context":true,'
                 '"target_context_id":null,"topic_title":"New topic",'
                 '"topic_summary":"A new subject.","open_loops":[],'
-                '"reason":"The subject changed."}'
+                '"reason":"The subject changed.",'
+                '"topic_repeated":false,"repeated_topic":null}'
             )
         )
         result = await server.classify_attention(
@@ -387,6 +514,7 @@ class AttentionWorkerTests(unittest.IsolatedAsyncioTestCase):
                 "parked_context_ids": ["context-b"],
             },
             recent_global_context="Global one\nGlobal two",
+            historical_context="Earlier recap: Memory watchdog design was discussed.",
         )
         assert result is not None
         self.assertEqual(result["relation"], "TOPIC_SHIFT")
@@ -408,4 +536,5 @@ class AttentionWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Active summary", worker_prompt)
         self.assertIn("Parked summary", worker_prompt)
         self.assertIn("Global two", worker_prompt)
+        self.assertIn("Memory watchdog design", worker_prompt)
         self.assertNotIn("attention-thread", server._sessions)

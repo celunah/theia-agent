@@ -73,7 +73,10 @@ follow related sidetracks, preserve substantial topic changes, and restore
 parked topics when the user returns. Brief unrelated asides remain temporary;
 explicit requests to remember a thread preserve it. The harness owns the
 session-scoped state and the main character agent writes any natural transition
-acknowledgement.
+acknowledgement. It also compares the current request with that conversation's
+historical nightly recap topics and can briefly note a meaningful repeat before
+answering. Ordinary follow-ups and weak keyword overlap do not trigger a repeat
+notice, and the same repeat is not announced again within the active context.
 
 Theia also:
 

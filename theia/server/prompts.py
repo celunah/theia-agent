@@ -142,6 +142,8 @@ _ATTENTION_OUTPUT_SCHEMA = {
             "items": {"type": "string", "maxLength": 180},
         },
         "reason": {"type": "string", "maxLength": 180},
+        "topic_repeated": {"type": "boolean"},
+        "repeated_topic": {"type": ["string", "null"], "maxLength": 120},
     },
     "required": [
         "relation",
@@ -153,6 +155,8 @@ _ATTENTION_OUTPUT_SCHEMA = {
         "topic_summary",
         "open_loops",
         "reason",
+        "topic_repeated",
+        "repeated_topic",
     ],
     "additionalProperties": False,
 }
@@ -171,7 +175,13 @@ _ATTENTION_CLASSIFICATION_DEVELOPER_INSTRUCTIONS = (
     "discussion or an explicit request to remember or return to it. Return only "
     "the requested JSON. Use known context IDs only. Keep titles, summaries, open "
     "loops, and reasons concise and paraphrased. Never include hidden reasoning, "
-    "raw tool output, credentials, secrets, private paths, or copied user text."
+    "raw tool output, credentials, secrets, private paths, or copied user text. "
+    "Set topic_repeated=true only when the current request meaningfully revisits "
+    "a substantive earlier topic from the supplied session contexts or historical "
+    "recaps; do not flag a shared keyword, a trivial follow-up, or an ordinary "
+    "continuation. When true, provide a concise repeated_topic title. A return to "
+    "a parked context is already handled by RETURN or NESTED_RETURN, so do not "
+    "also mark it as a repetition."
 )
 
 _WORKSPACE_REVIEW_OUTPUT_SCHEMA = {

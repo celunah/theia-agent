@@ -628,6 +628,7 @@ class _ConversationAttentionState:
     latest_messages: list[str] = field(default_factory=list)
     last_transition_signature: str | None = None
     acknowledged_transition_signature: str | None = None
+    acknowledged_recurrence_signatures: list[str] = field(default_factory=list)
     version: int = 1
 
 

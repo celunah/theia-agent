@@ -254,6 +254,8 @@ function responseText(turn: ActiveTurn): string {
       topic_summary: "A deliberate new conversational subject.",
       open_loops: ["Answer the new subject."],
       reason: "The user deliberately changed subjects.",
+      topic_repeated: false,
+      repeated_topic: null,
     });
   }
   if (

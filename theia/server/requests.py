@@ -318,6 +318,7 @@ class CodexRequestMixin:
         allow_tools: bool = True,
         thread_source: discord.Message | None = None,
         user_prompt: str | None = None,
+        historical_context: str | None = None,
         on_channel_change: Callable[[discord.abc.Messageable], None] | None = None,
         on_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
         interaction_sender: Callable[..., Awaitable[Any]] | None = None,
@@ -348,6 +349,7 @@ class CodexRequestMixin:
                 session,
                 mood_input,
                 recent_global_context=prompt if user_prompt else None,
+                historical_context=historical_context,
             )
             effort = await self._select_reasoning_effort(prompt, attachment_list)
             logger.info(

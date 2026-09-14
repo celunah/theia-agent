@@ -921,6 +921,7 @@ async def handle_request(
                     allow_tools=allow_tools,
                     thread_source=thread_source,
                     user_prompt=prompt,
+                    historical_context=recap_context,
                     on_channel_change=on_channel_change,
                     on_event=on_codex_event,
                     interaction_sender=interaction_sender,
