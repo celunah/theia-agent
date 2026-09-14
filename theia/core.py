@@ -518,6 +518,48 @@ def _safe_intermediate_text(value: Any, limit: int = 700) -> str:
     return _truncate(text, limit)
 
 
+_SAFE_THINKING_STATUSES = {
+    "commandexecution": "Running a command",
+    "filechange": "Updating files",
+    "fileread": "Reading the selected source",
+    "readfile": "Reading the selected source",
+    "mcptoolcall": "Using an integration",
+    "websearch": "Searching the web",
+    "imagegeneration": "Generating image",
+    "imageanalysis": "Checking the image dimensions",
+    "imagedimensioncheck": "Checking the image dimensions",
+    "computertoolcall": "Using a computer tool",
+    "localshell": "Running a local task",
+    "comparison": "Comparing available results",
+    "compare": "Comparing available results",
+}
+
+
+def _safe_thinking_status(event: Any, payload: Any) -> str | None:
+    """Map bounded runtime events to safe public active-step summaries."""
+    event_name = str(event or "").casefold()
+    if event_name in {"compacted", "context_compacted", "thread_compacted"}:
+        return "Compacting context"
+    if not isinstance(payload, dict):
+        return None
+    if event_name == "tool_activity":
+        return "Thinking"
+    if event_name not in {"item_started", "item_completed"}:
+        return None
+
+    item_type = re.sub(r"[^a-z0-9]", "", str(payload.get("type") or "").casefold())
+    if event_name == "item_started":
+        if item_type in {"agentmessage", "agentmessageitem"}:
+            phase = re.sub(r"[^a-z0-9]", "", str(payload.get("phase") or "").casefold())
+            if phase in {"final", "finalanswer"}:
+                return "Preparing the final answer"
+            return None
+        return _SAFE_THINKING_STATUSES.get(item_type) or "Thinking"
+    if _is_tool_item(payload):
+        return "Thinking"
+    return None
+
+
 def _safe_approval_reason(value: Any, limit: int = 700) -> str:
     """Keep an approval reason readable without exposing executable details."""
     if not isinstance(value, str):

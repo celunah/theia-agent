@@ -138,7 +138,9 @@ procedures, and explicit detail requests remain complete and can expand as neede
 
 Command responses, approvals, and choices use embeds. Statuses use compact `-#` text:
 
-- `Thinking` only appears for tool-backed work.
+- Public thinking status uses the most specific safe runtime step available,
+  including `Compacting context` and `Generating image`, and falls back to
+  `Thinking` when no specific summary is available.
 - `Thought for N seconds` or `Thought for M minutes and S seconds` remains after completion.
 - Natural-language Codex preambles and intermediate messages are shown when Codex emits them.
 - Updates are coalesced rather than token-streamed.

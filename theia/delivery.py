@@ -1,5 +1,3 @@
-"""Translate Codex progress and final responses into resilient Discord messages."""
-
 import asyncio
 import contextlib
 import io
@@ -14,10 +12,10 @@ from .audio import AudioOutput
 from .core import (
     _codex_logger,
     _command_embed,
-    _is_tool_item,
     _render_frontend_label,
     _safe_error_reason,
     _safe_intermediate_text,
+    _safe_thinking_status,
     _subtext,
     _truncate,
 )
@@ -951,11 +949,11 @@ class _ResponseDelivery:
         self.status_message: discord.Message | discord.WebhookMessage | None = None
         self.last_edit = 0.0
         self.thought_started_at: float | None = None
+        self.thinking_summary: str | None = None
         self.lock = asyncio.Lock()
 
     @property
     def image_paths(self) -> tuple[Path, ...]:
-        """Return generated images collected during this turn."""
         return tuple(self._image_paths)
 
     def _remember_image(self, item: dict[str, Any]) -> None:
@@ -980,11 +978,9 @@ class _ResponseDelivery:
             self._image_paths.append(path)
 
     async def start(self) -> None:
-        """Reserve the delivery lifecycle hook for future initial-status behavior."""
         return
 
     async def on_event(self, event: str, payload: dict[str, Any]) -> None:
-        """Translate selected Codex events into compact Discord progress updates."""
         async with self.lock:
             if event == "thread_opening":
                 message = _safe_intermediate_text(
@@ -1004,20 +1000,32 @@ class _ResponseDelivery:
                             await self.speak_text(message)
                 return
             if event == "agent_message":
-                # App-server agent-message events are emitted for every text
-                # delta. Wait for item_completed so Discord receives one full
-                # preamble/intermediate instead of a visibly streaming status.
                 return
-            if event in {"item_started", "tool_activity"}:
-                if event == "tool_activity" or _is_tool_item(payload):
-                    await self._set_status("Thinking", "Thinking")
+            if (
+                event == "item_completed"
+                and str(payload.get("type") or "").casefold() == "imagegeneration"
+            ):
+                self._remember_image(payload)
+            summary = _safe_thinking_status(event, payload)
+            if summary:
+                if (
+                    event == "tool_activity"
+                    and summary == "Thinking"
+                    and self.thinking_summary not in {None, "Thinking"}
+                ):
+                    return
+                force = event == "compacted" or (
+                    event == "item_started" and summary != "Thinking"
+                )
+                if (
+                    summary == "Preparing the final answer"
+                    and self.thought_started_at is None
+                ):
+                    return
+                await self._set_status("Thinking", summary, force=force)
                 return
             if event == "item_completed":
-                if str(payload.get("type") or "").casefold() == "imagegeneration":
-                    self._remember_image(payload)
-                if _is_tool_item(payload):
-                    await self._set_status("Thinking", "Thinking")
-                elif (
+                if (
                     payload.get("type") == "agentMessage"
                     and payload.get("phase") != "final_answer"
                 ):
@@ -1052,9 +1060,14 @@ class _ResponseDelivery:
         }
         target = targets.get(title)
         if self.customizer is None or target is None:
-            return description if title == "Intermediate" else title
+            return description if title in {"Thinking", "Intermediate"} else title
         context = dict(self.context)
-        context.update({"status": title, "text": description})
+        context.update(
+            {
+                "status": description if title == "Thinking" else title,
+                "text": description,
+            }
+        )
         try:
             if title == "Intermediate":
                 value = self.customizer.render(
@@ -1082,9 +1095,12 @@ class _ResponseDelivery:
                         context=context,
                     )
                 )
-            return str(value or (description if title == "Intermediate" else title))
+            return str(
+                value
+                or (description if title in {"Thinking", "Intermediate"} else title)
+            )
         except CustomizationError:
-            return description if title == "Intermediate" else title
+            return description if title in {"Thinking", "Intermediate"} else title
 
     async def _set_status(
         self, title: str, description: str, *, force: bool = False
@@ -1107,6 +1123,10 @@ class _ResponseDelivery:
             else:
                 await self.status_message.edit(content=content)
             self.last_edit = now
+            if title == "Thinking":
+                self.thinking_summary = description
+            elif title == "Intermediate":
+                self.thinking_summary = None
         except discord.DiscordException:
             return
 
@@ -1120,7 +1140,6 @@ class _ResponseDelivery:
         image_paths: Iterable[Path] = (),
         on_image_action: ImageAction | None = None,
     ) -> None:
-        """Replace progress status with a final response or image-view update."""
         async with self.lock:
             if self.status_message is not None and self.thought_started_at is not None:
                 thought = _format_thought_duration(
@@ -1270,7 +1289,6 @@ class _ResponseDelivery:
         speech: Iterable[AudioOutput],
         on_image_action: ImageAction | None,
     ) -> None:
-        """Send final text, generated files, and controls as one message."""
         pages = _split_pages(response)
         speech_outputs = tuple(speech)
         view = self._new_image_view(image_paths, on_image_action)
@@ -1333,7 +1351,6 @@ class _ResponseDelivery:
         speech: Iterable[AudioOutput],
         embed: discord.Embed | None = None,
     ) -> bool:
-        """Edit the original image message after a follow-up completes."""
         if self.image_message is None:
             return False
         pages = _split_pages(response)
@@ -1390,5 +1407,4 @@ class _ResponseDelivery:
 
 
 async def send_response(send: SendMessage, response: str, **kwargs: Any) -> None:
-    """Send a response through the standard Discord pagination path."""
     await send_paginated(send, response, **kwargs)

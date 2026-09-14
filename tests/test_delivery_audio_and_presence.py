@@ -213,7 +213,7 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
             await delivery.on_event("item_started", {"type": "commandExecution"})
             await delivery.finalize("The follow-up is complete.")
 
-        self.assertEqual(calls[0]["content"], "-# Thinking")
+        self.assertEqual(calls[0]["content"], "-# Running a command")
         self.assertIsNot(cast(Any, delivery.status_message), original)
         self.assertEqual(original.edits[-1]["content"], "The follow-up is complete.")
         self.assertIs(original.edits[-1]["view"], view)
@@ -269,6 +269,56 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         )
         self.assertNotIn("src/main.py", calls[-1]["content"])
         self.assertTrue(calls[-1]["content"].startswith("-# "))
+
+    async def test_thinking_status_uses_safe_runtime_step_summaries(self) -> None:
+        status_message = _Message()
+        calls: list[dict] = []
+
+        async def send(**kwargs):
+            calls.append(kwargs)
+            return status_message
+
+        delivery = main._ResponseDelivery(send, {}, owner_id=7)
+        await delivery.on_event("item_started", {"type": "webSearch"})
+        self.assertEqual(calls[-1]["content"], "-# Searching the web")
+
+        await delivery.on_event("item_started", {"type": "fileRead"})
+        self.assertEqual(
+            status_message.edits[-1]["content"], "-# Reading the selected source"
+        )
+
+        await delivery.on_event("item_started", {"type": "imageGeneration"})
+        self.assertEqual(status_message.edits[-1]["content"], "-# Generating image")
+
+        await delivery.on_event("compacted", {"reason": "context"})
+        self.assertEqual(status_message.edits[-1]["content"], "-# Compacting context")
+
+        await delivery.on_event(
+            "item_started", {"type": "agentMessage", "phase": "final"}
+        )
+        self.assertEqual(
+            status_message.edits[-1]["content"], "-# Preparing the final answer"
+        )
+
+    async def test_thinking_status_ignores_unsafe_details_and_falls_back(self) -> None:
+        calls: list[dict] = []
+
+        async def send(**kwargs):
+            calls.append(kwargs)
+            return _Message()
+
+        delivery = main._ResponseDelivery(send, {}, owner_id=7)
+        await delivery.on_event(
+            "item_started",
+            {
+                "type": "unknownTool",
+                "command": "cat /private/secret.txt",
+                "summary": "Read the user's private prompt",
+            },
+        )
+        self.assertEqual(calls[-1]["content"], "-# Thinking")
+        self.assertNotIn("secret", calls[-1]["content"])
+        self.assertNotIn("private", calls[-1]["content"])
 
     async def test_intermediates_are_not_streamed_before_item_completion(self) -> None:
         calls: list[dict] = []
@@ -465,7 +515,7 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
             await delivery.on_event("item_started", {"type": "commandExecution"})
             await delivery.finalize("The complete response.")
 
-        self.assertEqual(calls[0]["content"], "-# Thinking")
+        self.assertEqual(calls[0]["content"], "-# Running a command")
         self.assertFalse(status_message.deleted)
         self.assertEqual(
             status_message.edits[-1]["content"],
