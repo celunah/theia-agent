@@ -18,6 +18,13 @@ from typing import Any, cast
 import discord
 
 from .audio import AudioOutput, AudioProtocolError
+from .audio_provider import (
+    AUDIO_PROVIDER_QWEN,
+    AudioProvider,
+    AudioProviderError,
+    AudioProviderEvent,
+    AudioProviderEventCallback,
+)
 from .core import (
     CodexAppServerError,
     _codex_logger,
@@ -54,6 +61,7 @@ RealtimeAudio = Callable[[str, bytes, int, int], Awaitable[None]]
 RealtimeSpeech = Callable[[str, str], Awaitable[None]]
 RealtimeStop = Callable[[str], Awaitable[bool]]
 RealtimeAvailable = Callable[[], bool]
+AudioProviderName = Callable[[], str | None]
 
 
 class VoiceModeError(RuntimeError):
@@ -223,7 +231,7 @@ if voice_recv is not None:
             channel_id: int,
             loop: asyncio.AbstractEventLoop,
             on_segment: Callable[[VoiceSegment], Awaitable[None]],
-            on_speech_start: Callable[[int], None],
+            on_speech_start: Callable[[int, int, int | None], None],
             on_audio: Callable[[int, int, int | None, bytes], None] | None = None,
         ) -> None:
             super().__init__()
@@ -294,7 +302,9 @@ if voice_recv is not None:
                     try:
                         # This callback only schedules the loop-side playback
                         # interruption and is intentionally synchronous.
-                        self.on_speech_start(self.guild_id)
+                        self.on_speech_start(
+                            self.guild_id, self.channel_id, buffer.speaker_id
+                        )
                     except Exception as exc:  # noqa: BLE001 - keep receiving audio
                         logger.debug(
                             "Voice speech-start callback failed (error=%s)",
@@ -397,6 +407,7 @@ class VoiceSession:
         self.allow_tools = allow_tools
         self.on_transcript = on_transcript
         self.provider = provider
+        self.partial_transcript = ""
 
 
 class VoiceModeManager:
@@ -407,6 +418,8 @@ class VoiceModeManager:
         *,
         transcribe: TranscribeAudio,
         synthesize: SynthesizeText,
+        audio_provider: AudioProvider | None = None,
+        provider_name: AudioProviderName | None = None,
         realtime_available: RealtimeAvailable | None = None,
         realtime_start: RealtimeStart | None = None,
         realtime_audio: RealtimeAudio | None = None,
@@ -416,6 +429,8 @@ class VoiceModeManager:
     ) -> None:
         self._transcribe = transcribe
         self._synthesize = synthesize
+        self._audio_provider = audio_provider
+        self._provider_name = provider_name
         self._realtime_available = realtime_available
         self._realtime_start = realtime_start
         self._realtime_audio = realtime_audio
@@ -432,12 +447,24 @@ class VoiceModeManager:
         self._realtime_audio_tasks: dict[str, asyncio.Task[None]] = {}
         self._realtime_sources: dict[str, _RealtimePCMSource] = {}
         self._realtime_finish_tasks: dict[str, asyncio.Task[None]] = {}
+        self._provider_queues: dict[str, asyncio.Queue[bytes]] = {}
+        self._provider_tasks: dict[str, asyncio.Task[None]] = {}
         self._realtime_permission_stops: set[str] = set()
 
     @property
     def available(self) -> bool:
         """Return whether the optional Discord voice-receive package is installed."""
         return voice_recv is not None
+
+    def _selected_provider(self) -> str | None:
+        """Read the provider decision without letting voice own configuration."""
+        if self._provider_name is not None:
+            return self._provider_name()
+        if self._audio_provider is not None and self._audio_provider.available:
+            return self._audio_provider.name
+        if self._realtime_available is not None and self._realtime_available():
+            return "codex-realtime"
+        return "custom"
 
     async def start(
         self,
@@ -470,11 +497,13 @@ class VoiceModeManager:
                 existing.on_transcript = on_transcript
                 return existing
 
-        provider = (
-            "codex-realtime"
-            if self._realtime_available is not None and self._realtime_available()
-            else "custom"
-        )
+        provider = self._selected_provider()
+        if provider is None or provider == "unavailable":
+            raise VoiceModeError("No complete voice provider is available.")
+        if provider == AUDIO_PROVIDER_QWEN and (
+            self._audio_provider is None or not self._audio_provider.available
+        ):
+            raise VoiceModeError("Qwen audio middleware is unavailable.")
         if provider == "codex-realtime" and (
             self._realtime_start is None
             or self._realtime_audio is None
@@ -555,6 +584,22 @@ class VoiceModeManager:
             self._realtime_audio_tasks[session_key] = asyncio.create_task(
                 self._realtime_audio_worker(session_key)
             )
+        elif provider == AUDIO_PROVIDER_QWEN:
+            assert self._audio_provider is not None
+            self._provider_queues[session_key] = asyncio.Queue(maxsize=100)
+            self._provider_tasks[session_key] = asyncio.create_task(
+                self._audio_provider_worker(session_key)
+            )
+            try:
+                await self._audio_provider.start(
+                    session_key,
+                    self._provider_event_callback(session_key),
+                )
+            except (AudioProviderError, RuntimeError, TimeoutError) as exc:
+                await self.stop(session_key)
+                raise VoiceModeError(
+                    f"Could not start Qwen audio middleware: {_safe_error_reason(exc)}"
+                ) from exc
         logger.info(
             "Voice mode started (sessions_in_guild=%d)",
             self._guild_session_count(guild_id),
@@ -567,7 +612,18 @@ class VoiceModeManager:
         if session is None:
             return False
         self._realtime_permission_stops.discard(session_key)
-        if session.provider == "codex-realtime":
+        if session.provider == AUDIO_PROVIDER_QWEN:
+            self._provider_queues.pop(session_key, None)
+            task = self._provider_tasks.pop(session_key, None)
+            if task is not None and task is not asyncio.current_task():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            if self._audio_provider is not None:
+                with contextlib.suppress(AudioProviderError, RuntimeError):
+                    await self._audio_provider.stop(session_key)
+            self._close_realtime_source(session_key)
+        elif session.provider == "codex-realtime":
             self._realtime_queues.pop(session_key, None)
             task = self._realtime_audio_tasks.pop(session_key, None)
             if task is not None:
@@ -621,6 +677,24 @@ class VoiceModeManager:
     async def speak_text(self, session_key: str, text: str) -> None:
         """Synthesize and play one text response for a voice session."""
         session = self._sessions.get(session_key)
+        if session is not None and session.provider == AUDIO_PROVIDER_QWEN:
+            if self._audio_provider is None:
+                return
+            try:
+                await self._audio_provider.speak_text(session_key, text)
+            except (AudioProviderError, RuntimeError) as exc:
+                logger.warning(
+                    "Qwen audio output request failed (error=%s)",
+                    type(exc).__name__,
+                )
+                await self._on_audio_provider_event(
+                    session_key,
+                    AudioProviderEvent(
+                        "provider_error",
+                        reason=f"provider output failed: {_safe_error_reason(exc)}",
+                    ),
+                )
+            return
         if session is not None and session.provider == "codex-realtime":
             if self._realtime_speech is None:
                 return
@@ -653,7 +727,9 @@ class VoiceModeManager:
                     return
                 await self._play_output(client, output)
 
-    async def stop_playback(self, guild_id: int) -> None:
+    async def stop_playback(
+        self, guild_id: int, *, session_keys: set[str] | None = None
+    ) -> None:
         """Cancel queued playback for a guild and stop its current audio source."""
         self._playback_generation[guild_id] = (
             self._playback_generation.get(guild_id, 0) + 1
@@ -666,6 +742,14 @@ class VoiceModeManager:
             with contextlib.suppress(Exception):
                 stop_playing()
         for session in self._sessions.values():
+            if (
+                session.guild_id == guild_id
+                and session.provider == AUDIO_PROVIDER_QWEN
+                and (session_keys is None or session.session_key in session_keys)
+                and self._audio_provider is not None
+            ):
+                with contextlib.suppress(AudioProviderError, RuntimeError):
+                    await self._audio_provider.interrupt(session.session_key)
             if session.guild_id == guild_id and session.provider == "codex-realtime":
                 finish_task = self._realtime_finish_tasks.pop(session.session_key, None)
                 if finish_task is not None:
@@ -683,13 +767,19 @@ class VoiceModeManager:
         if self._loop is None or self._loop.is_closed() or not pcm:
             return
         sessions = self._sessions_for_audio(guild_id, channel_id, speaker_id)
-        if len(sessions) != 1 or sessions[0].provider != "codex-realtime":
+        if len(sessions) != 1 or sessions[0].provider not in {
+            "codex-realtime",
+            AUDIO_PROVIDER_QWEN,
+        }:
             return
         session_key = sessions[0].session_key
         try:
-            self._loop.call_soon_threadsafe(
-                self._queue_realtime_audio, session_key, pcm
+            queue_target = (
+                self._queue_audio_provider
+                if sessions[0].provider == AUDIO_PROVIDER_QWEN
+                else self._queue_realtime_audio
             )
+            self._loop.call_soon_threadsafe(queue_target, session_key, pcm)
         except RuntimeError:
             return
 
@@ -749,52 +839,157 @@ class VoiceModeManager:
                 )
                 return
 
-    async def _on_realtime_event(
-        self, session_key: str, event: str, payload: dict[str, Any]
+    def _queue_audio_provider(self, session_key: str, pcm: bytes) -> None:
+        audio_queue = self._provider_queues.get(session_key)
+        if audio_queue is None:
+            return
+        if audio_queue.full():
+            with contextlib.suppress(asyncio.QueueEmpty):
+                audio_queue.get_nowait()
+            logger.debug("Dropped delayed audio-provider input")
+        audio_queue.put_nowait(pcm)
+
+    async def _audio_provider_worker(self, session_key: str) -> None:
+        audio_queue = self._provider_queues.get(session_key)
+        provider = self._audio_provider
+        if audio_queue is None or provider is None:
+            return
+        try:
+            while True:
+                pcm = await audio_queue.get()
+                await provider.send_audio(
+                    session_key,
+                    pcm,
+                    VOICE_SAMPLE_RATE,
+                    VOICE_CHANNELS,
+                )
+        except (AudioProviderError, RuntimeError) as exc:
+            logger.warning("Audio provider input failed (error=%s)", type(exc).__name__)
+            await self._on_audio_provider_event(
+                session_key,
+                AudioProviderEvent(
+                    "provider_error",
+                    reason=f"provider input failed: {_safe_error_reason(exc)}",
+                ),
+            )
+
+    def _provider_event_callback(self, session_key: str) -> AudioProviderEventCallback:
+        async def callback(event: AudioProviderEvent) -> None:
+            await self._on_audio_provider_event(session_key, event)
+
+        return callback
+
+    async def _on_audio_provider_event(
+        self, session_key: str, event: AudioProviderEvent
     ) -> None:
+        """Route provider events through Theia's session-owned voice boundary."""
         session = self._sessions.get(session_key)
         if session is None:
             return
-        if event == "output_audio":
-            self._feed_realtime_audio(session, payload)
+        if event.type == "speech_started":
+            await self.stop_playback(session.guild_id)
             return
-        if event == "transcript_done":
-            text = str(payload.get("text") or "").strip()
+        if event.type == "transcript_partial":
+            session.partial_transcript = event.text
+            return
+        if event.type == "transcript_final":
+            text = event.text.strip()
+            session.partial_transcript = ""
             if not text:
                 return
-            role = str(payload.get("role") or "").casefold()
-            label = "Voice input" if role == "user" else "Theia"
+            role = event.role.casefold()
+            label = "Voice input" if role != "assistant" else "Theia"
             with contextlib.suppress(discord.DiscordException):
                 await session.text_channel.send(
                     content=_subtext(f"{label}: {text}"),
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
-            if role == "assistant":
+            if session.provider == AUDIO_PROVIDER_QWEN and role != "assistant":
+                await session.on_transcript(session, label, text)
+            elif role == "assistant":
                 self._schedule_realtime_playback_finish(session_key)
             return
-        if event == "error":
-            message = str(payload.get("message") or "unknown error")
+        if event.type == "audio_output":
+            self._feed_provider_audio(session, event)
+            return
+        if event.type == "output_interrupted":
+            self._close_realtime_source(session_key)
+            return
+        if event.type == "provider_error":
+            label = (
+                "Qwen audio middleware failed"
+                if session.provider == AUDIO_PROVIDER_QWEN
+                else "Realtime voice failed"
+            )
             with contextlib.suppress(discord.DiscordException):
                 await session.text_channel.send(
                     content=_subtext(
-                        "Realtime voice failed: " + _safe_error_reason(message)
+                        f"{label}: "
+                        + _safe_error_reason(event.reason or "provider unavailable")
                     ),
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
+            if session.provider == AUDIO_PROVIDER_QWEN:
+                await self.stop(session_key)
+
+    async def _on_realtime_event(
+        self, session_key: str, event: str, payload: dict[str, Any]
+    ) -> None:
+        if event == "output_audio":
+            raw = payload.get("data")
+            if isinstance(raw, bytes):
+                await self._on_audio_provider_event(
+                    session_key,
+                    AudioProviderEvent(
+                        "audio_output",
+                        audio=raw,
+                        sample_rate=int(payload.get("sample_rate") or 0),
+                        num_channels=int(payload.get("num_channels") or 0),
+                    ),
+                )
+            return
+        if event == "transcript_done":
+            await self._on_audio_provider_event(
+                session_key,
+                AudioProviderEvent(
+                    "transcript_final",
+                    text=str(payload.get("text") or ""),
+                    role=str(payload.get("role") or ""),
+                ),
+            )
+            return
+        if event == "error":
+            await self._on_audio_provider_event(
+                session_key,
+                AudioProviderEvent(
+                    "provider_error",
+                    reason=str(payload.get("message") or "unknown error"),
+                ),
+            )
+            return
+        if event == "transcript_delta":
+            await self._on_audio_provider_event(
+                session_key,
+                AudioProviderEvent(
+                    "transcript_partial",
+                    text=str(payload.get("delta") or ""),
+                    role=str(payload.get("role") or ""),
+                ),
+            )
             return
         if event == "closed":
             self._close_realtime_source(session_key)
 
-    def _feed_realtime_audio(
-        self, session: VoiceSession, payload: dict[str, Any]
+    def _feed_provider_audio(
+        self, session: VoiceSession, event: AudioProviderEvent
     ) -> None:
-        raw = payload.get("data")
-        if not isinstance(raw, bytes):
+        raw = event.audio
+        if not raw:
             return
         normalized = _normalize_realtime_pcm(
             raw,
-            sample_rate=int(payload.get("sample_rate") or 0),
-            num_channels=int(payload.get("num_channels") or 0),
+            sample_rate=event.sample_rate,
+            num_channels=event.num_channels,
         )
         if not normalized:
             return
@@ -818,7 +1013,7 @@ class VoiceModeManager:
                 client.play(source, after=after)
             except (OSError, discord.DiscordException) as exc:
                 logger.warning(
-                    "Realtime voice playback failed (error=%s)",
+                    "Voice provider playback failed (error=%s)",
                     type(exc).__name__,
                 )
                 source.cleanup()
@@ -828,6 +1023,21 @@ class VoiceModeManager:
         if finish_task is not None:
             finish_task.cancel()
         source.feed(normalized)
+
+    def _feed_realtime_audio(
+        self, session: VoiceSession, payload: dict[str, Any]
+    ) -> None:
+        raw = payload.get("data")
+        if isinstance(raw, bytes):
+            self._feed_provider_audio(
+                session,
+                AudioProviderEvent(
+                    "audio_output",
+                    audio=raw,
+                    sample_rate=int(payload.get("sample_rate") or 0),
+                    num_channels=int(payload.get("num_channels") or 0),
+                ),
+            )
 
     def _schedule_realtime_playback_finish(self, session_key: str) -> None:
         existing = self._realtime_finish_tasks.pop(session_key, None)
@@ -885,7 +1095,7 @@ class VoiceModeManager:
         if len(sessions) != 1:
             return
         session = sessions[0]
-        if session.provider == "codex-realtime":
+        if session.provider in {"codex-realtime", AUDIO_PROVIDER_QWEN}:
             return
         try:
             text = await self._transcribe(
@@ -906,12 +1116,21 @@ class VoiceModeManager:
         if text.strip():
             await session.on_transcript(session, segment.speaker_name, text.strip())
 
-    def _on_speech_start(self, guild_id: int) -> None:
+    def _on_speech_start(
+        self, guild_id: int, channel_id: int, speaker_id: int | None
+    ) -> None:
         if self._loop is None or self._loop.is_closed():
             return
+        sessions = self._sessions_for_audio(guild_id, channel_id, speaker_id)
+        qwen_sessions = {
+            session.session_key
+            for session in sessions
+            if session.provider == AUDIO_PROVIDER_QWEN
+        }
+        session_keys = qwen_sessions or None
         try:
             future = asyncio.run_coroutine_threadsafe(
-                self.stop_playback(guild_id), self._loop
+                self.stop_playback(guild_id, session_keys=session_keys), self._loop
             )
         except RuntimeError:
             return

@@ -101,6 +101,8 @@ class CodexSelfModelMixin:
             voice_provider = self.voice_provider
         except Exception:  # noqa: BLE001 - diagnostics must not block a turn
             voice_provider = None
+        middleware = getattr(self, "audio_provider", None)
+        middleware_capabilities = getattr(middleware, "capabilities", None)
         transport_available = transport_health == "healthy"
         image_status = "available" if transport_available else "currently unavailable"
         audio_capable = bool(getattr(self, "voice_mode_available", False))
@@ -114,6 +116,10 @@ class CodexSelfModelMixin:
         semantic_audio_capable = (
             bool(getattr(self, "realtime_voice_available", False))
             and voice_provider == "codex-realtime"
+        )
+        semantic_audio_capable = semantic_audio_capable or bool(
+            voice_provider == "qwen"
+            and getattr(middleware_capabilities, "semantic_audio_understanding", False)
         )
         semantic_audio_status = (
             "available"

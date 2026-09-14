@@ -11,13 +11,64 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 from ..core import CodexAppServerError, _codex_logger, _safe_log_label
+from ..audio_provider import (
+    AUDIO_PROVIDER_AUTO,
+    AUDIO_PROVIDER_CODEX_REALTIME,
+    AUDIO_PROVIDER_CUSTOM,
+    AUDIO_PROVIDER_QWEN,
+    AudioProvider,
+)
 
 logger = _codex_logger()
 
 CODEX_REALTIME_FEATURE = "realtime_conversation"
-CODEX_REALTIME_PROVIDER = "codex-realtime"
+CODEX_REALTIME_PROVIDER = AUDIO_PROVIDER_CODEX_REALTIME
 _REALTIME_AUDIO_MAX_BYTES = 256 * 1024
 _REALTIME_AUDIO_REQUEST_TIMEOUT = 10.0
+
+
+def select_audio_provider(
+    preference: str,
+    *,
+    qwen_available: bool,
+    realtime_available: bool,
+    custom_available: bool,
+    custom_configured: bool,
+) -> str | None:
+    """Select a complete provider while preserving partial-custom safety."""
+    selected = preference.strip().casefold() or AUDIO_PROVIDER_AUTO
+    if selected not in {
+        AUDIO_PROVIDER_AUTO,
+        AUDIO_PROVIDER_QWEN,
+        AUDIO_PROVIDER_CODEX_REALTIME,
+        AUDIO_PROVIDER_CUSTOM,
+    }:
+        selected = AUDIO_PROVIDER_AUTO
+
+    if selected == AUDIO_PROVIDER_CUSTOM:
+        return AUDIO_PROVIDER_CUSTOM if custom_available else None
+    if selected == AUDIO_PROVIDER_CODEX_REALTIME:
+        if realtime_available:
+            return AUDIO_PROVIDER_CODEX_REALTIME
+        return AUDIO_PROVIDER_CUSTOM if custom_available else None
+    if selected == AUDIO_PROVIDER_QWEN:
+        candidates = (AUDIO_PROVIDER_QWEN, AUDIO_PROVIDER_CODEX_REALTIME)
+    else:
+        candidates = (AUDIO_PROVIDER_QWEN,)
+    if qwen_available and AUDIO_PROVIDER_QWEN in candidates:
+        return AUDIO_PROVIDER_QWEN
+    if selected == AUDIO_PROVIDER_QWEN and realtime_available:
+        return AUDIO_PROVIDER_CODEX_REALTIME
+    # A partial custom setup historically suppresses Realtime fallback. Keep
+    # that guard for automatic selection, while an explicit Qwen fallback can
+    # still use a complete custom provider.
+    if custom_available:
+        return AUDIO_PROVIDER_CUSTOM
+    if selected == AUDIO_PROVIDER_AUTO and custom_configured:
+        return None
+    if realtime_available:
+        return AUDIO_PROVIDER_CODEX_REALTIME
+    return None
 
 
 @dataclass
@@ -43,6 +94,8 @@ class CodexRealtimeMixin:
         _realtime_model: str
         _realtime_voice: str
         _request_timeout: float
+        _audio_provider_preference: str
+        _qwen_audio: AudioProvider | None
 
     def __getattr__(self, name: str) -> Any:
         raise AttributeError(name)
@@ -54,12 +107,26 @@ class CodexRealtimeMixin:
 
     @property
     def voice_provider(self) -> str | None:
-        """Return the active voice provider, preferring complete custom audio."""
-        if self.custom_audio_configured:
-            if self._audio.transcription.enabled and self._audio.tts.enabled:
-                return "custom"
-            return None
-        return CODEX_REALTIME_PROVIDER if self.realtime_voice_available else None
+        """Return the selected complete voice provider with safe fallback."""
+        qwen = getattr(self, "_qwen_audio", None)
+        custom_available = bool(
+            self._audio.transcription.enabled and self._audio.tts.enabled
+        )
+        return select_audio_provider(
+            getattr(self, "_audio_provider_preference", AUDIO_PROVIDER_AUTO),
+            qwen_available=bool(qwen is not None and qwen.available),
+            realtime_available=self.realtime_voice_available,
+            custom_available=custom_available,
+            custom_configured=self.custom_audio_configured,
+        )
+
+    @property
+    def audio_provider(self) -> AudioProvider | None:
+        """Return Theia's optional middleware provider, not Codex Realtime."""
+        provider = getattr(self, "_qwen_audio", None)
+        if self.voice_provider == AUDIO_PROVIDER_QWEN and provider is not None:
+            return provider
+        return None
 
     @property
     def custom_audio_configured(self) -> bool:

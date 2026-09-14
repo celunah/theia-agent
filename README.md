@@ -2,7 +2,8 @@
 
 Theia is a private, persistent Codex agent for Discord. Chat with her in DMs,
 servers, and threads while she remembers the conversations, files, and
-preferences that matter to you.
+preferences that matter to you. Voice can use Codex Realtime, custom audio
+services, or a configured Qwen Audio middleware endpoint.
 
 ## Features
 
@@ -79,6 +80,11 @@ but operations there always require approval.
 
 Set `THEIA_SUPER_ADMIN_USERS` to a comma-separated list of trusted Discord user
 IDs when someone needs Super Admin access outside normal server permissions.
+
+For Qwen Audio middleware, set `THEIA_AUDIO_PROVIDER=qwen` (or leave it as
+`auto`) and provide a `ws://` or `wss://` `THEIA_QWEN_AUDIO_URL`. The endpoint
+must implement Theia's bounded audio-provider event protocol; Qwen remains an
+audio middleware service and does not receive Theia's personality or tools.
 
 Set `THEIA_CODEX_AUTO_UPDATE=true` to let Theia check for and stage official
 Codex CLI updates in her private runtime. Updates are disabled by default and

@@ -151,6 +151,13 @@ design.
 
 Typing indicators are shown while Theia is responding.
 
+Voice providers use one provider-neutral full-duplex boundary. Qwen Audio can be
+configured as middleware with `THEIA_AUDIO_PROVIDER=qwen` and a `ws://` or
+`wss://` `THEIA_QWEN_AUDIO_URL`; it handles audio transport, VAD, transcription,
+and speech output while Theia retains identity, personality, memory, tools,
+permissions, and final conversational decisions. `auto` safely falls back to
+the existing custom STT/TTS or Codex Realtime providers.
+
 Rich Presence activity text is generated in short, low-effort ephemeral Codex
 turns with no tools, self-improvement, or session writes. Active task activity
 overrides idle activity and updates are debounced and deduplicated. Discord

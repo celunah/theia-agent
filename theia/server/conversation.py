@@ -64,12 +64,8 @@ class CodexConversationMixin:
 
     @property
     def voice_mode_available(self) -> bool:
-        """Whether one complete voice provider can support voice mode."""
-        if self._audio.transcription.enabled and self._audio.tts.enabled:
-            return True
-        if self.custom_audio_configured:
-            return False
-        return self.realtime_voice_available
+        """Whether the selected provider can support a complete voice session."""
+        return self.voice_provider is not None
 
     def mode(self, session_key: str) -> str:
         """Return the text or voice mode selected for a Discord session."""

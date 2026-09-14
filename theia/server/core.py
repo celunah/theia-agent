@@ -39,6 +39,7 @@ from ..core import (
 )
 from ..personality import PersonalityStore
 from ..audio import OpenAICompatibleAudio
+from ..audio_provider import AUDIO_PROVIDER_ENV, QwenAudioProvider
 from .policy import (
     CODEX_STDIO_LIMIT_ENV,
     CODEX_MEMORY_BREACH_SAMPLES_ENV,
@@ -145,6 +146,10 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
         self._realtime_feature_enabled = False
         self._realtime_model = os.getenv("THEIA_REALTIME_MODEL", "").strip()
         self._realtime_voice = os.getenv("THEIA_REALTIME_VOICE", "").strip()
+        self._audio_provider_preference = (
+            os.getenv(AUDIO_PROVIDER_ENV, "auto").strip().casefold()
+        )
+        self._qwen_audio = QwenAudioProvider.from_environment()
         self._models: tuple[dict[str, Any], ...] = ()
         self._models_loaded_at = 0.0
         self._provider_capabilities: dict[str, Any] | None = None

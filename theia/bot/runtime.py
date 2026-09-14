@@ -90,6 +90,8 @@ class TheiaBot(commands.Bot):
         self.voice = VoiceModeManager(
             transcribe=self.codex.transcribe_audio,
             synthesize=self.codex.synthesize_response,
+            audio_provider=self.codex.audio_provider,
+            provider_name=lambda: self.codex.voice_provider,
             realtime_available=lambda: self.codex.voice_provider == "codex-realtime",
             realtime_start=self.codex.start_realtime_voice,
             realtime_audio=self.codex.append_realtime_audio,
