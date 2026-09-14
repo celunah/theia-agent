@@ -198,6 +198,7 @@ class CodexRequestMixin:
                             session.workspace is not None
                             and bool(session.workspace.entries)
                         )
+                        or bool(session.commitments)
                     )
                     if not has_session_metadata and (
                         session.last_activity_at is None

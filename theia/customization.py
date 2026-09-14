@@ -34,6 +34,7 @@ COMMAND_TARGETS = (
     "skill",
     "personality",
     "memory",
+    "commitments",
     "model",
     "mode",
     "customize",

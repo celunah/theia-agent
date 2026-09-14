@@ -87,6 +87,7 @@ from .voice import (
     _voice_speak_callback,
 )
 from .memory import handle_memory_command, memory_scope_autocomplete
+from .commitments import handle_commitments_command
 from .self_improvement import handle_self_improvement_command
 
 logger = _codex_logger()
@@ -249,6 +250,29 @@ async def codex_memory(
 ) -> None:
     """Show a private, owner-locked memory explorer."""
     await handle_memory_command(bot, interaction, scope, search, record_id)
+
+
+@_user_installable_command
+@bot.tree.command(name="commitments", description="Manage this session's open loops")
+@app_commands.describe(
+    action="List, complete, dismiss, or promote an open loop",
+    commitment_id="The open loop ID shown by the list action",
+)
+@app_commands.choices(
+    action=[
+        app_commands.Choice(name="list", value="list"),
+        app_commands.Choice(name="complete", value="complete"),
+        app_commands.Choice(name="dismiss", value="dismiss"),
+        app_commands.Choice(name="promote", value="promote"),
+    ]
+)
+async def codex_commitments(
+    interaction: discord.Interaction,
+    action: app_commands.Choice[str] | None = None,
+    commitment_id: str | None = None,
+) -> None:
+    """List or update the invoking user's private session open loops."""
+    await handle_commitments_command(bot, interaction, action, commitment_id)
 
 
 @_user_installable_command

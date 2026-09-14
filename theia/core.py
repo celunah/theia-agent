@@ -599,6 +599,7 @@ class _Session:
     mood: "_MoodState | None" = None
     attention: "_ConversationAttentionState | None" = None
     workspace: "_SessionWorkspace | None" = None
+    commitments: dict[str, "_Commitment"] = field(default_factory=dict)
     mood_appraisal_task: asyncio.Task[Any] | None = None
     workspace_review_task: asyncio.Task[Any] | None = None
     workspace_review_generation: int = 0
@@ -656,6 +657,21 @@ class _SessionWorkspace:
     revision: int = 0
     entries: dict[str, _WorkspaceEntry] = field(default_factory=dict)
     updated_at: float | None = None
+
+
+@dataclass
+class _Commitment:
+    """One bounded, temporary open loop owned by a single session."""
+
+    commitment_id: str
+    workspace_key: str
+    text: str
+    kind: str
+    status: str = "active"
+    created_at: float = 0.0
+    updated_at: float = 0.0
+    expires_at: float | None = None
+    last_cue_signature: str | None = None
 
 
 @dataclass

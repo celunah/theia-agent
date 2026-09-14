@@ -34,6 +34,7 @@ from ..core import (
     _truncate,
 )
 from .worker_diagnostics import record_current_worker_failure, run_worker
+from .commitments import parse_commitment_proposals
 
 logger = _codex_logger()
 _WORKSPACE_KEY_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
@@ -206,6 +207,7 @@ class CodexWorkspaceMixin:
             review.cancel()
         session.workspace_review_generation += 1
         workspace = session.workspace
+        self._reset_commitments(session)
         if workspace is None:
             return
         workspace.generation += 1
@@ -365,6 +367,29 @@ class CodexWorkspaceMixin:
                     )
             if valid:
                 return operations
+        return None
+
+    @staticmethod
+    def _parse_workspace_review(
+        text: str,
+    ) -> tuple[list[dict[str, str]], list[dict[str, Any]]] | None:
+        """Parse workspace operations and optional bounded commitment proposals."""
+        candidates = [text.strip()]
+        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        if match:
+            candidates.append(match.group(0))
+        for candidate in candidates:
+            candidate = candidate.removeprefix("```json").removesuffix("```").strip()
+            try:
+                value = json.loads(candidate)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(value, dict):
+                continue
+            operations = CodexWorkspaceMixin._parse_workspace_delta(candidate)
+            if operations is None:
+                continue
+            return operations, parse_commitment_proposals(value.get("commitments"))
         return None
 
     def _apply_workspace_delta(
@@ -570,9 +595,10 @@ class CodexWorkspaceMixin:
                 turn_id,
                 timeout=DEFAULT_WORKSPACE_REVIEW_TIMEOUT,
             )
-            operations = self._parse_workspace_delta(review_response)
-            if operations is None:
+            review = self._parse_workspace_review(review_response)
+            if review is None:
                 return
+            operations, commitments = review
             session_lock = session.lock
             if session_lock is None:
                 return
@@ -581,11 +607,14 @@ class CodexWorkspaceMixin:
                     return
                 if session.workspace_review_generation != generation:
                     return
-                self._apply_workspace_delta(
+                self._apply_workspace_review(
                     session,
                     operations,
+                    commitments,
                     base_generation=int(workspace.get("generation", 1)),
                     base_revision=int(workspace.get("revision", 0)),
+                    user_prompt=user_prompt,
+                    response=response,
                 )
         except asyncio.CancelledError:
             if thread_id and turn_id:

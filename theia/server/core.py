@@ -77,6 +77,7 @@ from .codex_update import (
 )
 from .self_model import CodexSelfModelMixin
 from .workspace import CodexWorkspaceMixin
+from .commitments import CodexCommitmentMixin
 from .lifecycle import CodexLifecycleMixin
 from .requests import CodexRequestMixin
 from .realtime import CodexRealtimeMixin
@@ -94,6 +95,7 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
     CodexConversationMixin,
     CodexAttentionMixin,
     CodexSelfModelMixin,
+    CodexCommitmentMixin,
     CodexWorkspaceMixin,
     CodexLifecycleMixin,
     CodexRequestMixin,

@@ -36,6 +36,7 @@ from .policy import (
     _USAGE_DAILY_LIMIT,
 )
 from .workspace import _restore_workspace_state, _serialize_workspace_state
+from .commitments import restore_commitments, serialize_commitments
 from ..core import (
     DEFAULT_CODEX_MODEL,
     DEFAULT_MODE,
@@ -554,6 +555,9 @@ class CodexStateMixin:
                     workspace = _restore_workspace_state(
                         value.get("workspace"), restored_at=state_now
                     )
+                    commitments = restore_commitments(
+                        value.get("commitments"), restored_at=state_now
+                    )
                     mode = value.get("mode")
                     last_activity_at = value.get("last_activity_at")
                     if (
@@ -591,6 +595,7 @@ class CodexStateMixin:
                         or saved_mode != DEFAULT_MODE
                         or attention is not None
                         or workspace is not None
+                        or bool(commitments)
                     )
                     if has_non_mood_state or (
                         mood is not None
@@ -620,6 +625,7 @@ class CodexStateMixin:
                             mood=mood,
                             attention=attention,
                             workspace=workspace,
+                            commitments=commitments,
                             archived=bool(value.get("archived"))
                             if thread_id
                             else False,
@@ -753,6 +759,7 @@ class CodexStateMixin:
                     "mood": self._serialize_mood_state(session.mood),
                     "attention": self._serialize_attention_state(session.attention),
                     "workspace": _serialize_workspace_state(session.workspace),
+                    "commitments": serialize_commitments(session.commitments),
                     "archived": session.archived,
                     "last_activity_at": session.last_activity_at,
                 }
@@ -770,6 +777,7 @@ class CodexStateMixin:
                         session.workspace is not None
                         and bool(session.workspace.entries)
                     )
+                    or bool(session.commitments)
                     or (
                         session.mood is not None
                         and session.last_activity_at is not None

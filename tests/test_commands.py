@@ -230,6 +230,7 @@ class CommandSurfaceTests(unittest.TestCase):
                 "skill",
                 "personality",
                 "memory",
+                "commitments",
                 "model",
                 "mode",
                 "restart",

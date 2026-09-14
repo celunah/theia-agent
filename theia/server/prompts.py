@@ -252,7 +252,41 @@ _WORKSPACE_REVIEW_OUTPUT_SCHEMA = {
                 "required": ["op", "key", "category", "text"],
                 "additionalProperties": False,
             },
-        }
+        },
+        "commitments": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "workspace_key": {"type": "string", "maxLength": 64},
+                    "kind": {
+                        "type": "string",
+                        "enum": [
+                            "unfinished_task",
+                            "pending_decision",
+                            "deferred_question",
+                            "promised_follow_up",
+                            "revisit_topic",
+                        ],
+                    },
+                    "text": {"type": "string", "maxLength": 240},
+                    "source": {
+                        "type": "string",
+                        "enum": ["user_request", "assistant_promise"],
+                    },
+                    "explicit": {"type": "boolean"},
+                },
+                "required": [
+                    "workspace_key",
+                    "kind",
+                    "text",
+                    "source",
+                    "explicit",
+                ],
+                "additionalProperties": False,
+            },
+        },
     },
     "required": ["operations"],
     "additionalProperties": False,
@@ -268,8 +302,17 @@ _WORKSPACE_REVIEW_DEVELOPER_INSTRUCTIONS = (
     "short paraphrases, never copied user text. Do not store credentials, secrets, "
     "private paths, raw tool output, hidden reasoning, personality lore, permanent "
     "memory, or unrelated details. Use delete only for a clearly obsolete note. "
-    "Return an empty operations array when nothing useful changed. Return only the "
-    "requested JSON object."
+    "Also identify at most three explicit user-facing open loops in the separate "
+    "commitments array. A commitment must be clearly supported by the user asking "
+    "to revisit, defer, confirm, follow up, or finish something, or by a concrete "
+    "follow-up promise in Theia's response. Do not infer commitments from ordinary "
+    "conversation, completed work, vague plans, or speculative possibilities. "
+    "Every commitment must use an existing workspace key or a key being upserted, "
+    "be a short paraphrase, identify its source, and set explicit=true only when "
+    "the supplied turn contains that clear evidence. Commitments are temporary, "
+    "session-scoped, and never durable memory. Return an empty operations array and "
+    "empty commitments array when nothing useful changed. Return only the requested "
+    "JSON object."
 )
 
 _PERSONALITY_SUMMARY_OUTPUT_SCHEMA = {

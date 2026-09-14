@@ -866,6 +866,11 @@ class CodexSelfImprovementMixin:
         attention = self._render_attention_transition(attention_transition)
         if attention:
             parts.append(attention)
+        commitment = self._render_commitment_prompt(
+            session, attention_transition, prompt
+        )
+        if commitment:
+            parts.append(commitment)
         parts.append(prompt)
         return "\n\n".join(parts), summary is not None
 

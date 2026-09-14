@@ -22,6 +22,7 @@ The current commands are:
 - `/skill <skill_name>`
 - `/personality [file] [name]`
 - `/memory [scope]`
+- `/commitments [action] [commitment_id]`
 - `/model <model>`
 - `/mode text|voice`
 - `/restart`
@@ -79,6 +80,12 @@ Each isolated conversation also has a temporary simulated mood. It derives a
 resting affect from the active personality, uses a bounded private Codex
 appraisal for meaningful user turns, decays with real elapsed time, and is never
 written to permanent memories, skills, recaps, or personality files.
+
+Theia can keep a small set of explicit, session-scoped open loops such as a
+deferred question or promised follow-up. `/commitments` lists the current loops;
+the invoking user can explicitly complete, dismiss, or promote one to durable
+memory. Ordinary conversation does not create loops, and they never send
+reminders or messages on their own.
 
 Theia also tracks conversational attention separately from work tasks and
 permanent memory. A bounded private classifier compares each user turn with the
