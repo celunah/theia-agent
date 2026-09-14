@@ -22,6 +22,10 @@ class MemoryViewTests(unittest.TestCase):
         embed = view.embed()
         self.assertIn("Entries (2): 2", embed.description or "")
         self.assertEqual(embed.footer.text, "Memory page 1/2")
+        self.assertEqual(
+            [getattr(item, "style", None) for item in view.children],
+            [discord.ButtonStyle.secondary, discord.ButtonStyle.secondary],
+        )
 
     def test_persistent_view_store_restores_a_memory_view(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

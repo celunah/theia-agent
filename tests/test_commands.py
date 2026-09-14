@@ -1168,6 +1168,10 @@ class CommandSurfaceTests(unittest.TestCase):
             [getattr(item, "label", None) for item in view.children],
             ["Back", "Forward"],
         )
+        self.assertEqual(
+            [getattr(item, "style", None) for item in view.children],
+            [discord.ButtonStyle.secondary, discord.ButtonStyle.secondary],
+        )
 
     def test_interaction_views_use_restart_safe_component_ids(self) -> None:
         views = (

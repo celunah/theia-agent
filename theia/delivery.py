@@ -110,7 +110,7 @@ class _PaginatorView(_PersistentViewMixin, discord.ui.View):
                 "label:next_button",
                 "Next",
             ),
-            style=discord.ButtonStyle.primary,
+            style=discord.ButtonStyle.secondary,
             custom_id=self._custom_id("next"),
         )
 
@@ -249,7 +249,7 @@ class _MemoryView(_PersistentViewMixin, discord.ui.View):
                 "label:next_button",
                 "Next",
             ),
-            style=discord.ButtonStyle.primary,
+            style=discord.ButtonStyle.secondary,
             custom_id=self._custom_id("next"),
         )
 
