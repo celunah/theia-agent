@@ -426,6 +426,55 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         self.assertEqual(calls[0]["embed"].title, "Request failed")
         self.assertIn("Reason: quota reached", calls[0]["embed"].description)
 
+    async def test_user_cancelled_turn_does_not_show_failure_embed(self) -> None:
+        calls: list[dict] = []
+        status_message = _Message()
+
+        async def send(**kwargs):
+            calls.append(kwargs)
+            return status_message
+
+        async def ask(_prompt: str, **kwargs: Any) -> str:
+            await kwargs["on_event"]("tool_activity", {})
+            raise main.CodexTurnCancelled("interrupted")
+
+        with patch.object(main.bot.codex, "ask", new=ask):
+            await main.handle_request(
+                send,
+                "stop this",
+                channel=_Channel(),
+                user_id=7,
+            )
+
+        self.assertEqual(calls[0]["content"], "-# Thinking")
+        self.assertNotIn("embed", calls[0])
+        self.assertEqual(
+            status_message.edits[-1]["content"],
+            "-# Request stopped\nReason: interrupted",
+        )
+
+    async def test_timeout_remains_a_failure_with_a_specific_reason(self) -> None:
+        calls: list[dict] = []
+
+        async def send(**kwargs):
+            calls.append(kwargs)
+            return _Message()
+
+        with patch.object(
+            main.bot.codex,
+            "ask",
+            AsyncMock(side_effect=main.CodexTurnTimeoutError()),
+        ):
+            await main.handle_request(
+                send,
+                "wait",
+                channel=_Channel(),
+                user_id=7,
+            )
+
+        self.assertEqual(calls[0]["embed"].title, "Request failed")
+        self.assertIn("Reason: timeout", calls[0]["embed"].description)
+
     async def test_request_prompt_includes_trusted_current_author_metadata(
         self,
     ) -> None:

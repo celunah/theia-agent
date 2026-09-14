@@ -5,6 +5,8 @@ import os
 from theia.server.core import (
     CodexAppServer,
     CodexAppServerError,
+    CodexTurnCancelled,
+    CodexTurnTimeoutError,
 )
 from theia.server.policy import (
     CODEX_MEMORY_RESTART_BACKOFF_ENV,
@@ -317,6 +319,8 @@ __all__ = [
     "CodexAppServerError",
     "CodexBot",
     "CodexTransientRestartError",
+    "CodexTurnCancelled",
+    "CodexTurnTimeoutError",
     "CodexUpdateResult",
     "CodexUpdater",
     "CustomizationError",

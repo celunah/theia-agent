@@ -176,6 +176,22 @@ class CodexAppServerError(RuntimeError):
     """A Codex App Server operation failed or returned an unusable result."""
 
 
+class CodexTurnCancelled(CodexAppServerError):
+    """A user-requested turn interruption was acknowledged by Codex."""
+
+    def __init__(self, reason: str) -> None:
+        self.terminal_reason = reason
+        super().__init__(reason)
+
+
+class CodexTurnTimeoutError(CodexAppServerError):
+    """A turn exceeded its local wait limit."""
+
+    def __init__(self) -> None:
+        self.terminal_reason = "timeout"
+        super().__init__("Codex turn timed out and was interrupted.")
+
+
 class CodexTransientRestartError(CodexAppServerError):
     """A turn was interrupted for automatic Codex recovery and may be retried."""
 
@@ -872,6 +888,8 @@ class _TurnState:
         self.discord_thread_opening_sent = False
         self.final_text: str | None = None
         self.completed: dict[str, Any] | None = None
+        self.terminal_reason: str | None = None
+        self.user_cancel_requested = False
         self.usage_outcome_recorded = False
         self.items: list[dict[str, Any]] = []
         self.agent_messages: dict[str, dict[str, Any]] = {}

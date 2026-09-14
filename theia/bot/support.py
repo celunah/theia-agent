@@ -20,7 +20,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from ..server.policy import MAX_ATTACHMENT_BYTES
-from ..server.core import CodexAppServerError
+from ..server.core import CodexAppServerError, CodexTurnCancelled
 from ..core import (
     _codex_logger,
     _command_embed,
@@ -29,6 +29,7 @@ from ..core import (
     _safe_error_reason,
     _is_super_admin_user,
     _truncate,
+    _subtext,
 )
 from ..customization import (
     COMMAND_TARGETS,
@@ -61,6 +62,22 @@ def _current_revision() -> str:
     from . import core as bot_module
 
     return bot_module._theia_revision()
+
+
+async def _finish_cancelled_delivery(
+    delivery: _ResponseDelivery,
+    reason: str | None,
+) -> None:
+    """Close an existing thinking status without presenting cancellation as failure."""
+    status_message = delivery.status_message
+    if status_message is None:
+        return
+    safe_reason = _safe_error_reason(reason, 120) if reason else ""
+    content = "Request stopped"
+    if safe_reason:
+        content += f"\nReason: {safe_reason}"
+    with contextlib.suppress(discord.DiscordException, AttributeError):
+        await status_message.edit(content=_subtext(content))
 
 
 async def _run_image_follow_up(*args: Any, **kwargs: Any) -> Any:
@@ -907,6 +924,7 @@ async def handle_request(
     try:
         async with _typing_indicator(channel):
             await delivery.start()
+            cancelled = False
             failed = False
             try:
                 response = await bot.codex.ask(
@@ -925,9 +943,13 @@ async def handle_request(
                     interaction_sender=interaction_sender,
                     allow_discord_tools=allow_discord_tools,
                 )
+            except CodexTurnCancelled as exc:
+                cancelled = True
+                error_reason = exc.terminal_reason
+                response = ""
             except CodexAppServerError as exc:
                 failed = True
-                error_reason = str(exc)
+                error_reason = str(getattr(exc, "terminal_reason", None) or exc)
                 response = "Codex could not complete this request."
             except Exception as exc:  # noqa: BLE001 - never leave a Discord request silent
                 failed = True
@@ -935,7 +957,7 @@ async def handle_request(
                 response = "Codex could not complete this request."
             response_for_presence = response
             speech = ()
-            if not failed and speak_text is None:
+            if not failed and not cancelled and speak_text is None:
                 try:
                     speech = await bot.codex.synthesize_response(response)
                 except AudioProtocolError as exc:
@@ -943,29 +965,32 @@ async def handle_request(
                         "Optional TTS response failed (error=%s)",
                         type(exc).__name__,
                     )
-            elif not failed and speak_text is not None:
+            elif not failed and not cancelled and speak_text is not None:
                 # Voice-mode responses are spoken through the active Discord
                 # voice session instead of being duplicated as TTS files on
                 # the text response. Keep the full final answer in text too.
                 with contextlib.suppress(Exception):
                     await speak_text(response)
-            await delivery.finalize(
-                response,
-                failed=failed,
-                error_reason=error_reason if failed else None,
-                speech=speech,
-                image_paths=delivery.image_paths,
-                on_image_action=lambda image_interaction, action_prompt, paths, view: (
-                    _run_image_follow_up(
-                        image_interaction,
-                        action_prompt,
-                        paths,
-                        channel=delivery.channel,
-                        image_view=view,
-                        image_message=view.message,
-                    )
-                ),
-            )
+            if cancelled:
+                await _finish_cancelled_delivery(delivery, error_reason)
+            else:
+                await delivery.finalize(
+                    response,
+                    failed=failed,
+                    error_reason=error_reason if failed else None,
+                    speech=speech,
+                    image_paths=delivery.image_paths,
+                    on_image_action=lambda image_interaction, action_prompt, paths, view: (
+                        _run_image_follow_up(
+                            image_interaction,
+                            action_prompt,
+                            paths,
+                            channel=delivery.channel,
+                            image_view=view,
+                            image_message=view.message,
+                        )
+                    ),
+                )
             with contextlib.suppress(Exception):
                 bot.recaps.record_exchange(
                     user_id=user_id,

@@ -576,8 +576,16 @@ class TestLocalCodexBoundary(unittest.IsolatedAsyncioTestCase):
             lambda: interrupt_server.status("interrupt")["turn_id"] is not None
         )
         self.assertTrue(await interrupt_server.interrupt("interrupt"))
-        with self.assertRaisesRegex(main.CodexAppServerError, "fake interruption"):
+        with self.assertRaises(main.CodexTurnCancelled) as context:
             await interrupted
+        self.assertEqual(context.exception.terminal_reason, "interrupted")
+        self.assertTrue(
+            any(
+                event.get("event") == "turn_cancelled"
+                and event.get("detail") == "fake interruption"
+                for event in interrupt_server.runtime_events()
+            )
+        )
 
     async def test_timeout_is_interrupted_and_reported_to_the_caller(self) -> None:
         """Verify a turn that never completes follows the timeout recovery path."""
@@ -613,8 +621,9 @@ class TestLocalCodexBoundary(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await server.interrupt("concurrent-first"))
         self.assertTrue(await server.interrupt("concurrent-second"))
         for task in (first, second):
-            with self.assertRaisesRegex(main.CodexAppServerError, "fake interruption"):
+            with self.assertRaises(main.CodexTurnCancelled) as context:
                 await task
+            self.assertEqual(context.exception.terminal_reason, "interrupted")
 
     async def test_eof_and_process_crashes_release_active_turns(self) -> None:
         """Verify graceful EOF and abnormal child exit wake active callers."""

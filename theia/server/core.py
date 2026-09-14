@@ -22,10 +22,14 @@ from ..core import (
     DEFAULT_SELF_IMPROVEMENT,
     DEFAULT_SELF_IMPROVEMENT_TIMEOUT,
     CodexAppServerError,
+    CodexTurnCancelled,
+    CodexTurnTimeoutError,
     _configured_paths,
     _env_bool,
     _env_float,
     _error_message,
+    _safe_error_reason,
+    _safe_log_label,
     _is_super_admin_user,
     _codex_logger,
     _path_is_under,
@@ -92,6 +96,34 @@ from .workers import CodexWorkerMixin
 from .worker_diagnostics import record_current_worker_timeout
 
 logger = _codex_logger()
+
+_CANCELLATION_TERMINAL_MARKERS = (
+    "interrupt",
+    "cancel",
+    "abort",
+    "stop",
+)
+_CANCELLATION_TERMINAL_REASONS = frozenset(
+    {"interrupted", "cancelled", "canceled", "aborted", "stopped"}
+)
+
+
+def _is_cancellation_terminal(status: str, reason: str) -> bool:
+    for value in (status, reason):
+        normalized = re.sub(r"[^a-z0-9]", "", value.casefold())
+        if normalized in _CANCELLATION_TERMINAL_REASONS or any(
+            marker in normalized for marker in _CANCELLATION_TERMINAL_MARKERS
+        ):
+            return True
+    return False
+
+
+def _cancel_terminal_reason(status: str, reason: str) -> str:
+    normalized_status = re.sub(r"[^a-z0-9]", "", status.casefold())
+    candidate = (
+        status if normalized_status in _CANCELLATION_TERMINAL_REASONS else reason
+    )
+    return _safe_error_reason(candidate, 120) or "interrupted"
 
 
 class CodexAppServer(  # pylint: disable=too-many-ancestors
@@ -533,14 +565,27 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
             completed = state.completed or {}
             if completed.get("status") != "completed":
                 error = completed.get("error") or {}
-                message = (
-                    _error_message(error)
-                    or str(completed.get("status") or "")
-                    or "unknown error"
-                )
+                terminal_status = str(completed.get("status") or "").strip()
+                message = _error_message(error) or terminal_status or "unknown error"
+                state.terminal_reason = message
+                if state.user_cancel_requested and _is_cancellation_terminal(
+                    terminal_status, message
+                ):
+                    reason = _cancel_terminal_reason(terminal_status, message)
+                    diagnostic_reason = _safe_error_reason(message, 120) or reason
+                    logger.info(
+                        "Codex turn cancelled (status=%s, reason=%s, duration_ms=%.1f)",
+                        _safe_log_label(terminal_status),
+                        _safe_log_label(diagnostic_reason),
+                        (time.monotonic() - started_at) * 1000,
+                    )
+                    self._record_runtime_event("turn_cancelled", diagnostic_reason)
+                    raise CodexTurnCancelled(reason)
                 logger.warning(
-                    "Codex turn failed (status=%s, error_type=%s, duration_ms=%.1f)",
-                    completed.get("status"),
+                    "Codex turn failed (status=%s, reason=%s, error_type=%s, "
+                    "duration_ms=%.1f)",
+                    _safe_log_label(terminal_status),
+                    _safe_log_label(_safe_error_reason(error or message, 120)),
                     type(error).__name__,
                     (time.monotonic() - started_at) * 1000,
                 )
@@ -579,9 +624,7 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
             self._record_runtime_event("turn_timed_out")
             with contextlib.suppress(CodexAppServerError):
                 await self.interrupt(session_key)
-            raise CodexAppServerError(
-                "Codex turn timed out and was interrupted."
-            ) from exc
+            raise CodexTurnTimeoutError() from exc
         finally:
             if state.event_tasks:
                 await asyncio.gather(*state.event_tasks, return_exceptions=True)
@@ -600,6 +643,9 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
             logger.debug("Ignored Codex interrupt because no turn is active")
             return False
         self._clear_pending_for_turn(session.thread_id, session.turn_id)
+        state = self._turns.get(session.turn_id)
+        if state is not None:
+            state.user_cancel_requested = True
         await self._request(
             "turn/interrupt",
             {"threadId": session.thread_id, "turnId": session.turn_id},
