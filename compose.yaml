@@ -6,8 +6,8 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        THEIA_VERSION: 1.1.0
-    image: theia-agent:1.1.0
+        THEIA_VERSION: 1.2.0
+    image: theia-agent:1.2.0
     env_file:
       - .env
     environment:
