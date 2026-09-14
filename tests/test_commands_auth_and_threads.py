@@ -241,6 +241,110 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
             interaction.response.send_message.await_args.kwargs["ephemeral"]
         )
 
+    async def test_memory_command_allows_authenticated_user_own_scope(self) -> None:
+        interaction = SimpleNamespace(
+            channel=SimpleNamespace(id=7, guild=SimpleNamespace(id=42)),
+            guild=SimpleNamespace(id=42),
+            user=SimpleNamespace(
+                id=9,
+                guild_permissions=SimpleNamespace(administrator=False),
+            ),
+            response=SimpleNamespace(defer=AsyncMock(), is_done=lambda: False),
+            followup=SimpleNamespace(
+                send=AsyncMock(return_value=SimpleNamespace(id=123))
+            ),
+        )
+        result = {
+            "character_name": "Celune",
+            "character_slug": "cel",
+            "records": [
+                {
+                    "record_id": "0123456789abcdef01234567",
+                    "text": "Private preference",
+                    "source_category": "user_memory",
+                    "display_metadata": {
+                        "source": "user memory",
+                        "scope": "current user",
+                        "updated": "recently",
+                    },
+                }
+            ],
+            "total_entries": 1,
+        }
+        with (
+            patch.object(main.bot.presence, "touch", new=AsyncMock()),
+            patch.object(main.bot.codex, "is_authenticated", return_value=True),
+            patch.object(main.bot.codex, "memory_view", return_value=result) as view,
+            patch.object(main.bot, "register_view", new=AsyncMock()),
+        ):
+            await cast(Any, main.codex_memory.callback)(interaction, scope="me")
+
+        view.assert_called_once()
+        self.assertEqual(view.call_args.kwargs["actor_user_id"], 9)
+        self.assertEqual(view.call_args.kwargs["actor_guild_id"], 42)
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        self.assertTrue(interaction.followup.send.await_args.kwargs["ephemeral"])
+
+    async def test_memory_command_restricts_everyone_to_super_admin(self) -> None:
+        interaction = SimpleNamespace(
+            channel=SimpleNamespace(id=7, guild=SimpleNamespace(id=42)),
+            guild=SimpleNamespace(id=42),
+            user=SimpleNamespace(
+                id=9,
+                guild_permissions=SimpleNamespace(administrator=True),
+            ),
+            response=SimpleNamespace(send_message=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        with patch.object(main.bot.codex, "memory_view") as view:
+            await cast(Any, main.codex_memory.callback)(
+                interaction,
+                scope="everyone",
+            )
+
+        view.assert_not_called()
+        interaction.response.send_message.assert_awaited_once()
+        self.assertTrue(
+            interaction.response.send_message.await_args.kwargs["ephemeral"]
+        )
+        self.assertIn(
+            "Super Admin",
+            interaction.response.send_message.await_args.kwargs["embed"].description,
+        )
+
+    async def test_memory_command_super_admin_can_target_a_specific_scope(self) -> None:
+        interaction = SimpleNamespace(
+            channel=SimpleNamespace(id=7, guild=SimpleNamespace(id=42)),
+            guild=SimpleNamespace(id=42),
+            user=SimpleNamespace(
+                id=9,
+                guild_permissions=SimpleNamespace(administrator=False),
+            ),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(
+                send=AsyncMock(return_value=SimpleNamespace(id=123))
+            ),
+        )
+        result = {
+            "character_name": "Celune",
+            "character_slug": "cel",
+            "records": [],
+            "total_entries": 0,
+        }
+        with (
+            patch.dict(os.environ, {main.SUPER_ADMIN_USERS_ENV: "9"}),
+            patch.object(main.bot.codex, "memory_view", return_value=result) as view,
+            patch.object(main.bot, "register_view", new=AsyncMock()),
+        ):
+            await cast(Any, main.codex_memory.callback)(
+                interaction,
+                scope="user:88",
+            )
+
+        view.assert_called_once()
+        self.assertEqual(view.call_args.args[1], "user:88")
+        self.assertTrue(interaction.followup.send.await_args.kwargs["ephemeral"])
+
     async def test_login_messages_cover_each_authentication_path(self) -> None:
         """Expose distinct status messages for cached, imported, and device auth."""
         cases = (

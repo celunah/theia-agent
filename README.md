@@ -30,10 +30,11 @@ threads, and voice.
 /skill  /personality  /memory [scope]  /customize  /restart
 ```
 
-`/debug`, `/memory`, `/restart`, and `/customize` are for administrators.
-`/debug` shows a sanitized live view of Theia's runtime while it is open, and
-`/memory` privately pages through the selected character's memory entries. The
-full capability inventory is in [`THEIA_FEATURES.md`](THEIA_FEATURES.md).
+`/debug`, `/restart`, and `/customize` are for administrators. `/memory` is a
+private, owner-locked explorer: users can inspect their own entries, server
+administrators can inspect the current server, and Super Admins can inspect
+broader scopes. The full capability inventory is in
+[`THEIA_FEATURES.md`](THEIA_FEATURES.md).
 
 Leave the `/btw` prompt blank to enter it in a Discord modal. Generated images
 and their response are delivered together with an owner-only `Follow up` control;

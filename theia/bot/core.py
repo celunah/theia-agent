@@ -34,7 +34,6 @@ from ..customization import (
 )
 from ..delivery import (
     _ImageResultView,
-    _MemoryView,
     _reaction_paginators,
 )
 from ..voice import VoiceModeError
@@ -87,6 +86,7 @@ from .voice import (
     _restart_in_place,
     _voice_speak_callback,
 )
+from .memory import handle_memory_command, memory_scope_autocomplete
 
 logger = _codex_logger()
 
@@ -233,49 +233,21 @@ async def codex_about(interaction: discord.Interaction) -> None:
 
 
 @_user_installable_command
-@bot.tree.command(name="memory", description="View the character's memories")
-@app_commands.describe(scope="Which character scope to view: me, server, or everyone")
-@app_commands.choices(
-    scope=[app_commands.Choice(name=scope, value=scope) for scope in PERSONALITY_SCOPES]
+@bot.tree.command(name="memory", description="Explore the character's memories")
+@app_commands.describe(
+    scope="me, server, everyone, user:<id>, or server:<id>",
+    search="Optional text to search",
+    record_id="Optional record identifier to inspect one memory",
 )
+@app_commands.autocomplete(scope=memory_scope_autocomplete)
 async def codex_memory(
     interaction: discord.Interaction,
-    scope: app_commands.Choice[str] | None = None,
+    scope: str | None = None,
+    search: str | None = None,
+    record_id: str | None = None,
 ) -> None:
-    """Show the requesting administrator one memory entry per embed page."""
-    if not await _require_server_admin(
-        interaction,
-        message="Only Theia administrators can view character memories.",
-    ):
-        return
-    await interaction.response.defer(ephemeral=True)
-    selected_scope = scope.value if isinstance(scope, app_commands.Choice) else "me"
-    try:
-        result = bot.codex.memory_view(
-            session_key(interaction.channel, interaction.user.id),
-            selected_scope,
-        )
-    except CodexAppServerError as exc:
-        await _send_command_failure(interaction, "Memory unavailable", exc)
-        return
-    view = _MemoryView(
-        result.get("entries") if isinstance(result.get("entries"), list) else [],
-        character_name=str(result.get("character_name") or "Theia"),
-        character_slug=str(result.get("character_slug") or "theia"),
-        scope=selected_scope,
-        owner_id=interaction.user.id,
-        customizer=bot.customizations,
-        guild_id=getattr(getattr(interaction, "guild", None), "id", None),
-        total_entries=result.get("total_entries"),
-    )
-    message = await interaction.followup.send(
-        embed=view.embed(),
-        view=view,
-        ephemeral=True,
-        wait=True,
-    )
-    if message is not None:
-        await bot.register_view(view, message)
+    """Show a private, owner-locked memory explorer."""
+    await handle_memory_command(bot, interaction, scope, search, record_id)
 
 
 @_user_installable_command

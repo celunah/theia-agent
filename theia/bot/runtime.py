@@ -15,7 +15,7 @@ from typing import Any, cast
 import discord
 from discord.ext import commands
 
-from ..server.core import CodexAppServer
+from ..server.core import CodexAppServer, CodexAppServerError
 from .support import (
     DEBUG_REFRESH_INTERVAL,
     PERSISTENT_VIEW_FILE,
@@ -23,12 +23,18 @@ from .support import (
 )
 from .embeds import _debug_embed
 from ..customization import FrontendCustomizationStore
-from ..delivery import _ImageResultView, _MemoryView, _PaginatorView
+from ..delivery import (
+    _ImageResultView,
+    _MemoryConfirmationView,
+    _MemoryView,
+    _PaginatorView,
+)
 from ..presence import PresenceManager, RichPresenceManager
 from ..recaps import NightlyRecapManager
 from ..ui import _DecisionView, _DebugView, _FormView, _UserInputView
 from ..voice import VoiceModeManager
 from ..core import _codex_logger
+from .memory import _mutation_callback
 
 logger = _codex_logger()
 
@@ -143,11 +149,14 @@ class TheiaBot(commands.Bot):
                 index=index,
             )
         if kind == "memory":
+            if user_id is None:
+                return None
+            records = state.get("records")
             entries = state.get("entries")
-            if (
-                not isinstance(entries, list)
-                or not entries
-                or not all(isinstance(entry, str) for entry in entries)
+            if not isinstance(records, list):
+                records = entries
+            if not isinstance(records, list) or not all(
+                isinstance(entry, (str, dict)) for entry in records
             ):
                 return None
             character_name = state.get("character_name", "Theia")
@@ -162,8 +171,10 @@ class TheiaBot(commands.Bot):
             index = index if isinstance(index, int) else 0
             total_entries = state.get("total_entries")
             total_entries = total_entries if isinstance(total_entries, int) else None
-            return _MemoryView(
-                entries,
+            channel_id = state.get("channel_id")
+            channel_id = channel_id if isinstance(channel_id, int) else None
+            view = _MemoryView(
+                records,
                 character_name=character_name,
                 character_slug=character_slug,
                 scope=scope,
@@ -171,9 +182,97 @@ class TheiaBot(commands.Bot):
                 total_entries=total_entries,
                 customizer=customizer,
                 guild_id=guild_id,
+                channel_id=channel_id,
                 token=token,
                 recovered=True,
                 index=index,
+                search_query=(
+                    state.get("search_query")
+                    if isinstance(state.get("search_query"), str)
+                    else ""
+                ),
+            )
+            view.on_mutation = _mutation_callback(self, view)
+            view.on_view_created = self.register_view
+            return view
+        if kind == "memory-confirm":
+            if user_id is None:
+                return None
+            action = state.get("action")
+            record_id = state.get("record_id")
+            scope = state.get("scope")
+            channel_id = state.get("channel_id")
+            replacement = state.get("replacement")
+            if (
+                action not in {"forget", "edit"}
+                or not isinstance(record_id, str)
+                or not isinstance(scope, str)
+                or not isinstance(channel_id, int)
+                or (replacement is not None and not isinstance(replacement, str))
+            ):
+                return None
+
+            async def mutate(
+                interaction: discord.Interaction,
+                requested_action: str,
+                requested_id: str,
+                requested_replacement: str | None,
+            ) -> tuple[bool, str]:
+                from .support import _guild_id, _is_server_admin
+                from ..core import _is_super_admin_user
+
+                super_admin = _is_super_admin_user(interaction.user.id)
+                try:
+                    result = (
+                        self.codex.forget_memory(
+                            f"guild:{guild_id or 0}:channel:{channel_id}:"
+                            f"user:{user_id or 0}",
+                            requested_id,
+                            scope,
+                            actor_user_id=interaction.user.id,
+                            actor_guild_id=_guild_id(interaction.channel),
+                            server_admin=_is_server_admin(
+                                interaction.user, interaction.channel
+                            ),
+                            super_admin=super_admin,
+                            confirmed=True,
+                        )
+                        if requested_action == "forget"
+                        else self.codex.edit_memory(
+                            f"guild:{guild_id or 0}:channel:{channel_id}:"
+                            f"user:{user_id or 0}",
+                            requested_id,
+                            requested_replacement or "",
+                            scope,
+                            actor_user_id=interaction.user.id,
+                            actor_guild_id=_guild_id(interaction.channel),
+                            server_admin=_is_server_admin(
+                                interaction.user, interaction.channel
+                            ),
+                            super_admin=super_admin,
+                            confirmed=True,
+                        )
+                    )
+                except (CodexAppServerError, OSError) as exc:
+                    return False, str(exc)
+                return True, (
+                    "Memory forgotten."
+                    if result.get("action") == "forget"
+                    else "Memory updated."
+                )
+
+            return _MemoryConfirmationView(
+                user_id,
+                action=action,
+                record_id=record_id,
+                replacement=replacement,
+                scope=scope,
+                channel_id=channel_id,
+                on_mutation=mutate,
+                customizer=customizer,
+                guild_id=guild_id,
+                token=token,
+                recovered=True,
             )
         if kind == "image":
             paths: list[Path] = []

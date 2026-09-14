@@ -8,6 +8,7 @@ import json
 import math
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -24,15 +25,26 @@ from .policy import (
 from ..core import (
     BASE_PRIORS,
     CodexAppServerError,
-    PERSONALITY_SCOPES,
     _Session,
     _TurnState,
     _codex_logger,
     _env_bool,
+    _path_is_under,
     _safe_intermediate_text,
     _truncate,
 )
 from ..personality import PersonalityError
+from .memory_records import (
+    MEMORY_RECORD_MAX_CHARACTERS,
+    MEMORY_RECORD_MAX_COUNT,
+    MemoryRecord,
+    append_audit,
+    markdown_records,
+    memory_scope_selector,
+    recap_record,
+    safe_memory_text,
+    workspace_record,
+)
 from .prompts import (
     _MEMORY_RETRIEVAL_DEVELOPER_INSTRUCTIONS,
     _MEMORY_RETRIEVAL_OUTPUT_SCHEMA,
@@ -108,74 +120,621 @@ class CodexPersonalityStateMixin:
         """Count durable Markdown memory records without reading their contents out."""
         return len(cls._memory_entries_from_text(text))
 
-    def memory_view(self, session_key: str, scope: str = "me") -> dict[str, Any]:
-        """Return one scoped character identity and its complete memory snapshot."""
-        normalized_scope = scope.strip().casefold()
-        if normalized_scope not in PERSONALITY_SCOPES:
-            raise CodexAppServerError(
-                "Memory scope must be `me`, `server`, or `everyone`."
-            )
-        canonical_key = self._canonical_session_key(session_key)
-        guild_id, user_id = self._personality_scope_identity(canonical_key)
-        if normalized_scope == "server" and (guild_id is None or guild_id <= 0):
-            raise CodexAppServerError("The `server` memory scope requires a server.")
-
-        scope_key = {
-            "me": f"me:{user_id}" if user_id is not None and user_id > 0 else None,
-            "server": (
-                f"server:{guild_id}" if guild_id is not None and guild_id > 0 else None
-            ),
-            "everyone": "everyone",
-        }[normalized_scope]
-        record = self._personality_scopes.get(scope_key) if scope_key else None
+    def _memory_character(
+        self, canonical_key: str, target_scope: str
+    ) -> tuple[str, str]:
+        record = self._personality_scopes.get(target_scope)
         profile_name = (
             record.get("name")
             if isinstance(record, dict) and isinstance(record.get("name"), str)
             else self.active_personality(canonical_key)
         )
-        character_name = "Theia"
-        character_slug = "theia"
         if profile_name:
             try:
                 summary = self._personalities.summary(profile_name)
             except PersonalityError:
                 summary = None
             if summary is not None:
-                character_name = summary.character_name
-                character_slug = summary.identifier
+                return summary.character_name, summary.identifier
+        return "Theia", "theia"
 
-        entries: list[str] = []
+    def _memory_source_paths(self) -> list[tuple[Path, Path]]:
+        """Discover only supported Markdown files beneath configured roots."""
+        paths: list[tuple[Path, Path]] = []
         seen: set[Path] = set()
         for root in self._memory_roots:
             if root == self._global_codex_home / "memories" and not _env_bool(
                 "THEIA_INCLUDE_GLOBAL_MEMORY"
             ):
                 continue
-            for filename in ("MEMORY.md", "USER.md"):
-                path = root / filename
-                if path in seen:
-                    continue
-                seen.add(path)
+            try:
+                candidates = [
+                    path
+                    for path in root.rglob("*")
+                    if path.name in {"MEMORY.md", "USER.md"}
+                ]
+            except OSError:
+                continue
+            for path in sorted(candidates):
                 try:
-                    if not path.is_file() or path.stat().st_size > MEMORY_FILE_LIMIT:
+                    resolved = path.resolve(strict=False)
+                    resolved.relative_to(root.resolve(strict=False))
+                    if (
+                        resolved in seen
+                        or path.is_symlink()
+                        or not path.is_file()
+                        or path.stat().st_size > MEMORY_FILE_LIMIT
+                    ):
                         continue
-                    text = path.read_text(encoding="utf-8-sig").strip()
-                except (OSError, UnicodeDecodeError) as exc:
-                    logger.debug(
-                        "Could not read memory viewer source (error=%s)",
-                        type(exc).__name__,
-                    )
+                except (OSError, ValueError):
                     continue
-                if text:
-                    entries.extend(self._memory_entries_from_text(text))
+                seen.add(resolved)
+                paths.append((path, root))
+                if len(paths) >= MEMORY_RECORD_MAX_COUNT:
+                    return paths
+        return paths
+
+    @staticmethod
+    def _memory_timestamp(value: Any) -> float | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+
+    def _memory_recap_records(
+        self,
+        *,
+        character_name: str,
+        character_slug: str,
+    ) -> list[MemoryRecord]:
+        path = self._codex_home / "nightly-recaps.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError):
+            return []
+        recaps = data.get("recaps") if isinstance(data, dict) else None
+        if not isinstance(recaps, dict):
+            return []
+        records: list[MemoryRecord] = []
+        for raw_scope, entries in recaps.items():
+            if not isinstance(raw_scope, str) or not isinstance(entries, list):
+                continue
+            match = re.fullmatch(
+                r"guild:(?P<guild>[1-9][0-9]*):user:(?P<user>[1-9][0-9]*)",
+                raw_scope,
+            )
+            if match is None:
+                continue
+            server_scope = f"server:{match.group('guild')}"
+            user_scope = f"user:{match.group('user')}"
+            for item in entries:
+                if not isinstance(item, dict):
+                    continue
+                day = item.get("day")
+                text = item.get("text")
+                if (
+                    not isinstance(day, str)
+                    or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", day)
+                    or not isinstance(text, str)
+                ):
+                    continue
+                record = recap_record(
+                    source_scope=server_scope,
+                    scope_keys=(server_scope, user_scope),
+                    source_key=f"{raw_scope}\0{day}",
+                    day=day,
+                    text=text,
+                    generated_at=self._memory_timestamp(item.get("generated_at")),
+                    character_name=character_name,
+                    character_slug=character_slug,
+                )
+                if record is not None:
+                    records.append(record)
+                if len(records) >= MEMORY_RECORD_MAX_COUNT:
+                    return records
+        return records
+
+    def _memory_records(
+        self,
+        canonical_key: str,
+        target_scope: str,
+    ) -> list[MemoryRecord]:
+        character_name, character_slug = self._memory_character(
+            canonical_key, target_scope
+        )
+        records: list[MemoryRecord] = []
+        for path, root in self._memory_source_paths():
+            category = (
+                "user_memory"
+                if path.name.casefold() == "user.md"
+                else "character_memory"
+            )
+            records.extend(
+                markdown_records(
+                    path,
+                    root=root,
+                    character_name=character_name,
+                    character_slug=character_slug,
+                    source_category=category,
+                )
+            )
+            if len(records) >= MEMORY_RECORD_MAX_COUNT:
+                return records[:MEMORY_RECORD_MAX_COUNT]
+        records.extend(
+            self._memory_recap_records(
+                character_name=character_name,
+                character_slug=character_slug,
+            )
+        )
+        session = self._sessions.get(canonical_key)
+        workspace = getattr(session, "workspace", None)
+        if workspace is not None:
+            _, user_id = self._personality_scope_identity(canonical_key)
+            workspace_scope = f"user:{user_id}" if user_id else "legacy"
+            for entry in workspace.entries.values():
+                record = workspace_record(
+                    key=entry.key,
+                    text=entry.text,
+                    scope=workspace_scope,
+                    scope_keys=(workspace_scope,),
+                    character_name=character_name,
+                    character_slug=character_slug,
+                    created_at=entry.created_at,
+                    updated_at=entry.updated_at,
+                )
+                if record is not None:
+                    records.append(record)
+        return records[:MEMORY_RECORD_MAX_COUNT]
+
+    @staticmethod
+    def _memory_record_visible(
+        record: MemoryRecord,
+        *,
+        target_scope: str,
+        super_admin: bool,
+        legacy_api: bool,
+    ) -> bool:
+        if legacy_api:
+            return True
+        if target_scope == "everyone":
+            return super_admin
+        if target_scope in record.scope_keys:
+            return True
+        return record.scope == "legacy" and super_admin
+
+    def _authorized_memory_records(
+        self,
+        session_key: str,
+        scope: str,
+        *,
+        actor_user_id: int | None = None,
+        actor_guild_id: int | None = None,
+        server_admin: bool | None = None,
+        super_admin: bool | None = None,
+    ) -> tuple[str, str, list[MemoryRecord]]:
+        canonical_key = self._canonical_session_key(session_key)
+        key_guild_id, key_user_id = self._personality_scope_identity(canonical_key)
+        user_id = (
+            actor_user_id
+            if isinstance(actor_user_id, int) and actor_user_id > 0
+            else key_user_id
+        )
+        guild_id = (
+            actor_guild_id
+            if isinstance(actor_guild_id, int) and actor_guild_id > 0
+            else key_guild_id
+        )
+        selector = memory_scope_selector(scope, user_id=user_id, guild_id=guild_id)
+        if selector is None:
+            raise CodexAppServerError(
+                "That memory scope requires the current user or server."
+            )
+        selector_kind, target_scope = selector
+        legacy_api = (
+            actor_user_id is None
+            and actor_guild_id is None
+            and server_admin is None
+            and super_admin is None
+        )
+        is_super = super_admin if super_admin is not None else legacy_api
+        requested = (scope or "me").strip().casefold()
+        if not legacy_api:
+            if selector_kind == "user" and requested == "me":
+                if actor_user_id is None or actor_user_id != user_id:
+                    raise CodexAppServerError("You may only inspect your own memory.")
+            elif selector_kind == "server" and requested == "server":
+                if not server_admin:
+                    raise CodexAppServerError(
+                        "Only a server administrator can inspect server memory."
+                    )
+            elif not is_super:
+                raise CodexAppServerError(
+                    "That memory scope is available only to a Theia Super Admin."
+                )
+        records = [
+            record
+            for record in self._memory_records(canonical_key, target_scope)
+            if self._memory_record_visible(
+                record,
+                target_scope=target_scope,
+                super_admin=is_super,
+                legacy_api=legacy_api,
+            )
+        ]
+        return canonical_key, target_scope, records
+
+    def memory_view(
+        self,
+        session_key: str,
+        scope: str = "me",
+        *,
+        search: str | None = None,
+        record_id: str | None = None,
+        actor_user_id: int | None = None,
+        actor_guild_id: int | None = None,
+        server_admin: bool | None = None,
+        super_admin: bool | None = None,
+    ) -> dict[str, Any]:
+        """Return safe, bounded records from one authorized memory scope."""
+        canonical_key, target_scope, records = self._authorized_memory_records(
+            session_key,
+            scope,
+            actor_user_id=actor_user_id,
+            actor_guild_id=actor_guild_id,
+            server_admin=server_admin,
+            super_admin=super_admin,
+        )
+        query = safe_memory_text(search, 80).casefold() if search else ""
+        if query:
+            records = [
+                record
+                for record in records
+                if query in f"{record.text} {record.source_category}".casefold()
+            ]
+        if record_id is not None:
+            requested_id = safe_memory_text(record_id, 64).casefold()
+            records = [record for record in records if record.record_id == requested_id]
+            if not records:
+                raise CodexAppServerError("That memory record is not in this scope.")
+        character_name, character_slug = self._memory_character(
+            canonical_key, target_scope
+        )
+        serialized = [record.to_dict() for record in records]
         return {
-            "scope": normalized_scope,
-            "resolved_scope": record.get("scope") if isinstance(record, dict) else None,
+            "scope": (scope or "me").strip().casefold() or "me",
+            "resolved_scope": target_scope,
             "character_name": character_name,
             "character_slug": character_slug,
-            "entries": entries,
-            "total_entries": len(entries),
+            "records": serialized,
+            "entries": [record["text"] for record in serialized],
+            "total_entries": len(serialized),
+            "search": search.strip() if isinstance(search, str) else "",
         }
+
+    def memory_record(
+        self, session_key: str, record_id: str, scope: str = "me", **kwargs: Any
+    ) -> dict[str, Any]:
+        """Inspect one safe record without exposing its source path."""
+        result = self.memory_view(session_key, scope, record_id=record_id, **kwargs)
+        records = result.get("records")
+        if not isinstance(records, list) or not records:
+            raise CodexAppServerError("That memory record is not available.")
+        return records[0]
+
+    def _memory_action_record(
+        self,
+        session_key: str,
+        scope: str,
+        record_id: str,
+        *,
+        actor_user_id: int | None,
+        actor_guild_id: int | None,
+        server_admin: bool | None,
+        super_admin: bool | None,
+    ) -> tuple[str, MemoryRecord]:
+        canonical_key, _, records = self._authorized_memory_records(
+            session_key,
+            scope,
+            actor_user_id=actor_user_id,
+            actor_guild_id=actor_guild_id,
+            server_admin=server_admin,
+            super_admin=super_admin,
+        )
+        requested_id = (record_id or "").casefold()
+        if not re.fullmatch(r"[0-9a-f]{24}", requested_id):
+            raise CodexAppServerError("That memory record identifier is invalid.")
+        for record in records:
+            if record.record_id == requested_id:
+                return canonical_key, record
+        raise CodexAppServerError("That memory record is not in this scope.")
+
+    @staticmethod
+    def _atomic_memory_source_write(path: Path, text: str) -> bool:
+        temporary = path.with_name(f".{path.name}.{time.time_ns()}.tmp")
+        try:
+            temporary.write_text(text, encoding="utf-8")
+            temporary.chmod(0o600)
+            temporary.replace(path)
+            return True
+        except OSError:
+            with contextlib.suppress(OSError):
+                temporary.unlink()
+            return False
+
+    def _mutate_markdown_record(
+        self,
+        record: MemoryRecord,
+        *,
+        action: str,
+        replacement: str | None,
+    ) -> bool:
+        path = record.source_path
+        if (
+            path is None
+            or record.start_offset is None
+            or record.end_offset is None
+            or not _path_is_under(path, self._memory_roots)
+        ):
+            return False
+        try:
+            source = path.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeDecodeError):
+            return False
+        source_category = (
+            "user_memory" if path.name.casefold() == "user.md" else "character_memory"
+        )
+        fresh = next(
+            (
+                item
+                for item in markdown_records(
+                    path,
+                    root=record.source_root or path.parent,
+                    character_name=record.character_name,
+                    character_slug=record.character_slug,
+                    source_category=source_category,
+                )
+                if item.record_id == record.record_id
+            ),
+            None,
+        )
+        if fresh is None:
+            return False
+        if (
+            fresh.start_offset is None
+            or fresh.end_offset is None
+            or fresh.start_offset < 0
+            or fresh.end_offset > len(source)
+            or fresh.start_offset >= fresh.end_offset
+        ):
+            return False
+        current = source[fresh.start_offset : fresh.end_offset]
+        if not safe_memory_text(current):
+            return False
+        if not append_audit(
+            self._codex_home,
+            record=record,
+            action=action,
+            replacement=replacement,
+        ):
+            return False
+        updated_block = "" if action == "forget" else f"- {replacement}\n"
+        updated = (
+            source[: fresh.start_offset] + updated_block + source[fresh.end_offset :]
+        )
+        if len(updated.encode("utf-8")) > MEMORY_FILE_LIMIT:
+            return False
+        return self._atomic_memory_source_write(path, updated)
+
+    def _mutate_recap_record(
+        self,
+        record: MemoryRecord,
+        *,
+        action: str,
+        replacement: str | None,
+    ) -> bool:
+        path = self._codex_home / "nightly-recaps.json"
+        if record.source_key is None or "\0" not in record.source_key:
+            return False
+        raw_scope, day = record.source_key.split("\0", 1)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError):
+            return False
+        recaps = data.get("recaps") if isinstance(data, dict) else None
+        entries = recaps.get(raw_scope) if isinstance(recaps, dict) else None
+        if not isinstance(entries, list):
+            return False
+        matched: dict[str, Any] | None = None
+        for entry in entries:
+            if (
+                isinstance(entry, dict)
+                and entry.get("day") == day
+                and isinstance(entry.get("text"), str)
+            ):
+                candidate = recap_record(
+                    source_scope=record.scope,
+                    day=day,
+                    text=entry["text"],
+                    generated_at=self._memory_timestamp(entry.get("generated_at")),
+                    character_name=record.character_name,
+                    character_slug=record.character_slug,
+                )
+                if candidate is not None and candidate.record_id == record.record_id:
+                    matched = entry
+                    break
+        if matched is None:
+            return False
+        if not append_audit(
+            self._codex_home,
+            record=record,
+            action=action,
+            replacement=replacement,
+        ):
+            return False
+        if action == "forget":
+            entries.remove(matched)
+        else:
+            matched["text"] = replacement
+        encoded = json.dumps(data, indent=2, ensure_ascii=False)
+        return self._atomic_memory_source_write(path, encoded)
+
+    def _mutate_workspace_record(
+        self,
+        canonical_key: str,
+        record: MemoryRecord,
+        *,
+        action: str,
+        replacement: str | None,
+    ) -> bool:
+        session = self._sessions.get(canonical_key)
+        workspace = getattr(session, "workspace", None)
+        entry = workspace.entries.get(record.source_key or "") if workspace else None
+        if workspace is None or entry is None:
+            return False
+        current = workspace_record(
+            key=entry.key,
+            text=entry.text,
+            scope=record.scope,
+            character_name=record.character_name,
+            character_slug=record.character_slug,
+            created_at=entry.created_at,
+            updated_at=entry.updated_at,
+        )
+        if current is None or current.record_id != record.record_id:
+            return False
+        if self._state_dirty or not append_audit(
+            self._codex_home,
+            record=record,
+            action=action,
+            replacement=replacement,
+        ):
+            return False
+        previous = entry.text
+        previous_updated_at = entry.updated_at
+        if action == "forget":
+            workspace.entries.pop(entry.key, None)
+        else:
+            entry.text = replacement or ""
+            entry.updated_at = time.time()
+        workspace.revision += 1
+        workspace.updated_at = time.time()
+        self._persist_state()
+        if self._state_dirty:
+            if action == "forget":
+                workspace.entries[entry.key] = entry
+            else:
+                entry.text = previous
+                entry.updated_at = previous_updated_at
+            workspace.revision = max(0, workspace.revision - 1)
+            return False
+        return True
+
+    def _mutate_memory_record(
+        self,
+        canonical_key: str,
+        record: MemoryRecord,
+        *,
+        action: str,
+        replacement: str | None,
+    ) -> bool:
+        if record.source_kind == "markdown":
+            return self._mutate_markdown_record(
+                record, action=action, replacement=replacement
+            )
+        if record.source_kind == "recap":
+            return self._mutate_recap_record(
+                record, action=action, replacement=replacement
+            )
+        if record.source_category == "workspace":
+            return self._mutate_workspace_record(
+                canonical_key,
+                record,
+                action=action,
+                replacement=replacement,
+            )
+        return False
+
+    def _memory_mutation(
+        self,
+        session_key: str,
+        scope: str,
+        record_id: str,
+        *,
+        action: str,
+        replacement: str | None = None,
+        confirmed: bool = False,
+        actor_user_id: int | None = None,
+        actor_guild_id: int | None = None,
+        server_admin: bool | None = None,
+        super_admin: bool | None = None,
+    ) -> dict[str, Any]:
+        if not confirmed:
+            raise CodexAppServerError(
+                "Explicit confirmation is required before changing memory."
+            )
+        if action not in {"forget", "edit"}:
+            raise CodexAppServerError("That memory action is not supported.")
+        safe_replacement = (
+            safe_memory_text(replacement, MEMORY_RECORD_MAX_CHARACTERS)
+            if action == "edit"
+            else None
+        )
+        if action == "edit" and not safe_replacement:
+            raise CodexAppServerError("The replacement memory cannot be empty.")
+        canonical_key, record = self._memory_action_record(
+            session_key,
+            scope,
+            record_id,
+            actor_user_id=actor_user_id,
+            actor_guild_id=actor_guild_id,
+            server_admin=server_admin,
+            super_admin=super_admin,
+        )
+        if not self._mutate_memory_record(
+            canonical_key,
+            record,
+            action=action,
+            replacement=safe_replacement,
+        ):
+            raise CodexAppServerError(
+                "The memory source could not be changed reliably; nothing was changed."
+            )
+        return {"record_id": record.record_id, "action": action}
+
+    def forget_memory(
+        self,
+        session_key: str,
+        record_id: str,
+        scope: str = "me",
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Forget one record only after an explicit confirmation."""
+        return self._memory_mutation(
+            session_key, scope, record_id, action="forget", **kwargs
+        )
+
+    def edit_memory(
+        self,
+        session_key: str,
+        record_id: str,
+        replacement: str,
+        scope: str = "me",
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Edit one record only after an explicit confirmation."""
+        return self._memory_mutation(
+            session_key,
+            scope,
+            record_id,
+            action="edit",
+            replacement=replacement,
+            **kwargs,
+        )
 
     def _personality_memory_stats(self) -> dict[str, int]:
         """Count the character's private memory snapshots and referenced users."""

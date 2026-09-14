@@ -57,9 +57,12 @@ state. It refreshes independently while the view is open, including during other
 agent tasks, and does not expose prompts, tool output, credentials, or private
 paths.
 
-`/memory` is an administrator-only private paginated view of the selected
-character's complete configured memory database. Choose `me`, `server`, or
-`everyone`; each memory entry appears on its own embed page.
+`/memory` is a private, owner-locked paginated view of the selected character's
+configured memory database. Users can choose `me`, server administrators can
+choose the current `server`, and Super Admins can choose `everyone` or a
+targeted user/server scope. Each entry has bounded provenance and a stable
+record identifier; search, inspect, forget, and confirmed edit operations are
+available without requiring migration of existing Markdown memory files.
 
 Each isolated conversation also has a temporary simulated mood. It derives a
 resting affect from the active personality, uses a bounded private Codex

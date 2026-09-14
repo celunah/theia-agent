@@ -19,6 +19,7 @@ from .core import (
     _safe_error_reason,
     _safe_intermediate_text,
     _subtext,
+    _truncate,
 )
 from .customization import CustomizationError
 from .ui import (
@@ -59,7 +60,6 @@ def _split_pages(text: str, limit: int = 1900) -> list[str]:
 
 
 def _format_thought_duration(seconds: float) -> str:
-    """Render a short thought duration using seconds or minutes and seconds."""
     elapsed = max(0, int(seconds))
     if elapsed < 60:
         unit = "second" if elapsed == 1 else "seconds"
@@ -151,7 +151,6 @@ class _PaginatorView(_PersistentViewMixin, discord.ui.View):
             buttons[1].disabled = self.index == len(self.pages) - 1
 
     def content(self) -> str:
-        """Return the page currently selected by the paginator."""
         return self.pages[self.index]
 
     def persistence_data(self) -> dict[str, Any]:
@@ -163,7 +162,6 @@ class _PaginatorView(_PersistentViewMixin, discord.ui.View):
         }
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        """Allow pagination controls only for the response owner."""
         if self.owner_id is not None and interaction.user.id != self.owner_id:
             await interaction.response.send_message(
                 "Only the user who requested this response can navigate it.",
@@ -175,7 +173,6 @@ class _PaginatorView(_PersistentViewMixin, discord.ui.View):
     async def handle_reaction(
         self, reaction: discord.Reaction, user: discord.abc.User
     ) -> None:
-        """Move the paginator and edit its message for an authorized reaction."""
         if self.owner_id is not None and user.id != self.owner_id:
             return
         if reaction.emoji == "◀️":
@@ -191,17 +188,204 @@ class _PaginatorView(_PersistentViewMixin, discord.ui.View):
             await reaction.remove(user)
 
     async def on_timeout(self) -> None:
-        """Remove the expired paginator from the reaction dispatch table."""
         if self.message is not None:
             _reaction_paginators.pop(self.message.id, None)
 
 
-class _MemoryView(_PersistentViewMixin, discord.ui.View):
-    """Owner-only embed pagination for one character's memory snapshot."""
+MemoryMutation = Callable[
+    [discord.Interaction, str, str, str | None], Awaitable[tuple[bool, str]]
+]
 
+
+class _MemoryConfirmationView(_PersistentViewMixin, discord.ui.View):
     def __init__(
         self,
-        entries: list[str],
+        owner_id: int | None,
+        *,
+        action: str,
+        record_id: str,
+        replacement: str | None,
+        scope: str,
+        channel_id: int | None,
+        on_mutation: MemoryMutation | None,
+        customizer: Any | None = None,
+        guild_id: int | None = None,
+        on_view_created: ViewRegistrar | None = None,
+        timeout: float = 300,
+        token: str | None = None,
+        recovered: bool = False,
+    ) -> None:
+        self._init_persistence("memory-confirm", token, recovered=recovered)
+        super().__init__(timeout=None if recovered else timeout)
+        self.owner_id = owner_id
+        self.action = action
+        self.record_id = record_id
+        self.replacement = replacement
+        self.scope = scope
+        self.channel_id = channel_id
+        self.on_mutation = on_mutation
+        self.customizer = customizer
+        self.guild_id = guild_id
+        self.on_view_created = on_view_created
+        confirm = discord.ui.Button(
+            label=_render_frontend_label(
+                customizer,
+                guild_id,
+                "label:memory_confirm",
+                "Confirm",
+            ),
+            style=discord.ButtonStyle.danger,
+            custom_id=self._custom_id("confirm"),
+        )
+        cancel = discord.ui.Button(
+            label=_render_frontend_label(
+                customizer,
+                guild_id,
+                "label:memory_cancel",
+                "Cancel",
+            ),
+            style=discord.ButtonStyle.secondary,
+            custom_id=self._custom_id("cancel"),
+        )
+
+        async def confirm_callback(interaction: discord.Interaction) -> None:
+            if not await self.interaction_check(interaction):
+                return
+            await interaction.response.defer(ephemeral=True)
+            if self.on_mutation is None:
+                message = "This memory action is unavailable."
+            else:
+                try:
+                    _, message = await self.on_mutation(
+                        interaction,
+                        self.action,
+                        self.record_id,
+                        self.replacement,
+                    )
+                except Exception:  # noqa: BLE001 - mutation failure is user-safe
+                    message = "The memory action failed safely; nothing was changed."
+            await interaction.followup.send(message, ephemeral=True)
+            for child in self.children:
+                if isinstance(child, discord.ui.Button):
+                    child.disabled = True
+            await self._notify_state_change()
+            self.stop()
+
+        async def cancel_callback(interaction: discord.Interaction) -> None:
+            if not await self.interaction_check(interaction):
+                return
+            await interaction.response.edit_message(
+                content="The memory action was cancelled.",
+                view=self,
+            )
+            self.stop()
+
+        confirm.callback = confirm_callback
+        cancel.callback = cancel_callback
+        self.add_item(confirm)
+        self.add_item(cancel)
+
+    def persistence_data(self) -> dict[str, Any]:
+        return {
+            "user_id": self.owner_id,
+            "action": self.action,
+            "record_id": self.record_id,
+            "replacement": self.replacement,
+            "scope": self.scope,
+            "channel_id": self.channel_id,
+            "guild_id": self.guild_id,
+        }
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await _check_interaction_owner(interaction, self.owner_id)
+
+
+class _MemorySearchModal(discord.ui.Modal):
+    def __init__(self, view: "_MemoryView") -> None:
+        super().__init__(
+            title=_truncate(
+                _render_frontend_label(
+                    view.customizer,
+                    view.guild_id,
+                    "label:input_modal_title",
+                    "Search memories",
+                ),
+                45,
+            ),
+            custom_id=f"theia:memory-search:{view.persistence_token}",
+        )
+        self.view = view
+        self.query = discord.ui.TextInput(
+            label=_render_frontend_label(
+                view.customizer,
+                view.guild_id,
+                "label:memory_search_query",
+                "Search",
+            ),
+            placeholder="Leave empty to show every record.",
+            default=view.search_query,
+            required=False,
+            max_length=80,
+        )
+        self.add_item(self.query)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not await self.view.interaction_check(interaction):
+            return
+        self.view.search_query = _safe_intermediate_text(str(self.query), 80).strip()
+        self.view.index = 0
+        await interaction.response.edit_message(
+            embed=self.view.embed(),
+            view=self.view._view(),
+        )
+        await self.view._notify_state_change()
+
+
+class _MemoryEditModal(discord.ui.Modal):
+    def __init__(self, view: "_MemoryView", record: dict[str, Any]) -> None:
+        super().__init__(
+            title=_truncate(
+                _render_frontend_label(
+                    view.customizer,
+                    view.guild_id,
+                    "label:input_modal_title",
+                    "Edit memory",
+                ),
+                45,
+            ),
+            custom_id=f"theia:memory-edit:{view.persistence_token}",
+        )
+        self.view = view
+        self.record_id = str(record.get("record_id") or "")
+        self.value = discord.ui.TextInput(
+            label=_render_frontend_label(
+                view.customizer,
+                view.guild_id,
+                "label:memory_edit_text",
+                "Memory",
+            ),
+            default=_safe_intermediate_text(record.get("text"), 3500),
+            style=discord.TextStyle.paragraph,
+            required=True,
+            max_length=3500,
+        )
+        self.add_item(self.value)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not await self.view.interaction_check(interaction):
+            return
+        await self.view.open_confirmation(
+            interaction,
+            action="edit",
+            record_id=self.record_id,
+            replacement=str(self.value),
+        )
+
+
+class _MemoryView(_PersistentViewMixin, discord.ui.View):
+    def __init__(
+        self,
+        records: list[dict[str, Any]] | list[str],
         *,
         character_name: str,
         character_slug: str = "theia",
@@ -210,100 +394,206 @@ class _MemoryView(_PersistentViewMixin, discord.ui.View):
         total_entries: int | None = None,
         customizer: Any | None = None,
         guild_id: int | None = None,
+        channel_id: int | None = None,
+        on_mutation: MemoryMutation | None = None,
+        on_view_created: ViewRegistrar | None = None,
         timeout: float = 900,
         token: str | None = None,
         recovered: bool = False,
         index: int = 0,
+        search_query: str = "",
     ) -> None:
         self._init_persistence("memory", token, recovered=recovered)
         super().__init__(timeout=None if recovered else timeout)
-        self.total_entries = max(
-            0,
-            total_entries
-            if isinstance(total_entries, int) and not isinstance(total_entries, bool)
-            else len(entries),
-        )
-        self.entries = entries or ["No memories recorded."]
+        self.records = self._normalize_records(records)
         self.character_name = character_name or "Theia"
         self.character_slug = character_slug or "theia"
         self.scope = scope
         self.owner_id = owner_id
         self.customizer = customizer
         self.guild_id = guild_id
-        self.index = max(0, min(index, len(self.entries) - 1))
+        self.channel_id = channel_id
+        self.on_mutation = on_mutation
+        self.on_view_created = on_view_created
+        self.search_query = _safe_intermediate_text(search_query, 80).strip()
+        self.index = max(0, min(index, max(0, len(self._filtered_records()) - 1)))
+        self.total_entries = (
+            total_entries
+            if isinstance(total_entries, int) and not isinstance(total_entries, bool)
+            else len(self.records)
+        )
         self.message: discord.Message | discord.WebhookMessage | None = None
-        previous = discord.ui.Button(
-            label=_render_frontend_label(
-                customizer,
-                guild_id,
-                "label:previous_button",
-                "Previous",
+        self._buttons: dict[str, discord.ui.Button] = {}
+        self._add_button(
+            "previous",
+            _render_frontend_label(
+                customizer, guild_id, "label:previous_button", "Previous"
             ),
-            style=discord.ButtonStyle.secondary,
-            custom_id=self._custom_id("previous"),
+            discord.ButtonStyle.secondary,
+            self._previous,
         )
-        following = discord.ui.Button(
-            label=_render_frontend_label(
-                customizer,
-                guild_id,
-                "label:next_button",
-                "Next",
+        self._add_button(
+            "next",
+            _render_frontend_label(customizer, guild_id, "label:next_button", "Next"),
+            discord.ButtonStyle.secondary,
+            self._next,
+        )
+        self._add_button(
+            "search",
+            _render_frontend_label(
+                customizer, guild_id, "label:memory_search", "Search"
             ),
-            style=discord.ButtonStyle.secondary,
-            custom_id=self._custom_id("next"),
+            discord.ButtonStyle.secondary,
+            self._search,
         )
-
-        async def previous_callback(interaction: discord.Interaction) -> None:
-            if not await self.interaction_check(interaction):
-                return
-            self.index = max(0, self.index - 1)
-            await interaction.response.edit_message(
-                embed=self.embed(), view=self._view()
-            )
-            await self._notify_state_change()
-
-        async def next_callback(interaction: discord.Interaction) -> None:
-            if not await self.interaction_check(interaction):
-                return
-            self.index = min(len(self.entries) - 1, self.index + 1)
-            await interaction.response.edit_message(
-                embed=self.embed(), view=self._view()
-            )
-            await self._notify_state_change()
-
-        previous.callback = previous_callback
-        following.callback = next_callback
-        self.add_item(previous)
-        self.add_item(following)
+        self._add_button(
+            "forget",
+            _render_frontend_label(
+                customizer, guild_id, "label:memory_forget", "Forget"
+            ),
+            discord.ButtonStyle.danger,
+            self._forget,
+        )
+        self._add_button(
+            "edit",
+            _render_frontend_label(customizer, guild_id, "label:memory_edit", "Edit"),
+            discord.ButtonStyle.primary,
+            self._edit,
+        )
         self._sync_buttons()
+
+    @staticmethod
+    def _normalize_records(
+        records: list[dict[str, Any]] | list[str],
+    ) -> list[dict[str, Any]]:
+        allowed = {
+            "record_id",
+            "text",
+            "scope",
+            "character_name",
+            "character_slug",
+            "source_file",
+            "source_category",
+            "created_at",
+            "updated_at",
+            "confidence",
+            "origin",
+            "display_metadata",
+        }
+        normalized: list[dict[str, Any]] = []
+        for index, value in enumerate(records or []):
+            if isinstance(value, dict):
+                text = _safe_intermediate_text(value.get("text"), 3500)
+                record_id = _safe_intermediate_text(value.get("record_id"), 64)
+                if not text or not record_id:
+                    continue
+                item = {key: value[key] for key in allowed if key in value}
+                item["text"] = text
+                item["record_id"] = record_id
+                for key in (
+                    "scope",
+                    "character_name",
+                    "character_slug",
+                    "source_file",
+                    "source_category",
+                    "created_at",
+                    "updated_at",
+                    "origin",
+                ):
+                    if key in item:
+                        item[key] = _safe_intermediate_text(item[key], 160)
+                if isinstance(item.get("confidence"), (int, float)):
+                    item["confidence"] = max(0.0, min(1.0, float(item["confidence"])))
+                else:
+                    item.pop("confidence", None)
+                metadata = item.get("display_metadata")
+                if isinstance(metadata, dict):
+                    item["display_metadata"] = {
+                        key: _safe_intermediate_text(metadata[key], 80)
+                        for key in ("source", "scope", "updated")
+                        if key in metadata
+                    }
+                else:
+                    item.pop("display_metadata", None)
+                normalized.append(item)
+            elif isinstance(value, str) and value.strip():
+                normalized.append(
+                    {
+                        "record_id": f"legacy-{index}",
+                        "text": _safe_intermediate_text(value, 3500),
+                        "scope": "legacy/unscoped",
+                        "source_category": "legacy memory",
+                        "origin": "legacy memory",
+                        "display_metadata": {
+                            "source": "legacy memory",
+                            "scope": "legacy/unscoped",
+                            "updated": "unknown",
+                        },
+                    }
+                )
+        return normalized
+
+    def _add_button(
+        self,
+        action: str,
+        label: str,
+        style: discord.ButtonStyle,
+        callback: Callable[[discord.Interaction], Awaitable[None]],
+    ) -> None:
+        button = discord.ui.Button(
+            label=label,
+            style=style,
+            custom_id=self._custom_id(action),
+        )
+        button.callback = callback  # type: ignore[assignment]
+        self._buttons[action] = button
+        self.add_item(button)
+
+    def _filtered_records(self) -> list[dict[str, Any]]:
+        query = self.search_query.casefold()
+        if not query:
+            return list(self.records)
+        return [
+            record
+            for record in self.records
+            if query
+            in f"{record.get('text', '')} {record.get('source_category', '')}".casefold()
+        ]
+
+    def _current_record(self) -> dict[str, Any] | None:
+        records = self._filtered_records()
+        return records[self.index] if records and self.index < len(records) else None
+
+    @property
+    def entries(self) -> list[str]:
+        return [str(record.get("text") or "") for record in self.records]
 
     def _view(self) -> "_MemoryView":
         self._sync_buttons()
         return self
 
     def _sync_buttons(self) -> None:
-        buttons = [
-            child for child in self.children if isinstance(child, discord.ui.Button)
-        ]
-        if len(buttons) == 2:
-            buttons[0].disabled = self.index == 0
-            buttons[1].disabled = self.index == len(self.entries) - 1
+        filtered = self._filtered_records()
+        self.index = max(0, min(self.index, max(0, len(filtered) - 1)))
+        self._buttons["previous"].disabled = not filtered or self.index == 0
+        self._buttons["next"].disabled = not filtered or self.index == len(filtered) - 1
+        disabled = not bool(filtered)
+        self._buttons["forget"].disabled = disabled
+        self._buttons["edit"].disabled = disabled
 
     def embed(self) -> discord.Embed:
-        """Render the selected memory as one structured Discord embed."""
         character_name = _safe_intermediate_text(self.character_name, 120) or "Theia"
-        character_slug = _safe_intermediate_text(self.character_slug, 80) or "theia"
+        filtered = self._filtered_records()
+        record = self._current_record()
         context = {
             "character_name": character_name,
-            "character_slug": character_slug,
-            "count": self.total_entries,
+            "character_slug": _safe_intermediate_text(self.character_slug, 80)
+            or "theia",
+            "count": len(filtered),
             "page": self.index + 1,
-            "pages": len(self.entries),
-            "scope": self.scope,
+            "pages": max(1, len(filtered)),
+            "scope": _safe_intermediate_text(self.scope, 80),
         }
-        entry = _safe_intermediate_text(self.entries[self.index], 3500)
-        entry = entry or "Memory entry unavailable."
-        total = context["count"]
         total_label = _render_frontend_label(
             self.customizer,
             self.guild_id,
@@ -311,40 +601,158 @@ class _MemoryView(_PersistentViewMixin, discord.ui.View):
             "Total entries",
             context=context,
         )
+        if record is None:
+            body = "No memories match this view."
+        else:
+            body = _safe_intermediate_text(record.get("text"), 3500)
+            metadata = record.get("display_metadata")
+            if not isinstance(metadata, dict):
+                metadata = {}
+            source = _safe_intermediate_text(
+                metadata.get("source")
+                or record.get("source_category")
+                or record.get("origin"),
+                60,
+            ).replace("_", " ")
+            record_scope = _safe_intermediate_text(
+                metadata.get("scope") or record.get("scope"), 60
+            )
+            updated = _safe_intermediate_text(metadata.get("updated"), 40) or "unknown"
+            provenance = (
+                f"Source: {source or 'memory'} | Scope: {record_scope or 'unknown'} "
+                f"| Updated: {updated}"
+            )
+            body = f"{body or 'Memory entry unavailable.'}\n\n{provenance}"
+            record_id = _safe_intermediate_text(record.get("record_id"), 24)
+            if record_id:
+                body += f"\nRecord: {record_id}"
+        if self.search_query:
+            body = f"Search: {self.search_query}\n\n{body}"
+        description = f"{total_label}: {len(filtered)}\n\n{body}"
         embed = _command_embed(
             f"{character_name}'s Memory",
-            f"{total_label}: {total}\n\n{entry}",
+            description,
             target="command:memory",
             guild_id=self.guild_id,
             customizer=self.customizer,
             context=context,
         )
-        if len(self.entries) > 1:
+        if len(filtered) > 1 or self.search_query:
             embed.set_footer(
                 text=_render_frontend_label(
                     self.customizer,
                     self.guild_id,
                     "label:memory_page",
-                    f"Page {self.index + 1} of {len(self.entries)}",
+                    f"Page {self.index + 1} of {max(1, len(filtered))}",
                     context=context,
                 )
             )
         return embed
 
+    async def _previous(self, interaction: discord.Interaction) -> None:
+        if not await self.interaction_check(interaction):
+            return
+        self.index = max(0, self.index - 1)
+        await interaction.response.edit_message(embed=self.embed(), view=self._view())
+        await self._notify_state_change()
+
+    async def _next(self, interaction: discord.Interaction) -> None:
+        if not await self.interaction_check(interaction):
+            return
+        self.index += 1
+        self._sync_buttons()
+        await interaction.response.edit_message(embed=self.embed(), view=self._view())
+        await self._notify_state_change()
+
+    async def _search(self, interaction: discord.Interaction) -> None:
+        if await self.interaction_check(interaction):
+            await interaction.response.send_modal(_MemorySearchModal(self))
+
+    async def _forget(self, interaction: discord.Interaction) -> None:
+        if not await self.interaction_check(interaction):
+            return
+        record = self._current_record()
+        if record is not None:
+            await self.open_confirmation(
+                interaction,
+                action="forget",
+                record_id=str(record.get("record_id") or ""),
+            )
+
+    async def _edit(self, interaction: discord.Interaction) -> None:
+        if not await self.interaction_check(interaction):
+            return
+        record = self._current_record()
+        if record is not None:
+            await interaction.response.send_modal(_MemoryEditModal(self, record))
+
+    async def open_confirmation(
+        self,
+        interaction: discord.Interaction,
+        *,
+        action: str,
+        record_id: str,
+        replacement: str | None = None,
+    ) -> None:
+        confirmation = _MemoryConfirmationView(
+            self.owner_id,
+            action=action,
+            record_id=record_id,
+            replacement=replacement,
+            scope=self.scope,
+            channel_id=self.channel_id,
+            on_mutation=self.on_mutation,
+            customizer=self.customizer,
+            guild_id=self.guild_id,
+            on_view_created=self.on_view_created,
+            recovered=self.recovered,
+        )
+        await interaction.response.send_message(
+            content=(
+                "Confirm forgetting this memory?"
+                if action == "forget"
+                else "Confirm replacing this memory?"
+            ),
+            view=confirmation,
+            ephemeral=True,
+        )
+        if self.on_view_created is not None:
+            try:
+                await self.on_view_created(
+                    confirmation, await interaction.original_response()
+                )
+            except (AttributeError, discord.DiscordException):
+                pass
+
+    def remove_record(self, record_id: str) -> None:
+        self.records = [
+            record for record in self.records if record.get("record_id") != record_id
+        ]
+        self._sync_buttons()
+
+    def update_record(self, record_id: str, replacement: str) -> None:
+        for record in self.records:
+            if record.get("record_id") == record_id:
+                record["text"] = replacement
+                break
+        self._sync_buttons()
+
     def persistence_data(self) -> dict[str, Any]:
         return {
+            "records": self.records,
             "entries": self.entries,
             "character_name": self.character_name,
             "character_slug": self.character_slug,
             "scope": self.scope,
             "user_id": self.owner_id,
             "guild_id": self.guild_id,
+            "channel_id": self.channel_id,
             "index": self.index,
             "total_entries": self.total_entries,
+            "search_query": self.search_query,
         }
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        """Allow memory pagination only to the requesting administrator."""
         return await _check_interaction_owner(interaction, self.owner_id)
 
 
