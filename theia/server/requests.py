@@ -382,26 +382,30 @@ class CodexRequestMixin:
                             "(error=%s)",
                             type(exc).__name__,
                         )
-            self_model = self._self_model_snapshot(
-                session,
-                allow_tools=allow_tools,
-                allow_discord_tools=allow_discord_tools,
-                phase="starting",
-            )
             workspace = self._workspace_snapshot(session)
             memory_context = None
-            if allow_tools and _MEMORY_RETRIEVAL_HINT_RE.search(user_prompt or prompt):
+            memory_retrieval_used = bool(
+                allow_tools and _MEMORY_RETRIEVAL_HINT_RE.search(user_prompt or prompt)
+            )
+            if memory_retrieval_used:
                 memory_context = await self.generate_memory_retrieval(
                     prompt,
                     session_key=session_key,
                     allow_tools=allow_tools,
                 )
+            self_model = self._safe_self_model_snapshot(
+                session,
+                allow_tools=allow_tools,
+                allow_discord_tools=allow_discord_tools,
+                phase="starting",
+                memory_retrieval_used=memory_retrieval_used,
+            )
             turn_prompt, summary_injected = self._turn_prompt_with_summary(
                 session,
                 prompt,
                 memory_context=memory_context,
                 attention_transition=attention_transition,
-                self_model=self_model,
+                self_model=self_model or {},
                 workspace=workspace,
             )
             response = await self._run_turn_with_recovery(
@@ -426,11 +430,12 @@ class CodexRequestMixin:
                 summary_injected=summary_injected,
             )
             self._record_attention_response(session, response)
-            completed_self_model = self._self_model_snapshot(
+            completed_self_model = self._safe_self_model_snapshot(
                 session,
                 allow_tools=allow_tools,
                 allow_discord_tools=allow_discord_tools,
                 phase="completed",
+                memory_retrieval_used=memory_retrieval_used,
             )
             self._schedule_self_improvement_review(
                 session,
@@ -446,6 +451,6 @@ class CodexRequestMixin:
                 user_prompt or prompt,
                 response,
                 recent_context=prompt if user_prompt else None,
-                self_model=completed_self_model,
+                self_model=completed_self_model or {},
             )
             return response

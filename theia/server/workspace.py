@@ -451,20 +451,30 @@ class CodexWorkspaceMixin:
         if previous is not None and not previous.done():
             previous.cancel()
         workspace = self._workspace_snapshot(session)
-        task = asyncio.create_task(
-            self._run_workspace_review(
-                session,
-                user_prompt,
-                response,
-                recent_context=recent_context,
-                self_model=self_model,
-                workspace=workspace,
+        session.background_review_count += 1
+        try:
+            task = asyncio.create_task(
+                self._run_workspace_review(
+                    session,
+                    user_prompt,
+                    response,
+                    recent_context=recent_context,
+                    self_model=self_model,
+                    workspace=workspace,
+                )
             )
-        )
+        except BaseException:
+            session.background_review_count = max(
+                0, session.background_review_count - 1
+            )
+            raise
         session.workspace_review_task = task
         self._server_tasks.add(task)
 
         def review_done(done: asyncio.Task[Any]) -> None:
+            session.background_review_count = max(
+                0, session.background_review_count - 1
+            )
             if session.workspace_review_task is done:
                 session.workspace_review_task = None
             self._server_task_done(done)

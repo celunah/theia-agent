@@ -19,6 +19,11 @@ def _operations(*entries: tuple[str, str, str]) -> list[dict[str, str]]:
 
 
 class SelfModelTests(AsyncBehaviorTestBase):
+    @staticmethod
+    def _healthy_transport(server: Any) -> None:
+        server._process = SimpleNamespace(returncode=None)
+        server._reader_task = SimpleNamespace(done=lambda: False)
+
     def test_self_model_uses_current_harness_facts(self) -> None:
         server = main.CodexAppServer()
         session = server._session(_workspace_key("self-model"))
@@ -41,6 +46,148 @@ class SelfModelTests(AsyncBehaviorTestBase):
         self.assertTrue(snapshot["thread_bound"])
         self.assertNotIn("secret", repr(snapshot).casefold())
         self.assertNotIn(session.key, repr(snapshot))
+
+    def test_capability_status_uses_live_harness_state(self) -> None:
+        server = main.CodexAppServer()
+        session = server._session(_workspace_key("capabilities"))
+        self._healthy_transport(server)
+        server._memory_roots = (Path("/configured/memory"),)
+        server._realtime_feature_enabled = True
+        session.background_review_count = 1
+
+        status = server._self_model_snapshot(
+            session,
+            allow_tools=True,
+            allow_discord_tools=True,
+            memory_retrieval_used=True,
+        )["capability_status"]
+
+        self.assertEqual(status["session_workspace"], "available, currently empty")
+        self.assertEqual(status["workspace_entry_count"], 0)
+        self.assertEqual(status["durable_memory"], "available")
+        self.assertEqual(status["memory_retrieval"], "available, used this turn")
+        self.assertEqual(status["image_input"], "available")
+        self.assertEqual(status["audio_input"], "available")
+        self.assertEqual(status["semantic_audio_understanding"], "available")
+        self.assertEqual(status["video_input"], "unavailable")
+        self.assertEqual(status["stt_provider"], "not configured")
+        self.assertEqual(status["tts_provider"], "not configured")
+        self.assertEqual(status["active_voice_provider"], "codex-realtime")
+        self.assertEqual(status["codex_transport"], "healthy")
+        self.assertFalse(status["process_recovering"])
+        self.assertEqual(status["protected_actions"], "available, requires approval")
+        self.assertEqual(status["discord_tools"], "available")
+        self.assertEqual(status["background_review"], "active")
+
+    def test_configured_custom_audio_is_distinguished_from_semantic_audio(self) -> None:
+        server = main.CodexAppServer()
+        session = server._session(_workspace_key("custom-audio"))
+        self._healthy_transport(server)
+        server._audio = SimpleNamespace(
+            transcription=SimpleNamespace(
+                enabled=True, base_url="https://stt.example/v1"
+            ),
+            tts=SimpleNamespace(enabled=True, base_url="https://tts.example/v1"),
+        )
+        server._realtime_feature_enabled = True
+
+        status = server._self_model_snapshot(
+            session,
+            allow_tools=True,
+            allow_discord_tools=False,
+        )["capability_status"]
+
+        self.assertEqual(status["stt_provider"], "configured")
+        self.assertEqual(status["tts_provider"], "configured")
+        self.assertEqual(status["active_voice_provider"], "custom")
+        self.assertEqual(status["audio_input"], "available")
+        self.assertEqual(status["semantic_audio_understanding"], "unavailable")
+        self.assertEqual(status["discord_tools"], "unavailable")
+
+    def test_unavailable_capabilities_are_not_claimed(self) -> None:
+        server = main.CodexAppServer()
+        session = server._session(_workspace_key("unavailable"))
+        server._process = None
+        server._reader_task = None
+        server._memory_roots = ()
+        server._realtime_feature_enabled = True
+        server._audio = SimpleNamespace(
+            transcription=SimpleNamespace(enabled=False, base_url=""),
+            tts=SimpleNamespace(enabled=False, base_url=""),
+        )
+
+        snapshot = server._self_model_snapshot(
+            session,
+            allow_tools=False,
+            allow_discord_tools=True,
+        )
+        status = snapshot["capability_status"]
+
+        self.assertEqual(status["session_workspace"], "available, currently empty")
+        self.assertEqual(status["durable_memory"], "unavailable")
+        self.assertEqual(status["memory_retrieval"], "unavailable")
+        self.assertEqual(status["image_input"], "currently unavailable")
+        self.assertEqual(status["audio_input"], "currently unavailable")
+        self.assertEqual(
+            status["semantic_audio_understanding"], "currently unavailable"
+        )
+        self.assertEqual(status["video_input"], "unavailable")
+        self.assertEqual(status["codex_transport"], "unavailable")
+        self.assertNotIn("realtime voice", snapshot["capabilities"])
+        self.assertEqual(
+            status["protected_actions"], "unavailable under current tool policy"
+        )
+        self.assertEqual(status["discord_tools"], "unavailable")
+
+    def test_protected_actions_are_never_reported_as_automatically_allowed(
+        self,
+    ) -> None:
+        server = main.CodexAppServer()
+        session = server._session(_workspace_key("approval-status"))
+        status = server._self_model_snapshot(
+            session,
+            allow_tools=True,
+            allow_discord_tools=False,
+        )
+
+        self.assertTrue(status["approval_required_for_protected_actions"])
+        self.assertEqual(status["protected_actions"], "available, requires approval")
+        self.assertNotIn("automatically allowed", server._render_self_model(status))
+
+    def test_self_model_failure_does_not_block_prompt_construction(self) -> None:
+        server = main.CodexAppServer()
+        session = server._session(_workspace_key("self-model-failure"))
+        with patch.object(
+            server,
+            "_self_model_snapshot",
+            side_effect=RuntimeError("self-model failed"),
+        ):
+            prompt, _ = server._turn_prompt_with_summary(
+                session, "The normal request still needs an answer."
+            )
+
+        self.assertIn("The normal request still needs an answer.", prompt)
+        self.assertNotIn("## Theia self-model", prompt)
+
+    def test_background_review_state_is_session_scoped(self) -> None:
+        server = main.CodexAppServer()
+        active = server._session(_workspace_key("review-active"))
+        idle = server._session(_workspace_key("review-idle"))
+        active.background_review_count = 1
+
+        active_status = server._self_model_snapshot(
+            active,
+            allow_tools=False,
+            allow_discord_tools=False,
+        )["capability_status"]
+        idle_status = server._self_model_snapshot(
+            idle,
+            allow_tools=False,
+            allow_discord_tools=False,
+        )["capability_status"]
+
+        self.assertEqual(active_status["background_review"], "active")
+        self.assertEqual(idle_status["background_review"], "inactive")
 
     async def test_personality_metadata_is_used_without_copying_its_prompt(
         self,
@@ -104,6 +251,10 @@ class SelfModelTests(AsyncBehaviorTestBase):
         prompt, _ = server._turn_prompt_with_summary(session, "The actual user request")
         self.assertLess(
             prompt.index("## Theia self-model"),
+            prompt.index("## Session global workspace"),
+        )
+        self.assertLess(
+            prompt.index("Capability status:"),
             prompt.index("## Session global workspace"),
         )
         self.assertLess(

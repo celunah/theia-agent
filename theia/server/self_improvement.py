@@ -68,19 +68,33 @@ class CodexSelfImprovementMixin:
             or not self._has_turn_server_admin_access(channel, user_id, user)
         ):
             return
-        task = asyncio.create_task(
-            self._run_self_improvement_review(
-                session,
-                user_prompt,
-                response,
-                channel=channel,
-                user_id=user_id,
-                user=user,
-                allow_tools=allow_tools,
+        session.background_review_count += 1
+        try:
+            task = asyncio.create_task(
+                self._run_self_improvement_review(
+                    session,
+                    user_prompt,
+                    response,
+                    channel=channel,
+                    user_id=user_id,
+                    user=user,
+                    allow_tools=allow_tools,
+                )
             )
-        )
+        except BaseException:
+            session.background_review_count = max(
+                0, session.background_review_count - 1
+            )
+            raise
         self._server_tasks.add(task)
-        task.add_done_callback(self._server_task_done)
+
+        def review_done(done: asyncio.Task[Any]) -> None:
+            session.background_review_count = max(
+                0, session.background_review_count - 1
+            )
+            self._server_task_done(done)
+
+        task.add_done_callback(review_done)
 
     async def _run_self_improvement_review(
         self,
@@ -359,12 +373,13 @@ class CodexSelfImprovementMixin:
                     + "\n</memory_retrieval>"
                 )
         if self_model is None:
-            self_model = self._self_model_snapshot(
+            self_model = self._safe_self_model_snapshot(
                 session,
-                allow_tools=True,
-                allow_discord_tools=True,
+                allow_tools=bool(session.tool_policy),
+                allow_discord_tools=False,
             )
-        parts.append(self._render_self_model(self_model))
+        if self_model:
+            parts.append(self._render_self_model(self_model))
         if workspace is None:
             workspace = self._workspace_snapshot(session)
         rendered_workspace = self._render_workspace_snapshot(workspace)

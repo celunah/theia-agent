@@ -600,6 +600,7 @@ class _Session:
     workspace: "_SessionWorkspace | None" = None
     mood_appraisal_task: asyncio.Task[Any] | None = None
     workspace_review_task: asyncio.Task[Any] | None = None
+    background_review_count: int = 0
     lock: asyncio.Lock | None = None
 
 
