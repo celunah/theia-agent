@@ -325,8 +325,15 @@ class CodexLifecycleMixin:
             self._skills_refresh_task = None
         self._clear_all_pending()
         await self._close_realtime_sessions()
-        for task in self._server_tasks:
+        server_tasks = tuple(
+            task
+            for task in self._server_tasks
+            if task is not asyncio.current_task() and not task.done()
+        )
+        for task in server_tasks:
             task.cancel()
+        if server_tasks:
+            await asyncio.gather(*server_tasks, return_exceptions=True)
         self._server_tasks.clear()
         process = self._process
         reader_task = self._reader_task

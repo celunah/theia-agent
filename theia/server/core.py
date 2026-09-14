@@ -82,6 +82,7 @@ from .requests import CodexRequestMixin
 from .realtime import CodexRealtimeMixin
 from .self_improvement import CodexSelfImprovementMixin
 from .workers import CodexWorkerMixin
+from .worker_diagnostics import record_current_worker_timeout
 
 logger = _codex_logger()
 
@@ -487,7 +488,14 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
                 (time.monotonic() - started_at) * 1000,
             )
             return result
+        except asyncio.CancelledError:
+            if state.diagnostics is not None:
+                state.diagnostics.record_cancellation()
+            raise
         except asyncio.TimeoutError as exc:
+            if state.diagnostics is not None:
+                state.diagnostics.record_timeout()
+            record_current_worker_timeout()
             logger.warning(
                 "Codex turn timed out; interrupting it (duration_ms=%.1f)",
                 (time.monotonic() - started_at) * 1000,
@@ -500,6 +508,8 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
         finally:
             if state.event_tasks:
                 await asyncio.gather(*state.event_tasks, return_exceptions=True)
+            if state.diagnostics is not None:
+                state.diagnostics.record_normal_duration(time.monotonic() - started_at)
             self._record_usage_turn_duration(time.monotonic() - started_at, session)
             if session.thread_id:
                 self._clear_pending_for_turn(session.thread_id, turn_id)
@@ -941,6 +951,11 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
         """Return sanitized, read-only runtime diagnostics for an administrator."""
         session = self._session(session_key)
         mood = self.mood_state(session_key)
+        diagnostics = (
+            session.turn_diagnostics.snapshot()
+            if session.turn_diagnostics is not None
+            else {}
+        )
         internal_workers: dict[str, int] = {}
         active_turns = 0
         for state in self._turns.values():
@@ -1002,4 +1017,5 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
                 "cumulative_tokens": usage.get("totalCumulativeTokens", 0),
                 "longest_turn_seconds": usage.get("longestRunningTurnSec", 0.0),
             },
+            "diagnostics": diagnostics,
         }

@@ -64,6 +64,11 @@ from .prompts import (
     _PRESENCE_DEVELOPER_INSTRUCTIONS,
     _PRESENCE_OUTPUT_SCHEMA,
 )
+from .worker_diagnostics import (
+    diagnostics_for_session,
+    record_current_worker_failure,
+    run_worker,
+)
 
 logger = _codex_logger()
 
@@ -98,6 +103,23 @@ class CodexWorkerMixin:
         timeout: float | None = None,
     ) -> str | None:
         """Generate one private, no-tool recap without extending a user thread."""
+        diagnostics = diagnostics_for_session(self, session_key)
+        return await run_worker(
+            diagnostics,
+            "other",
+            self._generate_nightly_recap(
+                prompt, session_key=session_key, timeout=timeout
+            ),
+        )
+
+    async def _generate_nightly_recap(
+        self,
+        prompt: str,
+        *,
+        session_key: str | None = None,
+        timeout: float | None = None,
+    ) -> str | None:
+        """Run the disposable recap turn inside its observability scope."""
         await self._ensure_running()
         session_id = f"__nightly_recap__:{time.monotonic_ns()}"
         session = _Session(
@@ -389,6 +411,22 @@ class CodexWorkerMixin:
         session_key: str | None = None,
         timeout: float = 8.0,
     ) -> dict[str, str] | None:
+        """Generate presence through a timed, non-blocking internal worker."""
+        return await run_worker(
+            diagnostics_for_session(self, session_key),
+            "presence",
+            self._generate_presence_turn(
+                prompt, session_key=session_key, timeout=timeout
+            ),
+        )
+
+    async def _generate_presence_turn(
+        self,
+        prompt: str,
+        *,
+        session_key: str | None = None,
+        timeout: float = 8.0,
+    ) -> dict[str, str] | None:
         """Generate one short activity line in a disposable, no-tool turn."""
         await self._ensure_running()
         session_id = f"__presence__:{time.monotonic_ns()}"
@@ -500,7 +538,11 @@ class CodexWorkerMixin:
         return None
 
     async def _select_reasoning_effort(
-        self, prompt: str, attachments: Iterable[discord.Attachment]
+        self,
+        prompt: str,
+        attachments: Iterable[discord.Attachment],
+        *,
+        diagnostics: Any | None = None,
     ) -> str:
         if not self._adaptive_reasoning:
             logger.debug("Adaptive reasoning disabled; using medium")
@@ -517,9 +559,17 @@ class CodexWorkerMixin:
             )
 
         assessment_effort = self._supported_effort("low", models)
-        assessment = await self._assess_request(
-            prompt, attachments, effort=assessment_effort
-        )
+        if diagnostics is None:
+            assessment = await self._assess_request(
+                prompt, attachments, effort=assessment_effort
+            )
+        else:
+            assessment = await self._assess_request(
+                prompt,
+                attachments,
+                effort=assessment_effort,
+                diagnostics=diagnostics,
+            )
         if assessment is None:
             logger.warning("Codex reasoning pre-assessment unavailable; using medium")
             return DEFAULT_REASONING_EFFORT
@@ -548,8 +598,25 @@ class CodexWorkerMixin:
         attachments: Iterable[discord.Attachment],
         *,
         effort: str,
+        diagnostics: Any | None = None,
     ) -> dict[str, Any] | None:
         """Run a hidden, ephemeral planning turn before the user turn."""
+        if diagnostics is not None:
+            return await run_worker(
+                diagnostics,
+                "other",
+                self._assess_request_turn(prompt, attachments, effort=effort),
+            )
+        return await self._assess_request_turn(prompt, attachments, effort=effort)
+
+    async def _assess_request_turn(
+        self,
+        prompt: str,
+        attachments: Iterable[discord.Attachment],
+        *,
+        effort: str,
+    ) -> dict[str, Any] | None:
+        """Run the hidden assessment without exposing it to the user turn."""
         logger.debug("Starting hidden Codex reasoning pre-assessment")
         key = f"__assessment__:{time.monotonic_ns()}"
         session = _Session(key=key)
@@ -603,6 +670,7 @@ class CodexWorkerMixin:
             )
             return self._parse_assessment(text)
         except (CodexAppServerError, OSError) as exc:
+            record_current_worker_failure()
             logger.debug(
                 "Hidden Codex reasoning pre-assessment failed (error=%s)",
                 type(exc).__name__,

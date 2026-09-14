@@ -43,6 +43,11 @@ from .prompts import (
     _DISCORD_DYNAMIC_TOOLS,
     _SAFE_TOOL_INSTRUCTIONS,
 )
+from .worker_diagnostics import (
+    diagnostics_for_session,
+    is_low_signal_message,
+    run_worker,
+)
 
 logger = _codex_logger()
 
@@ -489,16 +494,22 @@ class CodexConversationMixin:
         text: str,
         *,
         recent_context: str | None = None,
+        diagnostics: Any | None = None,
     ) -> None:
         """Start mood appraisal without delaying the user-facing turn."""
         previous = session.mood_appraisal_task
         if previous is not None and not previous.done():
             previous.cancel()
+        if is_low_signal_message(text):
+            self._update_mood_from_turn(session, text)
+            session.mood_appraisal_task = None
+            return
         task = asyncio.create_task(
             self._update_mood_from_codex(
                 session,
                 text,
                 recent_context=recent_context,
+                diagnostics=diagnostics,
             )
         )
         session.mood_appraisal_task = task
@@ -518,6 +529,7 @@ class CodexConversationMixin:
         *,
         recent_context: str | None = None,
         now: float | None = None,
+        diagnostics: Any | None = None,
     ) -> bool:
         """Appraise one user turn through an isolated, bounded Codex pass."""
         state_changed, event_at, should_classify = self._begin_mood_update(
@@ -528,11 +540,17 @@ class CodexConversationMixin:
         mood = session.mood
         assert mood is not None
         try:
-            event = await self.classify_mood(
-                text,
-                session_key=session.key,
-                recent_context=recent_context,
-                current_mood=self._mood_snapshot(mood),
+            event = await run_worker(
+                diagnostics
+                if diagnostics is not None
+                else diagnostics_for_session(self, session.key),
+                "mood",
+                self.classify_mood(
+                    text,
+                    session_key=session.key,
+                    recent_context=recent_context,
+                    current_mood=self._mood_snapshot(mood),
+                ),
             )
         except Exception as exc:  # noqa: BLE001 - appraisal must not fail a turn
             logger.debug(

@@ -34,6 +34,7 @@ from ..core import (
     _truncate,
 )
 from ..personality import PersonalityError
+from .worker_diagnostics import record_current_worker_failure, run_worker
 
 logger = _codex_logger()
 
@@ -58,6 +59,7 @@ class CodexSelfImprovementMixin:
         user_id: int | None,
         user: Any | None,
         allow_tools: bool,
+        diagnostics: Any | None = None,
     ) -> None:
         """Start the private review without delaying the Discord response."""
         if (
@@ -71,14 +73,18 @@ class CodexSelfImprovementMixin:
         session.background_review_count += 1
         try:
             task = asyncio.create_task(
-                self._run_self_improvement_review(
-                    session,
-                    user_prompt,
-                    response,
-                    channel=channel,
-                    user_id=user_id,
-                    user=user,
-                    allow_tools=allow_tools,
+                run_worker(
+                    diagnostics,
+                    "self_improvement",
+                    self._run_self_improvement_review(
+                        session,
+                        user_prompt,
+                        response,
+                        channel=channel,
+                        user_id=user_id,
+                        user=user,
+                        allow_tools=allow_tools,
+                    ),
                 )
             )
         except BaseException:
@@ -125,6 +131,10 @@ class CodexSelfImprovementMixin:
             self._sessions[review_key] = review_session
             review_state: _TurnState | None = None
             review_turn_id: str | None = None
+            request_timeout = max(
+                1.0,
+                min(self._self_improvement_timeout, self._request_timeout),
+            )
             try:
                 personality_path = self._self_improvement_personality_path(session)
                 memory_root = self._codex_home / "memories"
@@ -163,6 +173,7 @@ class CodexSelfImprovementMixin:
                         ),
                         **({"model": self._model} if self._model is not None else {}),
                     },
+                    timeout=request_timeout,
                 )
                 thread_id = str((thread_result.get("thread") or {}).get("id") or "")
                 if not thread_id:
@@ -183,6 +194,7 @@ class CodexSelfImprovementMixin:
                         "outputSchema": _SELF_IMPROVEMENT_OUTPUT_SCHEMA,
                         **({"model": self._model} if self._model is not None else {}),
                     },
+                    timeout=request_timeout,
                 )
                 review_turn_id = str((turn_result.get("turn") or {}).get("id") or "")
                 if not review_turn_id:
@@ -225,6 +237,7 @@ class CodexSelfImprovementMixin:
                     )
                 return applied
             except Exception as exc:  # noqa: BLE001 - review must not fail the turn
+                record_current_worker_failure()
                 logger.warning(
                     "Post-turn self-improvement review failed (error=%s)",
                     type(exc).__name__,

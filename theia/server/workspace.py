@@ -33,6 +33,7 @@ from ..core import (
     _safe_intermediate_text,
     _truncate,
 )
+from .worker_diagnostics import record_current_worker_failure, run_worker
 
 logger = _codex_logger()
 _WORKSPACE_KEY_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
@@ -203,6 +204,7 @@ class CodexWorkspaceMixin:
         review = session.workspace_review_task
         if review is not None and not review.done():
             review.cancel()
+        session.workspace_review_generation += 1
         workspace = session.workspace
         if workspace is None:
             return
@@ -439,6 +441,7 @@ class CodexWorkspaceMixin:
         *,
         recent_context: str | None,
         self_model: dict[str, Any],
+        diagnostics: Any | None = None,
     ) -> None:
         """Schedule one non-blocking review for a completed normal turn."""
         if (
@@ -450,17 +453,24 @@ class CodexWorkspaceMixin:
         previous = session.workspace_review_task
         if previous is not None and not previous.done():
             previous.cancel()
+        session.workspace_review_generation += 1
+        generation = session.workspace_review_generation
         workspace = self._workspace_snapshot(session)
         session.background_review_count += 1
         try:
             task = asyncio.create_task(
-                self._run_workspace_review(
-                    session,
-                    user_prompt,
-                    response,
-                    recent_context=recent_context,
-                    self_model=self_model,
-                    workspace=workspace,
+                run_worker(
+                    diagnostics,
+                    "workspace_review",
+                    self._run_workspace_review(
+                        session,
+                        user_prompt,
+                        response,
+                        recent_context=recent_context,
+                        self_model=self_model,
+                        workspace=workspace,
+                        generation=generation,
+                    ),
                 )
             )
         except BaseException:
@@ -490,6 +500,7 @@ class CodexWorkspaceMixin:
         recent_context: str | None,
         self_model: dict[str, Any],
         workspace: dict[str, Any],
+        generation: int,
     ) -> None:
         """Run and safely merge one isolated workspace review."""
         session_id = f"__workspace_review__:{time.monotonic_ns()}"
@@ -568,6 +579,8 @@ class CodexWorkspaceMixin:
             async with session_lock:
                 if self._sessions.get(session.key) is not session:
                     return
+                if session.workspace_review_generation != generation:
+                    return
                 self._apply_workspace_delta(
                     session,
                     operations,
@@ -584,6 +597,7 @@ class CodexWorkspaceMixin:
                     )
             raise
         except Exception as exc:  # noqa: BLE001 - review must never affect a turn
+            record_current_worker_failure()
             logger.debug(
                 "Session workspace review failed (error=%s)", type(exc).__name__
             )

@@ -22,6 +22,11 @@ from .policy import (
     _PERSONALITY_SUMMARY_SOURCE_LIMIT,
     _PERSONALITY_SUMMARY_TIMEOUT,
 )
+from .worker_diagnostics import (
+    diagnostics_for_session,
+    record_current_worker_failure,
+    run_worker,
+)
 from ..core import (
     BASE_PRIORS,
     CodexAppServerError,
@@ -845,6 +850,30 @@ class CodexPersonalityStateMixin:
         timeout: float | None = None,
     ) -> dict[str, Any] | None:
         """Select bounded, transient memory context in a neutral no-tool turn."""
+        if session_key is not None:
+            return await run_worker(
+                diagnostics_for_session(self, session_key),
+                "other",
+                self._generate_memory_retrieval(
+                    prompt,
+                    session_key=session_key,
+                    allow_tools=allow_tools,
+                    timeout=timeout,
+                ),
+            )
+        return await self._generate_memory_retrieval(
+            prompt, session_key=None, allow_tools=allow_tools, timeout=timeout
+        )
+
+    async def _generate_memory_retrieval(
+        self,
+        prompt: str,
+        *,
+        session_key: str | None = None,
+        allow_tools: bool = False,
+        timeout: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Run one transient memory lookup without retaining its worker turn."""
         if not allow_tools:
             return None
         await self._ensure_running()
@@ -930,6 +959,7 @@ class CodexPersonalityStateMixin:
                     )
             raise
         except (CodexAppServerError, OSError, asyncio.TimeoutError) as exc:
+            record_current_worker_failure()
             logger.debug(
                 "Memory retrieval worker failed (error=%s)", type(exc).__name__
             )

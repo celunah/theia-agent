@@ -37,6 +37,7 @@ from .policy import (
     _APPROVAL_SAFE_COMMAND_RE,
     _APPROVAL_VERY_DANGEROUS_RE,
 )
+from .worker_diagnostics import record_current_worker_timeout, record_internal_request
 from ..ui import _DecisionView, _FormView, _UserInputView
 
 logger = _codex_logger()
@@ -60,6 +61,7 @@ class CodexTransportMixin:
     ) -> dict[str, Any]:
         request_id = self._next_request_id
         self._next_request_id += 1
+        record_internal_request()
         future: asyncio.Future[dict[str, Any]] = (
             asyncio.get_running_loop().create_future()
         )
@@ -78,6 +80,7 @@ class CodexTransportMixin:
                 await asyncio.wait_for(future, wait_for) if wait_for else await future
             )
         except asyncio.TimeoutError as exc:
+            record_current_worker_timeout()
             self._pending.pop(request_id, None)
             logger.warning(
                 "Codex protocol request timed out (method=%s, duration_ms=%.1f)",

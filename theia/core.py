@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import math
 import os
 import re
 import subprocess
@@ -600,7 +601,9 @@ class _Session:
     workspace: "_SessionWorkspace | None" = None
     mood_appraisal_task: asyncio.Task[Any] | None = None
     workspace_review_task: asyncio.Task[Any] | None = None
+    workspace_review_generation: int = 0
     background_review_count: int = 0
+    turn_diagnostics: "_TurnDiagnostics | None" = None
     lock: asyncio.Lock | None = None
 
 
@@ -656,6 +659,87 @@ class _SessionWorkspace:
 
 
 @dataclass
+class _TurnDiagnostics:
+    """Bounded, non-persistent timings for one normal turn and its workers."""
+
+    normal_turn_duration_ms: float | None = None
+    attention_classifier_duration_ms: float | None = None
+    mood_classifier_duration_ms: float | None = None
+    workspace_review_duration_ms: float | None = None
+    presence_generation_duration_ms: float | None = None
+    self_improvement_duration_ms: float | None = None
+    timeout_count: int = 0
+    cancellation_count: int = 0
+    failed_worker_count: int = 0
+    approximate_internal_request_count: int = 0
+
+    def record_normal_duration(self, elapsed_seconds: float) -> None:
+        """Record one normal turn duration as a finite non-negative value."""
+        self.normal_turn_duration_ms = _bounded_duration_ms(elapsed_seconds)
+
+    def record_worker_duration(self, worker: str, elapsed_seconds: float) -> None:
+        """Accumulate bounded elapsed time for one internal worker category."""
+        field_name = {
+            "attention": "attention_classifier_duration_ms",
+            "mood": "mood_classifier_duration_ms",
+            "workspace_review": "workspace_review_duration_ms",
+            "presence": "presence_generation_duration_ms",
+            "self_improvement": "self_improvement_duration_ms",
+        }.get(worker)
+        if field_name is None:
+            return
+        value = _bounded_duration_ms(elapsed_seconds)
+        previous = getattr(self, field_name)
+        setattr(self, field_name, min(3_600_000.0, (previous or 0.0) + value))
+
+    def record_timeout(self) -> None:
+        """Record one bounded worker or protocol timeout."""
+        self.timeout_count = min(1000, self.timeout_count + 1)
+
+    def record_cancellation(self) -> None:
+        """Record one bounded worker cancellation."""
+        self.cancellation_count = min(1000, self.cancellation_count + 1)
+
+    def record_failure(self) -> None:
+        """Record one bounded worker failure, excluding timeout/cancellation."""
+        self.failed_worker_count = min(1000, self.failed_worker_count + 1)
+
+    def record_internal_request(self) -> None:
+        """Record one internal JSONL request without retaining its method or data."""
+        self.approximate_internal_request_count = min(
+            1000, self.approximate_internal_request_count + 1
+        )
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return only safe numeric diagnostics for an administrator view."""
+        return {
+            "normal_turn_duration_ms": self.normal_turn_duration_ms,
+            "attention_classifier_duration_ms": self.attention_classifier_duration_ms,
+            "mood_classifier_duration_ms": self.mood_classifier_duration_ms,
+            "workspace_review_duration_ms": self.workspace_review_duration_ms,
+            "presence_generation_duration_ms": self.presence_generation_duration_ms,
+            "self_improvement_duration_ms": self.self_improvement_duration_ms,
+            "timeout_count": self.timeout_count,
+            "cancellation_count": self.cancellation_count,
+            "failed_worker_count": self.failed_worker_count,
+            "approximate_internal_request_count": (
+                self.approximate_internal_request_count
+            ),
+        }
+
+
+def _bounded_duration_ms(value: float) -> float:
+    """Normalize elapsed time before it reaches diagnostics."""
+    try:
+        candidate = value * 1000.0
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    if not math.isfinite(candidate):
+        return 0.0
+    return max(0.0, min(3_600_000.0, candidate))
+
+
+@dataclass
 class _MoodState:
     """Temporary expressive state kept separately from durable agent context."""
 
@@ -701,6 +785,7 @@ class _TurnState:
         on_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
         interaction_sender: Callable[..., Awaitable[Any]] | None = None,
         allow_discord_tools: bool = True,
+        diagnostics: _TurnDiagnostics | None = None,
     ) -> None:
         self.thread_id = thread_id
         self.session = session
@@ -714,6 +799,7 @@ class _TurnState:
         self.on_event = on_event
         self.interaction_sender = interaction_sender
         self.allow_discord_tools = allow_discord_tools
+        self.diagnostics = diagnostics
         # The dynamic Discord thread tool can be called more than once by a
         # model in the same turn. Keep the created channel here so a repeated
         # call is idempotent and cannot replace the real opening response with

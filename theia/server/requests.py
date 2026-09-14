@@ -21,6 +21,7 @@ from ..core import (
     CodexAppServerError,
     CodexTransientRestartError,
     _Session,
+    _TurnDiagnostics,
     _TurnState,
     _codex_logger,
 )
@@ -59,8 +60,10 @@ class CodexRequestMixin:
         mood_input: str,
         recent_context: str | None,
         summary_injected: bool,
+        diagnostics: _TurnDiagnostics | None = None,
     ) -> str:
         """Run a turn, retrying only interruptions caused by memory recovery."""
+        diagnostics = diagnostics or session.turn_diagnostics
         prompted_user_text = user_prompt or turn_prompt
         schedule_mood = True
         for attempt in range(MAX_CODEX_MEMORY_TURN_RETRIES + 1):
@@ -103,6 +106,7 @@ class CodexRequestMixin:
                     on_event=on_event,
                     interaction_sender=interaction_sender,
                     allow_discord_tools=allow_discord_tools,
+                    diagnostics=diagnostics,
                 ),
             )
             state.thread_id = session.thread_id
@@ -117,12 +121,14 @@ class CodexRequestMixin:
             state.on_event = on_event
             state.interaction_sender = interaction_sender
             state.allow_discord_tools = allow_discord_tools
+            state.diagnostics = diagnostics
             session.turn_id = str(turn_id)
             if schedule_mood:
                 self._schedule_mood_appraisal(
                     session,
                     mood_input,
                     recent_context=recent_context,
+                    diagnostics=diagnostics,
                 )
                 schedule_mood = False
             try:
@@ -343,6 +349,8 @@ class CodexRequestMixin:
         async with session.lock:
             await self._ensure_running()
             await self._prepare_session_for_activity(session)
+            diagnostics = _TurnDiagnostics()
+            session.turn_diagnostics = diagnostics
             attachment_preparation = await self._prepare_attachment_manifest(
                 attachment_list
             )
@@ -354,8 +362,11 @@ class CodexRequestMixin:
                 mood_input,
                 recent_global_context=prompt if user_prompt else None,
                 historical_context=historical_context,
+                diagnostics=diagnostics,
             )
-            effort = await self._select_reasoning_effort(prompt, attachment_list)
+            effort = await self._select_reasoning_effort(
+                prompt, attachment_list, diagnostics=diagnostics
+            )
             logger.info(
                 "Starting Codex turn (adaptive_reasoning=%s, effort=%s, attachments=%d)",
                 self._adaptive_reasoning,
@@ -433,6 +444,7 @@ class CodexRequestMixin:
                 mood_input=mood_input,
                 recent_context=prompt if user_prompt else None,
                 summary_injected=summary_injected,
+                diagnostics=diagnostics,
             )
             self._record_attention_response(session, response)
             completed_self_model = self._safe_self_model_snapshot(
@@ -451,6 +463,7 @@ class CodexRequestMixin:
                 user_id=user_id,
                 user=user,
                 allow_tools=allow_tools,
+                diagnostics=diagnostics,
             )
             self._schedule_workspace_review(
                 session,
@@ -458,5 +471,6 @@ class CodexRequestMixin:
                 response,
                 recent_context=prompt if user_prompt else None,
                 self_model=completed_self_model or {},
+                diagnostics=diagnostics,
             )
             return response

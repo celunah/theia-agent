@@ -49,6 +49,12 @@ from .prompts import (
     _ATTENTION_CLASSIFICATION_DEVELOPER_INSTRUCTIONS,
     _ATTENTION_OUTPUT_SCHEMA,
 )
+from .worker_diagnostics import (
+    diagnostics_for_session,
+    is_low_signal_message,
+    record_current_worker_failure,
+    run_worker,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -87,8 +93,6 @@ def _bound_context_id(value: Any) -> str | None:
 
 
 class CodexAttentionMixin:
-    """Keep semantic topic state beside, but separate from, Codex sessions."""
-
     if TYPE_CHECKING:
         _model: str | None
         _request_timeout: float
@@ -109,7 +113,6 @@ class CodexAttentionMixin:
         return session.attention
 
     def conversation_attention(self, session_key: str) -> dict[str, Any]:
-        """Return a bounded diagnostic snapshot of one session's attention."""
         session = self._session(session_key)
         return self._serialize_attention_state(session.attention) or {}
 
@@ -330,7 +333,6 @@ class CodexAttentionMixin:
         matched_context_title: str | None = None,
         matched_context_material: str | None = None,
     ) -> dict[str, Any] | None:
-        """Return recurrence only after validating the classifier candidate."""
         if current is None:
             return None
         candidate = result.get("recurrence")
@@ -615,21 +617,34 @@ class CodexAttentionMixin:
         recent_global_context: str | None = None,
         historical_context: str | None = None,
         now: float | None = None,
+        diagnostics: Any | None = None,
     ) -> dict[str, Any] | None:
-        """Classify and apply one turn without allowing the worker to mutate state."""
         current_text = text.strip()
         if not current_text:
             return None
+        if is_low_signal_message(current_text):
+            return self._apply_attention_result(
+                session,
+                current_text,
+                None,
+                now=time.time() if now is None else now,
+            )
         checked_at = time.time() if now is None else now
         state = self._attention_state(session)
         expected_version = state.version
         try:
-            result = await self.classify_attention(
-                current_text,
-                session_key=session.key,
-                attention=self._serialize_attention_state(state) or {},
-                recent_global_context=recent_global_context,
-                historical_context=historical_context,
+            result = await run_worker(
+                diagnostics
+                if diagnostics is not None
+                else diagnostics_for_session(self, session.key),
+                "attention",
+                self.classify_attention(
+                    current_text,
+                    session_key=session.key,
+                    attention=self._serialize_attention_state(state) or {},
+                    recent_global_context=recent_global_context,
+                    historical_context=historical_context,
+                ),
             )
         except Exception as exc:  # noqa: BLE001 - attention must not fail a turn
             logger.debug(
@@ -855,6 +870,7 @@ class CodexAttentionMixin:
                     )
             raise
         except (CodexAppServerError, asyncio.TimeoutError):
+            record_current_worker_failure()
             return None
         finally:
             if turn_id:

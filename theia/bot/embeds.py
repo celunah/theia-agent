@@ -31,6 +31,17 @@ def _format_whole_seconds(value: Any) -> str:
     return f"{value:,.0f}"
 
 
+def _format_duration_ms(value: Any) -> str:
+    if (
+        value is None
+        or isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+    ):
+        return "not run"
+    return f"{max(0.0, float(value)):,.1f} ms"
+
+
 def _format_percent(value: Any) -> str:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return f"{value:g}% used"
@@ -137,6 +148,7 @@ def _debug_embed(
     session = state.get("session") if isinstance(state, dict) else {}
     counts = state.get("counts") if isinstance(state, dict) else {}
     usage = state.get("usage") if isinstance(state, dict) else {}
+    diagnostics = state.get("diagnostics") if isinstance(state, dict) else {}
     if not isinstance(runtime, dict):
         runtime = {}
     if not isinstance(configuration, dict):
@@ -147,6 +159,8 @@ def _debug_embed(
         counts = {}
     if not isinstance(usage, dict):
         usage = {}
+    if not isinstance(diagnostics, dict):
+        diagnostics = {}
     workers = counts.get("internal_workers")
     if isinstance(workers, dict):
         worker_text = ", ".join(
@@ -263,6 +277,38 @@ def _debug_embed(
                     (
                         "Longest turn: "
                         f"{_format_whole_seconds(usage.get('longest_turn_seconds'))} seconds"
+                    ),
+                    "Worker diagnostics:",
+                    "  Normal turn: "
+                    + _format_duration_ms(diagnostics.get("normal_turn_duration_ms")),
+                    "  Attention classifier: "
+                    + _format_duration_ms(
+                        diagnostics.get("attention_classifier_duration_ms")
+                    ),
+                    "  Mood classifier: "
+                    + _format_duration_ms(
+                        diagnostics.get("mood_classifier_duration_ms")
+                    ),
+                    "  Workspace review: "
+                    + _format_duration_ms(
+                        diagnostics.get("workspace_review_duration_ms")
+                    ),
+                    "  Presence generation: "
+                    + _format_duration_ms(
+                        diagnostics.get("presence_generation_duration_ms")
+                    ),
+                    "  Self-improvement: "
+                    + _format_duration_ms(
+                        diagnostics.get("self_improvement_duration_ms")
+                    ),
+                    "  Timeouts: " + _format_count(diagnostics.get("timeout_count")),
+                    "  Cancellations: "
+                    + _format_count(diagnostics.get("cancellation_count")),
+                    "  Failed workers: "
+                    + _format_count(diagnostics.get("failed_worker_count")),
+                    "  Internal requests (approx.): "
+                    + _format_count(
+                        diagnostics.get("approximate_internal_request_count")
                     ),
                 )
             ),

@@ -56,6 +56,9 @@ duration is rounded to whole seconds.
 state. It refreshes independently while the view is open, including during other
 agent tasks, and does not expose prompts, tool output, credentials, or private
 paths.
+It also shows bounded latest-turn worker timings, timeout/cancellation/failure
+counts, and an approximate internal-request count; background reviews never
+hold up the user response.
 
 `/memory` is a private, owner-locked paginated view of the selected character's
 configured memory database. Users can choose `me`, server administrators can
