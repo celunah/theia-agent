@@ -13,6 +13,7 @@ import math
 import re
 import sys
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, cast
@@ -29,6 +30,7 @@ LIGHTHOUSE_ENABLED_ENV = "THEIA_LIGHTHOUSE_ENABLED"
 LIGHTHOUSE_REFRESH_INTERVAL = 1.0
 LIGHTHOUSE_HEARTBEAT_INTERVAL = 5.0
 LIGHTHOUSE_EVENT_LIMIT = 12
+LIGHTHOUSE_DIAGNOSTIC_LIMIT = 256
 
 _EVENT_LABELS = {
     "listening_state_entered": "Listening state entered",
@@ -38,6 +40,9 @@ _EVENT_LABELS = {
     "turn_started": "Codex turn started",
     "turn_completed": "Codex turn completed",
     "turn_timed_out": "Codex turn timed out",
+    "turn_cancelled": "Codex turn stopped",
+    "log_warning": "Warning",
+    "log_error": "Error",
     "character_loaded": "Character overlay loaded",
     "model_changed": "Model changed",
     "worker_started": "Worker started",
@@ -501,15 +506,72 @@ def render_lighthouse(snapshot: dict[str, Any]) -> str:
                 continue
             event_name = str(event.get("event") or "").casefold()
             label = _EVENT_LABELS.get(event_name, "Runtime state changed")
-            lines.append(f"  [{_format_event_time(event.get('timestamp'))}] {label}")
+            detail = _dashboard_text(event.get("detail"), 100)
+            event_text = f"{label}: {detail}" if detail else label
+            lines.append(
+                f"  [{_format_event_time(event.get('timestamp'))}] {event_text}"
+            )
     return "\n".join(lines)
 
 
-class _RoutineLogFilter(logging.Filter):
-    """Keep warnings and errors visible while Lighthouse owns the terminal."""
+class _LighthouseTerminalFilter(logging.Filter):
+    """Keep all logging records out of a terminal owned by Lighthouse."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        return record.levelno >= logging.WARNING
+        del record
+        return False
+
+
+class _LighthouseDiagnosticHandler(logging.Handler):
+    """Retain diagnostic records while terminal handlers are temporarily muted."""
+
+    def __init__(self, codex: Any, records: deque[logging.LogRecord]) -> None:
+        super().__init__(level=logging.NOTSET)
+        self.codex = codex
+        self.records = records
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if getattr(record, "_lighthouse_captured", False):
+            return
+        record._lighthouse_captured = True  # type: ignore[attr-defined]
+        self.records.append(record)
+        if record.levelno < logging.WARNING:
+            return
+        try:
+            detail = _safe_intermediate_text(record.getMessage(), 120)
+        except Exception:  # noqa: BLE001 - diagnostics must never affect logging
+            detail = ""
+        if not detail:
+            return
+        recorder = getattr(self.codex, "_record_runtime_event", None)
+        if not callable(recorder):
+            return
+        event = "log_error" if record.levelno >= logging.ERROR else "log_warning"
+        with contextlib.suppress(Exception):
+            recorder(event, detail)
+
+
+def _terminal_handler(handler: logging.Handler) -> bool:
+    """Identify handlers that would write into the interactive terminal."""
+    if isinstance(handler, logging.FileHandler):
+        return False
+    stream = getattr(handler, "stream", None) or sys.stderr
+    if stream in {sys.stdout, sys.stderr}:
+        return True
+    checker = getattr(stream, "isatty", None)
+    with contextlib.suppress(Exception):
+        return bool(checker()) if callable(checker) else False
+    return False
+
+
+def _logging_targets() -> tuple[logging.Logger, ...]:
+    """Return configured loggers and root without creating duplicate targets."""
+    targets = [logging.getLogger()]
+    for value in logging.Logger.manager.loggerDict.values():
+        if isinstance(value, logging.Logger):
+            targets.append(value)
+    targets.append(logging.getLogger("theia.codex"))
+    return tuple(dict.fromkeys(targets))
 
 
 class LighthouseView:
@@ -542,6 +604,10 @@ class LighthouseView:
         self._task: asyncio.Task[None] | None = None
         self._live: Any | None = None
         self._filters: list[tuple[logging.Handler, logging.Filter]] = []
+        self._diagnostic_handlers: list[tuple[logging.Logger, logging.Handler]] = []
+        self._diagnostics: deque[logging.LogRecord] = deque(
+            maxlen=LIGHTHOUSE_DIAGNOSTIC_LIMIT
+        )
 
     def _interactive(self) -> bool:
         if not self.enabled:
@@ -580,27 +646,45 @@ class LighthouseView:
             logger.warning("Lighthouse View unavailable because Rich is not installed")
             return False
         try:
-            log = logging.getLogger("theia.codex")
-            for handler in log.handlers:
-                routine_filter = _RoutineLogFilter()
-                handler.addFilter(routine_filter)
-                self._filters.append((handler, routine_filter))
+            handlers: list[logging.Handler] = []
+            targets = _logging_targets()
+            for log in targets:
+                for handler in log.handlers:
+                    if _terminal_handler(handler) and handler not in handlers:
+                        terminal_filter = _LighthouseTerminalFilter()
+                        handler.addFilter(terminal_filter)
+                        self._filters.append((handler, terminal_filter))
+                        handlers.append(handler)
+            diagnostic_handler = _LighthouseDiagnosticHandler(
+                self.codex, self._diagnostics
+            )
+            for log in targets:
+                if not any(handler in handlers for handler in log.handlers):
+                    continue
+                log.addHandler(diagnostic_handler)
+                self._diagnostic_handlers.append((log, diagnostic_handler))
             console = Console(file=self.output, force_terminal=True)
             self._live = Live(
                 Text(render_lighthouse(self.snapshot())),
                 console=console,
                 refresh_per_second=1,
-                screen=False,
+                screen=True,
                 transient=False,
+                auto_refresh=False,
                 redirect_stdout=False,
                 redirect_stderr=False,
             )
-            self._live.start(refresh=True)
+            self._live.start(refresh=False)
+            console.clear()
+            self._live.refresh()
             self._task = asyncio.create_task(self._run(Text))
             return True
         except Exception:
             self._restore_logging()
-            self._live = None
+            live, self._live = self._live, None
+            if live is not None:
+                with contextlib.suppress(Exception):
+                    live.stop()
             logger.exception("Lighthouse View could not start")
             return False
 
@@ -619,13 +703,26 @@ class LighthouseView:
                             await heartbeat_call(timeout=1.5)
                     next_heartbeat = now + self.heartbeat_interval
                 if self._live is not None:
-                    self._live.update(text_type(render_lighthouse(self.snapshot())))
+                    self._live.update(
+                        text_type(render_lighthouse(self.snapshot())), refresh=True
+                    )
                 await asyncio.sleep(self.refresh_interval)
         except Exception:
-            self._restore_logging()
             logger.exception("Lighthouse View stopped unexpectedly")
+            self._restore_logging()
+            live, self._live = self._live, None
+            if live is not None:
+                with contextlib.suppress(Exception):
+                    live.stop()
 
     def _restore_logging(self) -> None:
+        diagnostic_handlers, self._diagnostic_handlers = (
+            self._diagnostic_handlers,
+            [],
+        )
+        for log, handler in diagnostic_handlers:
+            with contextlib.suppress(Exception):
+                log.removeHandler(handler)
         filters, self._filters = self._filters, []
         for handler, routine_filter in filters:
             with contextlib.suppress(Exception):

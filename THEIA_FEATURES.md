@@ -61,7 +61,10 @@ The Lighthouse View is a read-only Rich terminal dashboard of live harness
 state. It shows Codex health, active work, character, presence, voice,
 attention, mood, workspace, approvals, memory counts, watchdog recovery, and
 bounded recent events. It uses normal Python logging when no interactive TTY
-is available and never creates model requests beyond its transport heartbeat.
+is available. In an interactive TTY it owns the terminal in a full-screen
+view, routes structured events into the dashboard, and preserves warnings,
+errors, and tracebacks through the logging diagnostics path. It never creates
+model requests beyond its transport heartbeat.
 
 `/improvements` is an administrator-only ephemeral audit view of recent
 self-improvement changes. Administrators can list and preview bounded change

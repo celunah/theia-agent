@@ -158,6 +158,46 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0], "heartbeat:1.5")
         self.assertIn("Lighthouse View", output.value)
         self.assertIn("Runtime", output.value)
+        self.assertIn("\x1b[2J", output.value)
+        self.assertIn("\x1b[?1049h", output.value)
+        self.assertIn("\x1b[?1049l", output.value)
+
+    async def test_interactive_view_mutes_console_logs_and_preserves_diagnostics(self):
+        output = _TTYBuffer()
+        logger = logging.getLogger("theia.codex")
+        handler = logging.StreamHandler(output)
+        logger.addHandler(handler)
+        try:
+            events: list[tuple[str, str]] = []
+
+            def record_event(event: str, detail: str) -> None:
+                events.append((event, detail))
+
+            codex = SimpleNamespace(
+                lighthouse_snapshot=Mock(return_value=_snapshot()),
+                heartbeat=AsyncMock(),
+                _record_runtime_event=record_event,
+            )
+            view = LighthouseView(codex, output=output, refresh_interval=0.1)
+            self.assertTrue(await view.start())
+            logger.info("routine console line")
+            try:
+                raise RuntimeError("diagnostic traceback")
+            except RuntimeError:
+                logger.exception("preserved failure")
+            await asyncio.sleep(0.05)
+            await view.close()
+
+            self.assertNotIn("routine console line", output.value)
+            self.assertNotIn("ERROR", output.value)
+            self.assertTrue(any(record.exc_info for record in view._diagnostics))
+            self.assertIn(("log_error", "preserved failure"), events)
+            self.assertEqual(list(handler.filters), [])
+            self.assertEqual(view._diagnostic_handlers, [])
+            logger.info("logging restored")
+            self.assertIn("logging restored", output.value)
+        finally:
+            logger.removeHandler(handler)
 
     async def test_heartbeat_uses_account_probe_without_a_turn(self) -> None:
         server = main.CodexAppServer()
