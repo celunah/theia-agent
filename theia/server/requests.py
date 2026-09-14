@@ -17,6 +17,7 @@ from .policy import (
     _MEMORY_RETRIEVAL_HINT_RE,
 )
 from ..core import (
+    BASE_PRIORS,
     DEFAULT_MODE,
     CodexAppServerError,
     CodexTransientRestartError,
@@ -25,6 +26,7 @@ from ..core import (
     _TurnState,
     _codex_logger,
 )
+from .usage import estimated_tokens
 
 logger = _codex_logger()
 
@@ -60,6 +62,7 @@ class CodexRequestMixin:
         mood_input: str,
         recent_context: str | None,
         summary_injected: bool,
+        prompt_attribution: dict[str, int] | None = None,
         diagnostics: _TurnDiagnostics | None = None,
     ) -> str:
         """Run a turn, retrying only interruptions caused by memory recovery."""
@@ -107,6 +110,9 @@ class CodexRequestMixin:
                     interaction_sender=interaction_sender,
                     allow_discord_tools=allow_discord_tools,
                     diagnostics=diagnostics,
+                    model=turn_params.get("model"),
+                    effort=effort,
+                    prompt_attribution=prompt_attribution,
                 ),
             )
             state.thread_id = session.thread_id
@@ -122,6 +128,9 @@ class CodexRequestMixin:
             state.interaction_sender = interaction_sender
             state.allow_discord_tools = allow_discord_tools
             state.diagnostics = diagnostics
+            state.model = turn.get("model") or turn_params.get("model")
+            state.effort = effort
+            state.prompt_attribution = dict(prompt_attribution or {})
             session.turn_id = str(turn_id)
             if schedule_mood:
                 self._schedule_mood_appraisal(
@@ -138,6 +147,7 @@ class CodexRequestMixin:
             except CodexTransientRestartError:
                 if attempt >= MAX_CODEX_MEMORY_TURN_RETRIES:
                     raise
+                self._record_usage_retry()
                 delay = min(2.0 * (2**attempt), 10.0)
                 logger.warning(
                     "Retrying a turn interrupted by Codex memory recovery "
@@ -399,6 +409,18 @@ class CodexRequestMixin:
                             type(exc).__name__,
                         )
             workspace = self._workspace_snapshot(session)
+            prompt_attribution = {
+                "system_instructions": estimated_tokens(BASE_PRIORS),
+                "identity_self_model": estimated_tokens(
+                    self._personality_instructions(session) or ""
+                ),
+                "memory_data": estimated_tokens(
+                    self._memory_instructions(allow_tools=allow_tools) or ""
+                ),
+                "tool_definitions": estimated_tokens(
+                    self._tool_instructions(allow_tools)
+                ),
+            }
             memory_context = None
             memory_retrieval_used = bool(
                 allow_tools and _MEMORY_RETRIEVAL_HINT_RE.search(user_prompt or prompt)
@@ -424,6 +446,7 @@ class CodexRequestMixin:
                 attention_transition=attention_transition,
                 self_model=self_model or {},
                 workspace=workspace,
+                prompt_attribution=prompt_attribution,
             )
             response = await self._run_turn_with_recovery(
                 session_key,
@@ -445,6 +468,7 @@ class CodexRequestMixin:
                 mood_input=mood_input,
                 recent_context=prompt if user_prompt else None,
                 summary_injected=summary_injected,
+                prompt_attribution=prompt_attribution,
                 diagnostics=diagnostics,
             )
             self._record_attention_response(session, response)

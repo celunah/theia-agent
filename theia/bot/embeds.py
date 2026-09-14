@@ -12,8 +12,12 @@ from typing import Any
 
 import discord
 
-from .support import _current_revision, _frontend_embed, _frontend_label
-from ..core import THEIA_VERSION, _truncate
+from .support import (
+    _current_revision,
+    _frontend_embed,
+    _frontend_label,
+)
+from ..core import THEIA_VERSION, _safe_intermediate_text, _truncate
 
 
 def _format_count(value: Any) -> str:
@@ -55,6 +59,58 @@ def _format_reset(value: Any) -> str:
     return "Unavailable"
 
 
+def _format_usage_tokens(value: Any, *, estimated: bool = False) -> str:
+    rendered = _format_count(value)
+    return (
+        f"~{rendered} (estimated)"
+        if estimated and rendered != "Unavailable"
+        else rendered
+    )
+
+
+def _usage_token_overview(
+    result: dict[str, Any], *, channel: Any | None = None, user: Any | None = None
+) -> str:
+    exact = result.get("exact") if isinstance(result, dict) else None
+    if not isinstance(exact, dict):
+        return "Usage tracked from Theia's conversation threads."
+    estimate = result.get("estimate")
+    estimate_total = estimate.get("total") if isinstance(estimate, dict) else None
+    estimate_text = (
+        f"~{estimate_total:,.6f} credits (estimate)"
+        if isinstance(estimate_total, (int, float))
+        and not isinstance(estimate_total, bool)
+        else "Unavailable"
+    )
+    day = result.get("date") or "the selected date"
+    model_lines: list[str] = []
+    by_model = estimate.get("byModel") if isinstance(estimate, dict) else None
+    if isinstance(by_model, dict) and len(by_model) > 1:
+        for model, value in list(by_model.items())[:4]:
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                model_lines.append(f"{model}: ~{value:,.6f} credits")
+    model_breakdown = "\n\n" + "\n".join(model_lines) if model_lines else ""
+
+    def label(target: str, default: str) -> str:
+        return _frontend_label(target, default, channel=channel, user=user)
+
+    return (
+        f"Usage statistics for {day}\n"
+        "────────────────────────────\n\n"
+        f"{label('label:usage_input_cache_miss', 'Input tokens (cache-miss)')}: "
+        f"{_format_count(exact.get('inputTokens'))}\n"
+        f"{label('label:usage_input_cache_hit', 'Input tokens (cache-hit)')}:   "
+        f"{_format_count(exact.get('cachedInputTokens'))}\n"
+        f"{label('label:usage_output_tokens', 'Output tokens')}:              "
+        f"{_format_count(exact.get('outputTokens'))}\n"
+        f"{label('label:usage_total_tokens', 'Total tokens')}:               "
+        f"{_format_count(exact.get('totalTokens'))}\n\n"
+        f"{label('label:usage_api_equivalent', 'API-equivalent value')}:       "
+        f"{estimate_text}{model_breakdown}\n\n"
+        "────────────────────────────"
+    )
+
+
 def _usage_embed(
     result: dict[str, Any],
     *,
@@ -83,7 +139,7 @@ def _usage_embed(
     embed = _frontend_embed(
         "command:usage",
         "Usage",
-        "Usage tracked from Theia's conversation threads.",
+        _usage_token_overview(result, channel=channel, user=user),
         channel=channel,
         user=user,
         context={
@@ -134,6 +190,132 @@ def _usage_embed(
             value=value,
             inline=True,
         )
+    rate_limits = result.get("rateLimits")
+    if isinstance(rate_limits, dict):
+        provider_credits = rate_limits.get("credits")
+        if (
+            isinstance(provider_credits, dict)
+            and provider_credits.get("balance") is not None
+        ):
+            embed.add_field(
+                name="Provider credits",
+                value=_format_count(provider_credits.get("balance")),
+                inline=True,
+            )
+        for key, label in (
+            ("primary", "Provider reset"),
+            ("secondary", "Provider weekly reset"),
+        ):
+            limit = rate_limits.get(key)
+            if not isinstance(limit, dict):
+                continue
+            used = _format_percent(limit.get("usedPercent"))
+            reset = _format_reset(limit.get("resetsAt"))
+            embed.add_field(name=label, value=f"{used}; resets {reset}", inline=True)
+    return embed
+
+
+def _usage_detail_value(value: Any, *, estimated: bool = False) -> str:
+    if value is None:
+        return "Unavailable"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return _format_usage_tokens(value, estimated=estimated)
+    return _safe_intermediate_text(str(value), 180) or "Unavailable"
+
+
+def _usage_details_embed(
+    result: dict[str, Any],
+    *,
+    channel: Any | None = None,
+    user: discord.abc.User | None = None,
+) -> discord.Embed:
+    """Render the owner-locked detailed view for one usage snapshot."""
+    detailed = result.get("detailed") if isinstance(result, dict) else None
+    detailed = detailed if isinstance(detailed, dict) else {}
+    categories = detailed.get("categories")
+    categories = categories if isinstance(categories, dict) else {}
+    fields = (
+        (
+            "usage_detail_system_instructions",
+            "System instructions",
+            "system_instructions",
+        ),
+        (
+            "usage_detail_identity_self_model",
+            "Identity / self-model",
+            "identity_self_model",
+        ),
+        ("usage_detail_memory_data", "Memory data", "memory_data"),
+        ("usage_detail_skill_data", "Skill data", "skill_data"),
+        ("usage_detail_user_history", "User history", "user_history"),
+        ("usage_detail_tool_definitions", "Tool definitions", "tool_definitions"),
+        ("usage_detail_tool_results", "Tool results", "tool_results"),
+        ("usage_detail_routing_context", "Routing context", "routing_context"),
+        ("usage_detail_subagent_usage", "Subagent usage", "subagentUsage"),
+    )
+    embed = _frontend_embed(
+        "command:usage",
+        "Detailed usage",
+        f"Usage statistics for {result.get('date') or 'the selected date'}. "
+        "Prompt categories marked with ~ are estimates.",
+        channel=channel,
+        user=user,
+    )
+    for target, default_label, key in fields:
+        raw = categories.get(key) if key in categories else detailed.get(key)
+        if isinstance(raw, dict):
+            value = raw.get("value")
+            estimated = bool(raw.get("estimated"))
+        else:
+            value = raw
+            estimated = False
+        embed.add_field(
+            name=_frontend_label(target, default_label, channel=channel, user=user),
+            value=_usage_detail_value(value, estimated=estimated),
+            inline=True,
+        )
+    embed.add_field(
+        name=_frontend_label(
+            "label:usage_detail_reasoning_tokens",
+            "Reasoning tokens",
+            channel=channel,
+            user=user,
+        ),
+        value=_usage_detail_value(detailed.get("reasoningTokens")),
+        inline=True,
+    )
+    retries = detailed.get("retries", 0)
+    failures = detailed.get("failedTurns", 0)
+    retry_text = (
+        f"{_format_count(retries)} retries / {_format_count(failures)} failed turns"
+    )
+    embed.add_field(
+        name=_frontend_label(
+            "label:usage_detail_retries_failed",
+            "Retries / failed turns",
+            channel=channel,
+            user=user,
+        ),
+        value=retry_text,
+        inline=True,
+    )
+    overhead = detailed.get("unattributedOverhead")
+    if isinstance(overhead, dict):
+        overhead_value = _usage_detail_value(
+            overhead.get("value"), estimated=bool(overhead.get("estimated"))
+        )
+    else:
+        overhead_value = "Unavailable"
+    embed.add_field(
+        name=_frontend_label(
+            "label:usage_detail_unattributed_overhead",
+            "Unattributed overhead",
+            channel=channel,
+            user=user,
+        ),
+        value=overhead_value,
+        inline=True,
+    )
     return embed
 
 

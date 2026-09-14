@@ -251,6 +251,10 @@ class CodexNotificationMixin:
                 state = self._turns.setdefault(str(turn_id), _TurnState())
                 state.completed = turn
                 state.thread_id = state.thread_id or params.get("threadId")
+                if isinstance(turn.get("model"), str):
+                    state.model = turn["model"]
+                if isinstance(turn.get("reasoningEffort"), str):
+                    state.effort = turn["reasoningEffort"]
                 for item in turn.get("items", []):
                     if (
                         isinstance(item, dict)
@@ -265,6 +269,10 @@ class CodexNotificationMixin:
                         state.final_text = item["text"]
                 if state.thread_id:
                     self._clear_pending_for_turn(state.thread_id, str(turn_id))
+                if not getattr(state, "usage_outcome_recorded", False):
+                    if turn.get("status") != "completed":
+                        self._record_failed_usage_turn(state, turn)
+                    state.usage_outcome_recorded = True
                 self._emit(state, "turn_completed", turn)
                 logger.debug(
                     "Codex turn notification completed (status=%s, items=%d)",

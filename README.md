@@ -13,7 +13,7 @@ services, or a configured Qwen Audio middleware endpoint.
 - Personality profiles can be selected for yourself, the current server, or
   everyone in Theia, with administrator protection for shared scopes.
 - Model selection, web search, approvals, and safe controls for agent actions.
-- Theia-only usage tracking, background work, daily recaps, and optional self-improvement.
+- Theia-only usage tracking with compact and detailed views, background work, daily recaps, and optional self-improvement.
 - A temporary, personality-aware mood, Rich Presence, and server-specific customization.
 - Conversational attention that preserves substantial topic changes and follows brief tangents naturally.
 - Optional automatic Codex CLI updates with staged verification and rollback.

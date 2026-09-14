@@ -63,6 +63,7 @@ from .policy import (
 )
 from .transport import CodexTransportMixin
 from .state import CodexStateMixin
+from .usage_state import CodexUsageStateMixin
 from .notifications import CodexNotificationMixin
 from .personality_state import CodexPersonalityStateMixin
 from .conversation import CodexConversationMixin
@@ -91,6 +92,7 @@ logger = _codex_logger()
 
 class CodexAppServer(  # pylint: disable=too-many-ancestors
     CodexStateMixin,
+    CodexUsageStateMixin,
     CodexPersonalityStateMixin,
     CodexRealtimeMixin,
     CodexConversationMixin,
@@ -401,7 +403,15 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
         self._discord_threads: set[int] = set()
         self._channel_checkpoints: dict[int, int] = {}
         self._usage_threads: dict[str, dict[str, int]] = {}
+        self._usage_thread_fields: dict[str, set[str]] = {}
         self._usage_daily: dict[str, int] = {}
+        self._usage_daily_breakdown: dict[str, dict[str, int]] = {}
+        self._usage_turns: dict[str, dict[str, Any]] = {}
+        self._usage_internal_turns: dict[str, dict[str, Any]] = {}
+        self._usage_failed_turns = 0
+        self._usage_failed_daily: dict[str, int] = {}
+        self._usage_retries = 0
+        self._usage_retries_daily: dict[str, int] = {}
         self._usage_tracked_since: float | None = None
         self._usage_longest_running_turn_sec = 0.0
         self._state_dirty = False

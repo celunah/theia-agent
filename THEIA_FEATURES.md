@@ -52,7 +52,11 @@ revision used to produce them.
 `/usage` privately displays token activity tracked from Theia's own conversation
 threads, including the total cumulative tokens across those threads. It does not
 display the authenticated account's lifetime Codex activity, and its longest-turn
-duration is rounded to whole seconds.
+duration is rounded to whole seconds. Its compact view shows the selected day's
+cache-miss, cache-hit, output, total, and API-equivalent estimate; `Show Details`
+reveals bounded prompt-category estimates and retry/failure counts in the same
+ephemeral response. Provider-reported token totals remain separate from local
+category estimates, and the estimate is not subscription billing.
 
 `/debug` is an administrator-only ephemeral view of sanitized Theia runtime
 state. It refreshes independently while the view is open, including during other

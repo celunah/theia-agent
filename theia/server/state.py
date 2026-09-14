@@ -11,7 +11,6 @@ import re
 import shutil
 import time
 from collections.abc import Awaitable, Callable, Iterable
-from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -37,6 +36,11 @@ from .policy import (
 )
 from .workspace import _restore_workspace_state, _serialize_workspace_state
 from .commitments import restore_commitments, serialize_commitments
+from .usage import (
+    PROMPT_CATEGORIES,
+    USAGE_TURN_LIMIT,
+    normalize_tokens,
+)
 from ..core import (
     DEFAULT_CODEX_MODEL,
     DEFAULT_MODE,
@@ -336,126 +340,6 @@ class CodexStateMixin:
         mood.updated_at = None
         mood.transient = False
 
-    @staticmethod
-    def _token_usage_breakdown(value: Any) -> dict[str, int]:
-        """Normalize one Codex per-thread token snapshot for local accounting."""
-        result = {key: 0 for key in _TOKEN_USAGE_KEYS}
-        if not isinstance(value, dict):
-            return result
-        for key in _TOKEN_USAGE_KEYS:
-            number = value.get(key)
-            if isinstance(number, bool) or not isinstance(number, int):
-                continue
-            result[key] = max(0, number)
-        return result
-
-    @staticmethod
-    def _is_internal_usage_session(session: _Session) -> bool:
-        """Exclude disposable assessment and background Codex sessions."""
-        return session.key.startswith("__")
-
-    def _usage_thread_is_owned(self, thread_id: str) -> bool:
-        if thread_id in self._usage_threads:
-            return True
-        return any(
-            session.thread_id == thread_id
-            and not self._is_internal_usage_session(session)
-            for session in self._sessions.values()
-        )
-
-    def _claim_usage_thread(self, thread_id: str) -> None:
-        """Mark a normal Theia thread as eligible for local usage accounting."""
-        if not thread_id or thread_id in self._usage_threads:
-            return
-        self._usage_threads[thread_id] = self._token_usage_breakdown(None)
-        if self._usage_tracked_since is None:
-            self._usage_tracked_since = time.time()
-
-    def _record_token_usage(self, params: dict[str, Any]) -> None:
-        """Record a cumulative per-thread snapshot without reading account totals."""
-        thread_id = params.get("threadId")
-        if not isinstance(thread_id, str) or not thread_id:
-            return
-        if not self._usage_thread_is_owned(thread_id):
-            return
-        token_usage = params.get("tokenUsage")
-        if not isinstance(token_usage, dict):
-            return
-        current = self._token_usage_breakdown(token_usage.get("total"))
-        previous = self._usage_threads.setdefault(
-            thread_id, self._token_usage_breakdown(None)
-        )
-        delta = max(0, current["totalTokens"] - previous["totalTokens"])
-        self._usage_threads[thread_id] = current
-        if delta:
-            day = time.strftime("%Y-%m-%d", time.gmtime())
-            self._usage_daily[day] = self._usage_daily.get(day, 0) + delta
-            self._usage_daily = dict(
-                sorted(self._usage_daily.items())[-_USAGE_DAILY_LIMIT:]
-            )
-        if self._usage_tracked_since is None:
-            self._usage_tracked_since = time.time()
-        self._persist_state()
-
-    def _record_usage_turn_duration(self, duration: float, session: _Session) -> None:
-        if self._is_internal_usage_session(session):
-            return
-        if math.isfinite(duration) and duration >= 0:
-            self._usage_longest_running_turn_sec = max(
-                self._usage_longest_running_turn_sec, duration
-            )
-            self._persist_state()
-
-    def theia_usage(self, *, now: float | None = None) -> dict[str, Any]:
-        """Return token activity measured only from Theia-owned threads."""
-        totals = self._token_usage_breakdown(None)
-        for snapshot in self._usage_threads.values():
-            for key in _TOKEN_USAGE_KEYS:
-                totals[key] += snapshot.get(key, 0)
-        daily = {
-            day: value
-            for day, value in self._usage_daily.items()
-            if isinstance(value, int) and value > 0
-        }
-        active_days = set(daily)
-        current_streak = 0
-        longest_streak = 0
-        if active_days:
-            today = datetime.fromtimestamp(
-                now if now is not None else time.time(), tz=timezone.utc
-            ).date()
-            cursor = today
-            while cursor.isoformat() in active_days:
-                current_streak += 1
-                cursor -= timedelta(days=1)
-            ordered_days: list[date] = []
-            for day in active_days:
-                try:
-                    ordered_days.append(date.fromisoformat(day))
-                except ValueError:
-                    continue
-            ordered_days.sort()
-            streak = 0
-            previous: date | None = None
-            for active_day in ordered_days:
-                if previous is not None and active_day == previous + timedelta(days=1):
-                    streak += 1
-                else:
-                    streak = 1
-                longest_streak = max(longest_streak, streak)
-                previous = active_day
-        return {
-            "scope": "theia",
-            "summary": {
-                "lifetimeTokens": totals["totalTokens"],
-                "totalCumulativeTokens": totals["totalTokens"],
-                "peakDailyTokens": max(daily.values(), default=0),
-                "currentStreakDays": current_streak,
-                "longestStreakDays": longest_streak,
-                "longestRunningTurnSec": self._usage_longest_running_turn_sec,
-            },
-        }
-
     def _load_state(self) -> None:
         try:
             raw = self._state_path.read_text(encoding="utf-8")
@@ -677,6 +561,21 @@ class CodexStateMixin:
                             self._usage_threads[thread_id] = (
                                 self._token_usage_breakdown(snapshot)
                             )
+                            self._usage_thread_fields[thread_id] = {
+                                key
+                                for key, value in self._usage_threads[thread_id].items()
+                                if value > 0
+                            }
+                thread_fields = usage.get("thread_fields")
+                if isinstance(thread_fields, dict):
+                    for thread_id, fields in thread_fields.items():
+                        if not isinstance(thread_id, str) or not isinstance(
+                            fields, list
+                        ):
+                            continue
+                        self._usage_thread_fields[thread_id] = {
+                            field for field in fields if field in _TOKEN_USAGE_KEYS
+                        }
                 usage_daily = usage.get("daily_tokens")
                 if isinstance(usage_daily, dict):
                     self._usage_daily = {
@@ -690,6 +589,125 @@ class CodexStateMixin:
                     self._usage_daily = dict(
                         sorted(self._usage_daily.items())[-_USAGE_DAILY_LIMIT:]
                     )
+                daily_breakdown = usage.get("daily_breakdown")
+                if isinstance(daily_breakdown, dict):
+                    restored_breakdown: dict[str, dict[str, int]] = {}
+                    for day, values in daily_breakdown.items():
+                        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(day)):
+                            continue
+                        normalized = normalize_tokens(values)
+                        if normalized:
+                            restored_breakdown[str(day)] = normalized
+                    self._usage_daily_breakdown = dict(
+                        sorted(restored_breakdown.items())[-_USAGE_DAILY_LIMIT:]
+                    )
+                usage_turns = usage.get("turns")
+                if isinstance(usage_turns, dict):
+                    restored_turns: dict[str, dict[str, Any]] = {}
+                    for key, record in usage_turns.items():
+                        if not isinstance(key, str) or not isinstance(record, dict):
+                            continue
+                        day = record.get("day")
+                        tokens = normalize_tokens(record.get("tokens"))
+                        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(day)):
+                            continue
+                        if not tokens:
+                            continue
+                        attribution = record.get("attribution")
+                        safe_attribution = {
+                            category: value
+                            for category in PROMPT_CATEGORIES
+                            if isinstance(attribution, dict)
+                            and isinstance(value := attribution.get(category), int)
+                            and not isinstance(value, bool)
+                            and value >= 0
+                        }
+                        recorded_at = record.get("recorded_at", 0.0)
+                        if not isinstance(recorded_at, (int, float)) or isinstance(
+                            recorded_at, bool
+                        ):
+                            recorded_at = 0.0
+                        restored_turns[key] = {
+                            "day": str(day),
+                            "recorded_at": max(0.0, float(recorded_at)),
+                            "model": str(record.get("model"))[:120]
+                            if record.get("model")
+                            else None,
+                            "effort": str(record.get("effort"))[:32]
+                            if record.get("effort")
+                            else None,
+                            "tokens": tokens,
+                            "attribution": safe_attribution,
+                        }
+                    self._usage_turns = dict(
+                        sorted(
+                            restored_turns.items(),
+                            key=lambda item: float(item[1].get("recorded_at", 0)),
+                        )[-USAGE_TURN_LIMIT:]
+                    )
+                internal_turns = usage.get("internal_turns")
+                if isinstance(internal_turns, dict):
+                    restored_internal: dict[str, dict[str, Any]] = {}
+                    for key, record in internal_turns.items():
+                        if not isinstance(key, str) or not isinstance(record, dict):
+                            continue
+                        day = record.get("day")
+                        tokens = normalize_tokens(record.get("tokens"))
+                        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(day)):
+                            continue
+                        if not tokens:
+                            continue
+                        restored_internal[key] = {
+                            "day": str(day),
+                            "recorded_at": max(
+                                0.0,
+                                float(record.get("recorded_at", 0))
+                                if isinstance(
+                                    record.get("recorded_at", 0), (int, float)
+                                )
+                                and not isinstance(record.get("recorded_at", 0), bool)
+                                else 0.0,
+                            ),
+                            "model": str(record.get("model"))[:120]
+                            if record.get("model")
+                            else None,
+                            "effort": str(record.get("effort"))[:32]
+                            if record.get("effort")
+                            else None,
+                            "tokens": tokens,
+                        }
+                    self._usage_internal_turns = dict(
+                        sorted(
+                            restored_internal.items(),
+                            key=lambda item: float(item[1].get("recorded_at", 0)),
+                        )[-USAGE_TURN_LIMIT:]
+                    )
+                failed_turns = usage.get("failed_turns")
+                if isinstance(failed_turns, int) and not isinstance(failed_turns, bool):
+                    self._usage_failed_turns = max(0, failed_turns)
+                failed_daily = usage.get("failed_daily")
+                if isinstance(failed_daily, dict):
+                    self._usage_failed_daily = {
+                        str(day): value
+                        for day, value in failed_daily.items()
+                        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(day))
+                        and isinstance(value, int)
+                        and not isinstance(value, bool)
+                        and value >= 0
+                    }
+                retries = usage.get("retries")
+                if isinstance(retries, int) and not isinstance(retries, bool):
+                    self._usage_retries = max(0, retries)
+                retries_daily = usage.get("retries_daily")
+                if isinstance(retries_daily, dict):
+                    self._usage_retries_daily = {
+                        str(day): value
+                        for day, value in retries_daily.items()
+                        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(day))
+                        and isinstance(value, int)
+                        and not isinstance(value, bool)
+                        and value >= 0
+                    }
                 tracked_since = usage.get("tracked_since")
                 if (
                     isinstance(tracked_since, (int, float))
@@ -805,7 +823,40 @@ class CodexStateMixin:
                     thread_id: dict(snapshot)
                     for thread_id, snapshot in self._usage_threads.items()
                 },
+                "thread_fields": {
+                    thread_id: sorted(fields)
+                    for thread_id, fields in self._usage_thread_fields.items()
+                },
                 "daily_tokens": dict(self._usage_daily),
+                "daily_breakdown": {
+                    day: dict(values)
+                    for day, values in self._usage_daily_breakdown.items()
+                },
+                "turns": {
+                    key: {
+                        "day": record.get("day"),
+                        "recorded_at": record.get("recorded_at"),
+                        "model": record.get("model"),
+                        "effort": record.get("effort"),
+                        "tokens": dict(record.get("tokens", {})),
+                        "attribution": dict(record.get("attribution", {})),
+                    }
+                    for key, record in self._usage_turns.items()
+                },
+                "internal_turns": {
+                    key: {
+                        "day": record.get("day"),
+                        "recorded_at": record.get("recorded_at"),
+                        "model": record.get("model"),
+                        "effort": record.get("effort"),
+                        "tokens": dict(record.get("tokens", {})),
+                    }
+                    for key, record in self._usage_internal_turns.items()
+                },
+                "failed_turns": self._usage_failed_turns,
+                "failed_daily": dict(self._usage_failed_daily),
+                "retries": self._usage_retries,
+                "retries_daily": dict(self._usage_retries_daily),
                 "tracked_since": self._usage_tracked_since,
                 "longest_running_turn_sec": self._usage_longest_running_turn_sec,
             },

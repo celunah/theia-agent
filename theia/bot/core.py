@@ -80,6 +80,7 @@ from .embeds import (
     _login_required_embed,  # noqa: F401 - compatibility export used by main.py
     _personality_summary_embed,
     _usage_embed,
+    _usage_details_embed,  # noqa: F401 - compatibility export
 )
 from .voice import (
     _handle_voice_transcript,
@@ -89,6 +90,7 @@ from .voice import (
 from .memory import handle_memory_command, memory_scope_autocomplete
 from .commitments import handle_commitments_command
 from .self_improvement import handle_self_improvement_command
+from .usage import _UsageView
 
 logger = _codex_logger()
 
@@ -175,12 +177,20 @@ async def codex_usage(interaction: discord.Interaction) -> None:
     await interaction.response.defer(ephemeral=True)
     try:
         result = await bot.codex.usage()
-        await interaction.followup.send(
+        view = _UsageView(
+            result,
+            owner_id=interaction.user.id,
+            channel=interaction.channel,
+            user=interaction.user,
+        )
+        message = await interaction.followup.send(
             embed=_usage_embed(
                 result, channel=interaction.channel, user=interaction.user
             ),
+            view=view,
             ephemeral=True,
         )
+        await bot.register_view(view, message)
     except (CodexAppServerError, OSError, discord.DiscordException) as exc:
         await _send_command_failure(interaction, "Usage unavailable", exc)
 

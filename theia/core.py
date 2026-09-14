@@ -802,6 +802,9 @@ class _TurnState:
         interaction_sender: Callable[..., Awaitable[Any]] | None = None,
         allow_discord_tools: bool = True,
         diagnostics: _TurnDiagnostics | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+        prompt_attribution: dict[str, int] | None = None,
     ) -> None:
         self.thread_id = thread_id
         self.session = session
@@ -816,6 +819,9 @@ class _TurnState:
         self.interaction_sender = interaction_sender
         self.allow_discord_tools = allow_discord_tools
         self.diagnostics = diagnostics
+        self.model = model
+        self.effort = effort
+        self.prompt_attribution = dict(prompt_attribution or {})
         # The dynamic Discord thread tool can be called more than once by a
         # model in the same turn. Keep the created channel here so a repeated
         # call is idempotent and cannot replace the real opening response with
@@ -824,6 +830,7 @@ class _TurnState:
         self.discord_thread_opening_sent = False
         self.final_text: str | None = None
         self.completed: dict[str, Any] | None = None
+        self.usage_outcome_recorded = False
         self.items: list[dict[str, Any]] = []
         self.agent_messages: dict[str, dict[str, Any]] = {}
         self.last_agent_message_id: str | None = None

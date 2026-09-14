@@ -673,9 +673,9 @@ class CodexLifecycleMixin:
         logger.info("Codex login flow started")
         return result
 
-    async def usage(self) -> dict[str, Any]:
+    async def usage(self, *, date_value: str | None = None) -> dict[str, Any]:
         """Return token activity recorded from Theia-owned conversation threads."""
-        return self.theia_usage()
+        return self.theia_usage(date_value=date_value)
 
     async def credits(self) -> dict[str, Any]:
         """Return account rate limits, or an empty result when login is required."""

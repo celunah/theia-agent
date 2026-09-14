@@ -22,6 +22,7 @@ from .support import (
     _PersistentViewStore,
 )
 from .embeds import _debug_embed
+from .usage import _UsageView
 from ..customization import FrontendCustomizationStore
 from ..delivery import (
     _ImageResultView,
@@ -131,6 +132,19 @@ class TheiaBot(commands.Bot):
         guild_id = state.get("guild_id")
         guild_id = guild_id if isinstance(guild_id, int) and guild_id > 0 else None
         customizer = self.customizations
+        if kind == "usage":
+            result = state.get("result")
+            if user_id is None or not isinstance(result, dict):
+                return None
+            view = _UsageView(
+                result,
+                owner_id=user_id,
+                token=token,
+                recovered=True,
+            )
+            view.showing_details = bool(state.get("showing_details"))
+            view.toggle_button.label = view._label()
+            return view
         if kind == "paginator":
             pages = state.get("pages")
             if (
