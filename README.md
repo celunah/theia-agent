@@ -27,10 +27,11 @@ threads, and voice.
 ```text
 /login  /about  /usage  /debug  /credits  /model  /mode
 /approve  /deny  /stop  /undo  /btw [prompt] [file]
-/skill  /personality  /memory [scope]  /customize  /restart
+/skill  /personality  /memory [scope]  /improvements  /customize  /restart
 ```
 
-`/debug`, `/restart`, and `/customize` are for administrators. `/memory` is a
+`/debug`, `/improvements`, `/restart`, and `/customize` are for administrators.
+`/memory` is a
 private, owner-locked explorer: users can inspect their own entries, server
 administrators can inspect the current server, and Super Admins can inspect
 broader scopes. The full capability inventory is in

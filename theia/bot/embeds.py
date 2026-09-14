@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 import discord
@@ -327,6 +328,110 @@ def _debug_embed(
             channel=channel,
             user=user,
         )
+    )
+    return embed
+
+
+def _audit_timestamp(value: Any) -> str:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or value <= 0
+    ):
+        return "Unavailable"
+    try:
+        return datetime.fromtimestamp(float(value), tz=timezone.utc).strftime(
+            "%Y-%m-%d %H:%M UTC"
+        )
+    except (OverflowError, OSError, ValueError):
+        return "Unavailable"
+
+
+def _self_improvement_history_embed(
+    records: list[dict[str, Any]],
+    *,
+    channel: Any | None = None,
+    user: discord.abc.User | None = None,
+) -> discord.Embed:
+    """Render safe recent self-improvement audit metadata."""
+    embed = _frontend_embed(
+        "command:improvements",
+        "Self-improvement history",
+        "Recent validated changes. Content and private review data are not shown.",
+        channel=channel,
+        user=user,
+    )
+    if not records:
+        embed.description = "No self-improvement changes have been recorded."
+        return embed
+    for record in records[:20]:
+        change_id = _truncate(record.get("id") or "unknown", 64)
+        status = _truncate(record.get("status") or "unknown", 20)
+        category = _truncate(record.get("category") or "unknown", 32)
+        target = _truncate(record.get("target") or "unknown", 100)
+        reason = _truncate(record.get("reason") or "No reason recorded.", 180)
+        embed.add_field(
+            name=f"{change_id} · {status}",
+            value=(
+                f"Category: {category}\n"
+                f"Target: {target}\n"
+                f"When: {_audit_timestamp(record.get('timestamp'))}\n"
+                f"Reason: {reason}"
+            ),
+            inline=False,
+        )
+    return embed
+
+
+def _self_improvement_preview_embed(
+    record: dict[str, Any],
+    *,
+    channel: Any | None = None,
+    user: discord.abc.User | None = None,
+) -> discord.Embed:
+    """Render one safe self-improvement change preview."""
+    embed = _frontend_embed(
+        "command:improvements",
+        "Self-improvement change preview",
+        "Only bounded audit metadata is shown; review prompts and file contents are private.",
+        channel=channel,
+        user=user,
+    )
+    embed.add_field(
+        name="Change ID", value=_truncate(record.get("id"), 64), inline=True
+    )
+    embed.add_field(
+        name="Status", value=_truncate(record.get("status"), 20), inline=True
+    )
+    embed.add_field(
+        name="Category", value=_truncate(record.get("category"), 32), inline=True
+    )
+    embed.add_field(
+        name="Target", value=_truncate(record.get("target"), 100), inline=True
+    )
+    embed.add_field(
+        name="When", value=_audit_timestamp(record.get("timestamp")), inline=True
+    )
+    embed.add_field(
+        name="Revert available",
+        value="Yes" if record.get("revertible") else "No",
+        inline=True,
+    )
+    embed.add_field(
+        name="Previous content hash",
+        value=_truncate(record.get("previous_content_hash") or "none", 64),
+        inline=False,
+    )
+    embed.add_field(
+        name="New content hash",
+        value=_truncate(record.get("new_content_hash") or "none", 64),
+        inline=False,
+    )
+    embed.add_field(
+        name="Reason",
+        value=_truncate(record.get("reason") or "No reason recorded.", 180),
+        inline=False,
     )
     return embed
 

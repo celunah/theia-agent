@@ -524,6 +524,14 @@ class CodexStateMixin:
                     for guild_id in authenticated_guilds
                     if isinstance(guild_id, int) and not isinstance(guild_id, bool)
                 )
+            improvement_history = data.get("self_improvement_history")
+            if isinstance(improvement_history, list):
+                restored_history = self._restore_self_improvement_history(
+                    improvement_history
+                )
+                self._self_improvement_history = restored_history
+                if len(restored_history) != len(improvement_history):
+                    self._state_needs_cleanup = True
             sessions = data.get("sessions")
             if isinstance(sessions, dict):
                 state_now = time.time()
@@ -732,6 +740,7 @@ class CodexStateMixin:
             "personality_scopes": {
                 key: dict(record) for key, record in self._personality_scopes.items()
             },
+            "self_improvement_history": self._serialize_self_improvement_history(),
             "sessions": {
                 key: {
                     "mode": session.mode,

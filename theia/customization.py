@@ -39,6 +39,7 @@ COMMAND_TARGETS = (
     "customize",
     "about",
     "debug",
+    "improvements",
 )
 
 LABEL_TARGETS = (

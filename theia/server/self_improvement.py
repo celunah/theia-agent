@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import math
 import re
@@ -19,6 +20,10 @@ from .policy import (
     _SELF_IMPROVEMENT_MAX_TOTAL_BYTES,
     _SELF_IMPROVEMENT_MAX_UPDATE_BYTES,
     _SELF_IMPROVEMENT_MAX_UPDATES,
+    _SELF_IMPROVEMENT_AUDIT_ID_RE,
+    _SELF_IMPROVEMENT_AUDIT_REASON_MAX_CHARACTERS,
+    _SELF_IMPROVEMENT_HISTORY_LIMIT,
+    _SELF_IMPROVEMENT_HISTORY_DISPLAY_LIMIT,
     _SELF_IMPROVEMENT_OUTPUT_SCHEMA,
     _SELF_IMPROVEMENT_SKILL_NAME_RE,
     _SELF_IMPROVEMENT_SUMMARY_ITEM_MAX_CHARACTERS,
@@ -27,6 +32,7 @@ from .policy import (
 from ..core import (
     _TurnState,
     _Session,
+    CodexAppServerError,
     _codex_logger,
     _path_is_under,
     _safe_intermediate_text,
@@ -295,6 +301,464 @@ class CodexSelfImprovementMixin:
         ):
             return None
         return profile.path
+
+    @staticmethod
+    def _self_improvement_content_hash(value: str) -> str:
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _self_improvement_audit_id(*, revert: bool = False) -> str:
+        suffix = "-revert" if revert else ""
+        return f"imp-{time.time_ns():x}{suffix}"
+
+    @staticmethod
+    def _safe_audit_label(value: Any, fallback: str) -> str:
+        text = str(value or "").strip()
+        if not text or any(ord(character) < 32 for character in text):
+            return fallback
+        text = re.sub(r"[^A-Za-z0-9_.: -]", "", text)
+        return _truncate(text, 100) or fallback
+
+    @classmethod
+    def _safe_audit_reason(cls, value: Any) -> str:
+        return _truncate(
+            cls._safe_audit_label(value, "No reason recorded."),
+            _SELF_IMPROVEMENT_AUDIT_REASON_MAX_CHARACTERS,
+        )
+
+    @classmethod
+    def _self_improvement_target_label(
+        cls,
+        kind: str,
+        path: str | None,
+        *,
+        personality_name: str | None = None,
+    ) -> str:
+        if kind == "memory":
+            return "memory:MEMORY.md"
+        if kind == "user_profile":
+            return "user_profile:USER.md"
+        if kind == "skill":
+            name = Path(path).parts[0] if isinstance(path, str) else "invalid"
+            return f"skill:{cls._safe_audit_label(name, 'invalid')}"
+        if kind == "personality":
+            name = personality_name or "active"
+            return f"personality:{cls._safe_audit_label(name, 'active')}"
+        return "unrecognized"
+
+    @classmethod
+    def _restore_self_improvement_history(cls, value: Any) -> list[dict[str, Any]]:
+        """Restore only safe audit metadata from the private state file."""
+        if not isinstance(value, list):
+            return []
+        restored: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        hash_re = re.compile(r"^[0-9a-f]{64}$")
+        categories = {"memory", "user_profile", "skill", "personality"}
+        statuses = {"applied", "rejected", "reverted"}
+        for item in value[-_SELF_IMPROVEMENT_HISTORY_LIMIT:]:
+            if not isinstance(item, dict):
+                continue
+            record_id = item.get("id")
+            category = item.get("category")
+            target = item.get("target")
+            timestamp = item.get("timestamp")
+            previous_hash = item.get("previous_content_hash")
+            new_hash = item.get("new_content_hash")
+            status = item.get("status")
+            reason = item.get("reason")
+            if (
+                not isinstance(record_id, str)
+                or not _SELF_IMPROVEMENT_AUDIT_ID_RE.fullmatch(record_id)
+                or record_id in seen
+                or category not in categories
+                or not isinstance(target, str)
+                or not isinstance(timestamp, (int, float))
+                or isinstance(timestamp, bool)
+                or not math.isfinite(float(timestamp))
+                or timestamp <= 0
+                or not isinstance(previous_hash, str)
+                or (previous_hash and not hash_re.fullmatch(previous_hash))
+                or not isinstance(new_hash, str)
+                or (new_hash and not hash_re.fullmatch(new_hash))
+                or status not in statuses
+                or not isinstance(reason, str)
+            ):
+                continue
+            safe_target = cls._safe_audit_label(target, "unknown")
+            safe_reason = cls._safe_audit_reason(reason)
+            valid_target = (
+                (category == "memory" and target == "memory:MEMORY.md")
+                or (category == "user_profile" and target == "user_profile:USER.md")
+                or (
+                    category == "skill"
+                    and bool(
+                        re.fullmatch(r"skill:[A-Za-z0-9][A-Za-z0-9._-]{0,79}", target)
+                    )
+                )
+                or (
+                    category == "personality"
+                    and bool(
+                        re.fullmatch(
+                            r"personality:[A-Za-z0-9][A-Za-z0-9_.: -]{0,99}", target
+                        )
+                    )
+                )
+            )
+            if (
+                not valid_target
+                or safe_target != target
+                or safe_reason == "No reason recorded."
+            ):
+                continue
+            record: dict[str, Any] = {
+                "id": record_id,
+                "category": category,
+                "target": safe_target,
+                "timestamp": float(timestamp),
+                "previous_content_hash": previous_hash,
+                "new_content_hash": new_hash,
+                "status": status,
+                "reason": safe_reason,
+            }
+            target_name = item.get("target_name")
+            if (
+                category == "personality"
+                and isinstance(target_name, str)
+                and target_name
+                and len(target_name) <= 80
+                and not any(ord(character) < 32 for character in target_name)
+                and "/" not in target_name
+                and "\\" not in target_name
+            ):
+                record["target_name"] = target_name
+            related_id = item.get("related_update_id")
+            if isinstance(related_id, str) and _SELF_IMPROVEMENT_AUDIT_ID_RE.fullmatch(
+                related_id
+            ):
+                record["related_update_id"] = related_id
+            restored.append(record)
+            seen.add(record_id)
+        return restored
+
+    def _serialize_self_improvement_history(self) -> list[dict[str, Any]]:
+        return [
+            dict(record)
+            for record in self._self_improvement_history[
+                -_SELF_IMPROVEMENT_HISTORY_LIMIT:
+            ]
+        ]
+
+    def _append_self_improvement_audit(
+        self,
+        *,
+        category: str,
+        target: str,
+        previous_hash: str = "",
+        new_hash: str = "",
+        status: str,
+        reason: str,
+        target_name: str | None = None,
+        related_update_id: str | None = None,
+        record_id: str | None = None,
+    ) -> dict[str, Any]:
+        record: dict[str, Any] = {
+            "id": record_id or self._self_improvement_audit_id(),
+            "category": category,
+            "target": self._safe_audit_label(target, "unknown"),
+            "timestamp": time.time(),
+            "previous_content_hash": previous_hash,
+            "new_content_hash": new_hash,
+            "status": status,
+            "reason": self._safe_audit_reason(reason),
+        }
+        if target_name:
+            record["target_name"] = target_name
+        if related_update_id:
+            record["related_update_id"] = related_update_id
+        self._self_improvement_history.append(record)
+        self._self_improvement_history = self._self_improvement_history[
+            -_SELF_IMPROVEMENT_HISTORY_LIMIT:
+        ]
+        return record
+
+    def _reverted_self_improvement_ids(self) -> set[str]:
+        return {
+            str(record["related_update_id"])
+            for record in self._self_improvement_history
+            if record.get("status") == "reverted"
+            and isinstance(record.get("related_update_id"), str)
+        }
+
+    def _public_self_improvement_record(
+        self, record: dict[str, Any], *, reverted_ids: set[str] | None = None
+    ) -> dict[str, Any]:
+        reverted_ids = (
+            self._reverted_self_improvement_ids()
+            if reverted_ids is None
+            else reverted_ids
+        )
+        status = (
+            "reverted"
+            if record["id"] in reverted_ids and record["status"] == "applied"
+            else record["status"]
+        )
+        return {
+            "id": record["id"],
+            "category": record["category"],
+            "target": record["target"],
+            "timestamp": record["timestamp"],
+            "previous_content_hash": record["previous_content_hash"],
+            "new_content_hash": record["new_content_hash"],
+            "status": status,
+            "reason": record["reason"],
+        }
+
+    def _self_improvement_record(self, change_id: str) -> dict[str, Any]:
+        if not isinstance(
+            change_id, str
+        ) or not _SELF_IMPROVEMENT_AUDIT_ID_RE.fullmatch(change_id.strip()):
+            raise CodexAppServerError("That self-improvement change ID is invalid.")
+        for record in reversed(self._self_improvement_history):
+            if record["id"] == change_id.strip():
+                return record
+        raise CodexAppServerError("That self-improvement change was not found.")
+
+    def self_improvement_history(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Return recent safe self-improvement audit metadata."""
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            limit = _SELF_IMPROVEMENT_HISTORY_DISPLAY_LIMIT
+        limit = max(1, min(limit, _SELF_IMPROVEMENT_HISTORY_DISPLAY_LIMIT))
+        reverted_ids = self._reverted_self_improvement_ids()
+        return [
+            self._public_self_improvement_record(record, reverted_ids=reverted_ids)
+            for record in reversed(self._self_improvement_history[-limit:])
+        ]
+
+    def self_improvement_preview(self, change_id: str) -> dict[str, Any]:
+        """Return one safe audit record and whether it can be reverted."""
+        record = self._self_improvement_record(change_id)
+        public = self._public_self_improvement_record(record)
+        public["revertible"] = False
+        if record["category"] == "personality" and public["status"] == "applied":
+            target_name = record.get("target_name")
+            if isinstance(target_name, str):
+                try:
+                    profile = self._personalities.resolve(target_name)
+                except PersonalityError:
+                    profile = None
+                public["revertible"] = bool(
+                    profile is not None
+                    and _path_is_under(profile.path, (self._personalities.root,))
+                    and self._self_improvement_revision_path(record["id"]).is_file()
+                )
+        return public
+
+    async def revert_self_improvement(
+        self, change_id: str, *, super_admin: bool = False
+    ) -> dict[str, Any]:
+        """Revert one personality change only after a safe hash check."""
+        if not super_admin:
+            raise CodexAppServerError(
+                "Only a Theia Super Admin can revert self-improvement changes."
+            )
+        async with self._self_improvement_lock:
+            record = self._self_improvement_record(change_id)
+            public = self._public_self_improvement_record(record)
+            if record["category"] != "personality":
+                raise CodexAppServerError(
+                    "Only personality changes have recoverable revisions."
+                )
+            if public["status"] != "applied":
+                raise CodexAppServerError(
+                    "That personality change has already been reverted or rejected."
+                )
+            target_name = record.get("target_name")
+            if not isinstance(target_name, str):
+                raise CodexAppServerError(
+                    "That personality revision is no longer recoverable."
+                )
+            try:
+                profile = self._personalities.resolve(target_name)
+            except PersonalityError as exc:
+                raise CodexAppServerError(
+                    "That personality revision is no longer available."
+                ) from exc
+            if profile is None or not _path_is_under(
+                profile.path, (self._personalities.root,)
+            ):
+                raise CodexAppServerError(
+                    "That personality revision is no longer available."
+                )
+            revision = self._self_improvement_revision_path(record["id"])
+            previous = self._read_self_improvement_source(revision)
+            current = self._read_self_improvement_source(profile.path)
+            if previous is None or current is None:
+                raise CodexAppServerError(
+                    "The personality revision could not be read safely."
+                )
+            if (
+                self._self_improvement_content_hash(previous)
+                != record["previous_content_hash"]
+                or self._self_improvement_content_hash(current)
+                != record["new_content_hash"]
+            ):
+                raise CodexAppServerError(
+                    "The personality changed after this update; nothing was reverted."
+                )
+            if self._state_dirty:
+                raise CodexAppServerError(
+                    "Theia state is not safely persisted; nothing was reverted."
+                )
+            if not self._atomic_self_improvement_write(profile.path, previous):
+                raise CodexAppServerError(
+                    "The personality revision could not be restored safely."
+                )
+            revert_id = self._self_improvement_audit_id(revert=True)
+            revert_record = self._append_self_improvement_audit(
+                category="personality",
+                target=record["target"],
+                previous_hash=record["new_content_hash"],
+                new_hash=record["previous_content_hash"],
+                status="reverted",
+                reason="Reverted by an authorized Super Admin.",
+                target_name=target_name,
+                related_update_id=record["id"],
+                record_id=revert_id,
+            )
+            try:
+                self._persist_state()
+            except Exception as exc:  # noqa: BLE001 - revert must roll back safely
+                persisted = False
+                logger.warning(
+                    "Self-improvement revert persistence failed (error=%s)",
+                    type(exc).__name__,
+                )
+            else:
+                persisted = not self._state_dirty
+            if not persisted:
+                restored = self._atomic_self_improvement_write(profile.path, current)
+                if self._self_improvement_history[-1] is revert_record:
+                    self._self_improvement_history.pop()
+                if not restored:
+                    logger.error("Could not restore personality after failed revert")
+                raise CodexAppServerError(
+                    "The personality revert was not persisted and was rolled back."
+                )
+            self._prune_self_improvement_revisions()
+            return self._public_self_improvement_record(revert_record)
+
+    def _self_improvement_revision_path(self, record_id: str) -> Path:
+        return self._codex_home / "self-improvement-revisions" / f"{record_id}.bak"
+
+    def _prune_self_improvement_revisions(self) -> None:
+        """Keep only recoverable snapshots for retained, unapplied reversions."""
+        retained = {
+            record["id"]
+            for record in self._self_improvement_history
+            if record.get("category") == "personality"
+            and record.get("status") == "applied"
+            and record["id"] not in self._reverted_self_improvement_ids()
+        }
+        root = self._codex_home / "self-improvement-revisions"
+        try:
+            entries = tuple(root.iterdir())
+        except OSError:
+            return
+        for entry in entries:
+            if entry.suffix != ".bak" or entry.stem in retained:
+                continue
+            if entry.is_symlink() or not entry.is_file():
+                continue
+            with contextlib.suppress(OSError):
+                entry.unlink()
+
+    @staticmethod
+    def _atomic_self_improvement_write(path: Path, text: str) -> bool:
+        temporary: Path | None = None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.parent.chmod(0o700)
+            temporary = path.with_name(f".{path.name}.{time.time_ns()}.tmp")
+            temporary.write_text(text, encoding="utf-8")
+            temporary.chmod(0o600)
+            temporary.replace(path)
+            return True
+        except (OSError, UnicodeDecodeError):
+            return False
+        finally:
+            if temporary is not None:
+                with contextlib.suppress(OSError):
+                    temporary.unlink()
+
+    @staticmethod
+    def _read_self_improvement_source(path: Path) -> str | None:
+        try:
+            if path.is_symlink():
+                return None
+            if not path.exists():
+                return ""
+            if (
+                not path.is_file()
+                or path.stat().st_size > _SELF_IMPROVEMENT_MAX_FILE_BYTES
+            ):
+                return None
+            return path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
+
+    @classmethod
+    def _appended_self_improvement_content(
+        cls, existing: str, content: str
+    ) -> str | None:
+        if content in existing:
+            return None
+        updated = (
+            f"{content}\n"
+            if not existing.strip()
+            else existing.rstrip() + "\n\n" + content + "\n"
+        )
+        if len(updated.encode("utf-8")) > _SELF_IMPROVEMENT_MAX_FILE_BYTES:
+            return None
+        return updated
+
+    def _append_self_improvement_version(
+        self, path: Path, content: str
+    ) -> tuple[str, str] | None:
+        existing = self._read_self_improvement_source(path)
+        if (
+            existing is None
+            or len(existing.encode("utf-8")) > _SELF_IMPROVEMENT_MAX_FILE_BYTES
+        ):
+            return None
+        updated = self._appended_self_improvement_content(existing, content)
+        if updated is None or not self._atomic_self_improvement_write(path, updated):
+            return None
+        return (
+            self._self_improvement_content_hash(existing),
+            self._self_improvement_content_hash(updated),
+        )
+
+    def _apply_personality_version(
+        self, path: Path, content: str, record_id: str
+    ) -> tuple[str, str] | None:
+        existing = self._read_self_improvement_source(path)
+        if existing is None:
+            return None
+        updated = self._appended_self_improvement_content(existing, content)
+        if updated is None:
+            return None
+        revision = self._self_improvement_revision_path(record_id)
+        if not self._atomic_self_improvement_write(revision, existing):
+            return None
+        if self._atomic_self_improvement_write(path, updated):
+            return (
+                self._self_improvement_content_hash(existing),
+                self._self_improvement_content_hash(updated),
+            )
+        with contextlib.suppress(OSError):
+            revision.unlink()
+        return None
 
     @staticmethod
     def _bound_self_improvement_summary(value: str) -> str | None:
@@ -588,35 +1052,16 @@ class CodexSelfImprovementMixin:
     @staticmethod
     def _append_self_improvement(path: Path, content: str) -> bool:
         """Atomically append one bounded review suggestion to a validated file."""
-        temporary: Path | None = None
-        try:
-            if path.is_symlink():
-                return False
-            existing = path.read_text(encoding="utf-8") if path.exists() else ""
-            if len(existing.encode("utf-8")) > _SELF_IMPROVEMENT_MAX_FILE_BYTES:
-                return False
-            if content in existing:
-                return False
-            updated = (
-                f"{content}\n"
-                if not existing.strip()
-                else existing.rstrip() + "\n\n" + content + "\n"
-            )
-            if len(updated.encode("utf-8")) > _SELF_IMPROVEMENT_MAX_FILE_BYTES:
-                return False
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.parent.chmod(0o700)
-            temporary = path.with_name(f".{path.name}.{time.time_ns()}.tmp")
-            temporary.write_text(updated, encoding="utf-8")
-            temporary.chmod(0o600)
-            temporary.replace(path)
-            return True
-        except (OSError, UnicodeDecodeError):
+        existing = CodexSelfImprovementMixin._read_self_improvement_source(path)
+        if existing is None:
             return False
-        finally:
-            if temporary is not None:
-                with contextlib.suppress(OSError):
-                    temporary.unlink()
+        updated = CodexSelfImprovementMixin._appended_self_improvement_content(
+            existing, content
+        )
+        return (
+            updated is not None
+            and CodexSelfImprovementMixin._atomic_self_improvement_write(path, updated)
+        )
 
     def _apply_self_improvement_updates(
         self,
@@ -634,15 +1079,64 @@ class CodexSelfImprovementMixin:
         skills_changed = False
         seen: set[tuple[str, str]] = set()
         for update in updates:
-            key = (update["kind"], update["path"])
+            kind = update.get("kind")
+            relative = update.get("path")
+            if kind not in {"memory", "user_profile", "skill", "personality"}:
+                continue
+            if not isinstance(relative, str):
+                self._append_self_improvement_audit(
+                    category=kind,
+                    target=self._self_improvement_target_label(kind, None),
+                    status="rejected",
+                    reason="Malformed review update.",
+                )
+                continue
+            key = (kind, relative)
             if key in seen or applied >= _SELF_IMPROVEMENT_MAX_UPDATES:
                 continue
             seen.add(key)
-            content = self._self_improvement_content(update["content"])
+            personality_name = None
+            if kind == "personality" and personality_path is not None:
+                personality_name = next(
+                    (
+                        profile.name
+                        for profile in self._personalities.profiles()
+                        if profile.path == personality_path
+                    ),
+                    None,
+                )
+            target = self._self_improvement_target_label(
+                kind, relative, personality_name=personality_name
+            )
+            raw_content = update.get("content")
+            if not isinstance(raw_content, str):
+                self._append_self_improvement_audit(
+                    category=kind,
+                    target=target,
+                    status="rejected",
+                    reason="Malformed review update.",
+                    target_name=personality_name,
+                )
+                continue
+            content = self._self_improvement_content(raw_content)
             if content is None:
+                self._append_self_improvement_audit(
+                    category=kind,
+                    target=target,
+                    status="rejected",
+                    reason="Rejected during content safety validation.",
+                    target_name=personality_name,
+                )
                 continue
             content_bytes = len(content.encode("utf-8"))
             if total_bytes + content_bytes > _SELF_IMPROVEMENT_MAX_TOTAL_BYTES:
+                self._append_self_improvement_audit(
+                    category=kind,
+                    target=target,
+                    status="rejected",
+                    reason="Rejected because the review size limit was reached.",
+                    target_name=personality_name,
+                )
                 break
             path = self._self_improvement_target_path(
                 update,
@@ -650,20 +1144,64 @@ class CodexSelfImprovementMixin:
                 skill_root=skill_root,
                 personality_path=personality_path,
             )
-            created = not path.exists() if path is not None else False
-            if path is None or not self._append_self_improvement(path, content):
+            if path is None:
+                self._append_self_improvement_audit(
+                    category=kind,
+                    target=target,
+                    status="rejected",
+                    reason="Rejected during target validation.",
+                    target_name=personality_name,
+                )
+                continue
+            created = not path.exists()
+            record_id = self._self_improvement_audit_id()
+            versions = (
+                self._apply_personality_version(path, content, record_id)
+                if kind == "personality"
+                else self._append_self_improvement_version(path, content)
+            )
+            if versions is None:
+                reason = (
+                    "Rejected because the personality revision was not saved safely."
+                    if kind == "personality"
+                    else "Rejected because the target could not be updated safely."
+                )
+                self._append_self_improvement_audit(
+                    category=kind,
+                    target=target,
+                    status="rejected",
+                    reason=reason,
+                    target_name=personality_name,
+                )
                 continue
             applied += 1
             total_bytes += content_bytes
-            skills_changed = skills_changed or update["kind"] == "skill"
-            target = (
+            skills_changed = skills_changed or kind == "skill"
+            display_target = (
                 "Memory"
-                if update["kind"] in {"memory", "user_profile"}
+                if kind in {"memory", "user_profile"}
                 else "Skill"
-                if update["kind"] == "skill"
+                if kind == "skill"
                 else "Personality"
             )
-            status = f"{target} {'created' if created else 'updated'}"
+            status = f"{display_target} {'created' if created else 'updated'}"
+            self._self_improvement_history.append(
+                {
+                    "id": record_id,
+                    "category": kind,
+                    "target": target,
+                    "timestamp": time.time(),
+                    "previous_content_hash": versions[0],
+                    "new_content_hash": versions[1],
+                    "status": "applied",
+                    "reason": "Validated durable update applied atomically.",
+                    **({"target_name": personality_name} if personality_name else {}),
+                }
+            )
+            self._self_improvement_history = self._self_improvement_history[
+                -_SELF_IMPROVEMENT_HISTORY_LIMIT:
+            ]
+            self._prune_self_improvement_revisions()
             if statuses is not None:
                 statuses.append(status)
             if summaries is not None:

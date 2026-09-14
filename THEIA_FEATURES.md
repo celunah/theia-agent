@@ -12,6 +12,7 @@ The current commands are:
 - `/about`
 - `/usage`
 - `/debug`
+- `/improvements [action] [change_id]`
 - `/credits`
 - `/approve`
 - `/deny`
@@ -59,6 +60,13 @@ paths.
 It also shows bounded latest-turn worker timings, timeout/cancellation/failure
 counts, and an approximate internal-request count; background reviews never
 hold up the user response.
+
+`/improvements` is an administrator-only ephemeral audit view of recent
+self-improvement changes. Administrators can list and preview bounded change
+metadata; only Super Admins can revert personality changes. Reverts restore a
+private recoverable version only when the personality has not changed since the
+audited update. Memory and skill changes remain append-only and are not
+reversible through this control.
 
 `/memory` is a private, owner-locked paginated view of the selected character's
 configured memory database. Users can choose `me`, server administrators can

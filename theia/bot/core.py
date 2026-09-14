@@ -87,6 +87,7 @@ from .voice import (
     _voice_speak_callback,
 )
 from .memory import handle_memory_command, memory_scope_autocomplete
+from .self_improvement import handle_self_improvement_command
 
 logger = _codex_logger()
 
@@ -291,6 +292,33 @@ async def codex_debug(interaction: discord.Interaction) -> None:
             channel=interaction.channel,
             user=interaction.user,
         )
+
+
+@_user_installable_command
+@bot.tree.command(name="improvements", description="Inspect self-improvement changes")
+@app_commands.describe(
+    action="List, preview, or revert a self-improvement change",
+    change_id="The change ID shown by the list action",
+)
+@app_commands.choices(
+    action=[
+        app_commands.Choice(name="list", value="list"),
+        app_commands.Choice(name="preview", value="preview"),
+        app_commands.Choice(name="revert", value="revert"),
+    ]
+)
+async def codex_improvements(
+    interaction: discord.Interaction,
+    action: app_commands.Choice[str] | None = None,
+    change_id: str | None = None,
+) -> None:
+    """Inspect or revert bounded self-improvement audit records."""
+    await handle_self_improvement_command(
+        bot,
+        interaction,
+        action.value if isinstance(action, app_commands.Choice) else None,
+        change_id,
+    )
 
 
 @_user_installable_command

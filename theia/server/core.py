@@ -188,6 +188,7 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
             _env_float(NIGHTLY_RECAP_TIMEOUT_ENV, DEFAULT_NIGHTLY_RECAP_TIMEOUT),
         )
         self._self_improvement_lock = asyncio.Lock()
+        self._self_improvement_history: list[dict[str, Any]] = []
         configured_approval_level = (
             os.getenv(APPROVAL_LEVEL_ENV, DEFAULT_APPROVAL_LEVEL).strip().casefold()
         )

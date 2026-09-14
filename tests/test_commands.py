@@ -235,6 +235,7 @@ class CommandSurfaceTests(unittest.TestCase):
                 "restart",
                 "customize",
                 "debug",
+                "improvements",
             },
         )
         self.assertEqual(main.bot.command_prefix, ())
