@@ -21,6 +21,15 @@ from ..core import (
     _safe_intermediate_text,
     _truncate,
 )
+from .attention_recurrence import (
+    MINIMUM_REPETITION_CONFIDENCE,
+    RECURRENCE_RELATIONSHIP_TYPES,
+    RECURRENCE_SIGNATURE_LIMIT,
+    context_material,
+    has_meaningful_overlap,
+    is_substantial_message,
+    same_bounded_text,
+)
 from .policy import (
     ATTENTION_CONTEXT_LIMIT,
     ATTENTION_EXCHANGE_MAX_CHARACTERS,
@@ -47,8 +56,6 @@ if TYPE_CHECKING:
 
 _CONTEXT_STATUSES = frozenset({"active", "parked", "closed"})
 _MINIMUM_ACKNOWLEDGEMENT_CONFIDENCE = 0.55
-_MINIMUM_REPETITION_CONFIDENCE = 0.70
-_RECURRENCE_SIGNATURE_LIMIT = 32
 _PRESERVE_CUE_RE = re.compile(
     r"\b(?:remember|save|keep|park|revisit|come back|return to|pick this up)\b"
     r"(?:[^.?!\n]{0,80})\b(?:this|that|thread|topic|later|after)\b",
@@ -319,34 +326,89 @@ class CodexAttentionMixin:
         relation: str,
         current: _ConversationContext | None,
         result: dict[str, Any],
+        text: str,
+        matched_context_title: str | None = None,
+        matched_context_material: str | None = None,
     ) -> dict[str, Any] | None:
-        """Create one bounded reminder when a substantive past topic recurs."""
-        if relation in {"RETURN", "NESTED_RETURN", "END"}:
+        """Return recurrence only after validating the classifier candidate."""
+        if current is None:
             return None
-        if not result.get("topic_repeated") or current is None:
+        candidate = result.get("recurrence")
+        if not isinstance(candidate, dict):
             return None
-        confidence = result.get("confidence")
+        matched_id = _bound_context_id(candidate.get("matched_context_id"))
+        matched = state.contexts.get(matched_id or "")
+        if matched is None or not matched.recent_exchanges:
+            return None
+        matched_title = (
+            matched_context_title if matched_id == current.context_id else matched.title
+        )
+        matched_material = (
+            matched_context_material
+            if matched_id == current.context_id
+            else context_material(matched)
+        )
+        if not matched_title or not matched_material:
+            return None
+        if not same_bounded_text(
+            candidate.get("matched_topic_title"),
+            matched_title,
+            ATTENTION_TITLE_MAX_CHARACTERS,
+        ) or not same_bounded_text(
+            candidate.get("current_topic_title"),
+            current.title,
+            ATTENTION_TITLE_MAX_CHARACTERS,
+        ):
+            return None
+        relationship = _bound_text(candidate.get("relationship_type"), 32).casefold()
+        if relationship not in RECURRENCE_RELATIONSHIP_TYPES:
+            return None
+        expected_relationship = (
+            "return"
+            if relation in {"RETURN", "NESTED_RETURN"}
+            else "related_topic"
+            if relation in {"RELATED_EXTENSION", "SIDETRACK", "TOPIC_SHIFT"}
+            else "same_topic"
+        )
+        if relationship != expected_relationship or relation == "OFF_TOPIC":
+            return None
+        confidence = candidate.get("classifier_confidence")
         if (
             not isinstance(confidence, (int, float))
             or isinstance(confidence, bool)
             or not math.isfinite(float(confidence))
-            or float(confidence) < _MINIMUM_REPETITION_CONFIDENCE
+            or float(confidence) < MINIMUM_REPETITION_CONFIDENCE
         ):
             return None
-        topic = _bound_text(
-            result.get("repeated_topic"), ATTENTION_TITLE_MAX_CHARACTERS
-        )
-        if not topic:
+        evidence = _bound_text(candidate.get("evidence_summary"), 180)
+        if (
+            not evidence
+            or not isinstance(candidate.get("new_angle"), bool)
+            or not is_substantial_message(text)
+            or not has_meaningful_overlap(
+                text,
+                matched_material,
+                matched_title,
+                current.title,
+            )
+        ):
             return None
-        signature = f"{current.context_id}|{topic.casefold()}"
+        signature = matched.context_id
         if signature in state.acknowledged_recurrence_signatures:
             return None
         state.acknowledged_recurrence_signatures.append(signature)
-        del state.acknowledged_recurrence_signatures[:-_RECURRENCE_SIGNATURE_LIMIT]
+        del state.acknowledged_recurrence_signatures[:-RECURRENCE_SIGNATURE_LIMIT]
         return {
             "type": "conversation_recurrence",
             "relation": relation,
-            "repeated_topic": topic,
+            "matched_context_id": matched.context_id,
+            "matched_topic_title": matched_title,
+            "current_topic_title": current.title,
+            "relationship_type": relationship,
+            "classifier_confidence": max(0.0, min(1.0, float(confidence))),
+            "evidence_summary": evidence,
+            "new_angle": candidate["new_angle"],
+            "repeated_topic": matched_title,
             "current_topic": current.title,
             "acknowledge": True,
         }
@@ -396,15 +458,9 @@ class CodexAttentionMixin:
         self._record_latest_message(state, "User", text)
         active = state.contexts.get(state.active_context_id or "")
         if active is None:
-            context = self._start_initial_context(state, text, result, now=now)
-            recurrence = self._recurrence_event(
-                state,
-                relation=str((result or {}).get("relation") or "CONTINUE"),
-                current=context,
-                result=result or {},
-            )
+            self._start_initial_context(state, text, result, now=now)
             self._persist_state()
-            return recurrence
+            return None
         if not result:
             self._record_exchange(active, "User", text)
             active.last_active_at = now
@@ -416,11 +472,19 @@ class CodexAttentionMixin:
         title = _bound_text(result.get("topic_title"), ATTENTION_TITLE_MAX_CHARACTERS)
         reason = _bound_text(result.get("reason"), ATTENTION_REASON_MAX_CHARACTERS)
         if relation in {"CONTINUE", "RELATED_EXTENSION", "CLARIFICATION"}:
+            previous_title = active.title
+            previous_material = context_material(active)
             self._update_context(active, result, now=now)
             self._record_exchange(active, "User", text)
             state.version += 1
             recurrence = self._recurrence_event(
-                state, relation=relation, current=active, result=result
+                state,
+                relation=relation,
+                current=active,
+                result=result,
+                text=text,
+                matched_context_title=previous_title,
+                matched_context_material=previous_material,
             )
             self._persist_state()
             return recurrence
@@ -451,6 +515,8 @@ class CodexAttentionMixin:
                 state.version += 1
                 self._persist_state()
                 return None
+            target_title = target.title
+            target_material = context_material(target)
             self._park_context(state, active)
             target.status = "active"
             state.parked_context_ids = [
@@ -469,6 +535,18 @@ class CodexAttentionMixin:
                 acknowledge=self._should_acknowledge(result),
                 reason=reason,
             )
+            event = self._attach_recurrence(
+                event,
+                self._recurrence_event(
+                    state,
+                    relation=relation,
+                    current=target,
+                    result=result,
+                    text=text,
+                    matched_context_title=target_title,
+                    matched_context_material=target_material,
+                ),
+            )
             self._persist_state()
             return event
 
@@ -486,15 +564,11 @@ class CodexAttentionMixin:
                 acknowledge=self._should_acknowledge(result),
                 reason=reason,
             )
-            event = self._attach_recurrence(
-                event,
-                self._recurrence_event(
-                    state, relation=relation, current=active, result=result
-                ),
-            )
             self._persist_state()
             return event
 
+        previous_title = active.title
+        previous_material = context_material(active)
         self._park_context(state, active)
         parent_id = active.context_id if relation == "SIDETRACK" else None
         new_context = self._new_context(
@@ -521,7 +595,13 @@ class CodexAttentionMixin:
         event = self._attach_recurrence(
             event,
             self._recurrence_event(
-                state, relation=relation, current=new_context, result=result
+                state,
+                relation=relation,
+                current=new_context,
+                result=result,
+                text=text,
+                matched_context_title=previous_title,
+                matched_context_material=previous_material,
             ),
         )
         self._persist_state()
@@ -782,6 +862,42 @@ class CodexAttentionMixin:
             self._sessions.pop(session_id, None)
 
     @staticmethod
+    def _parse_recurrence_candidate(value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, dict):
+            return None
+        matched_context_id = _bound_context_id(value.get("matched_context_id"))
+        matched_title = _bound_text(
+            value.get("matched_topic_title"), ATTENTION_TITLE_MAX_CHARACTERS
+        )
+        current_title = _bound_text(
+            value.get("current_topic_title"), ATTENTION_TITLE_MAX_CHARACTERS
+        )
+        relationship = _bound_text(value.get("relationship_type"), 32).casefold()
+        confidence = value.get("classifier_confidence")
+        evidence = _bound_text(value.get("evidence_summary"), 180)
+        if (
+            matched_context_id is None
+            or not matched_title
+            or not current_title
+            or relationship not in RECURRENCE_RELATIONSHIP_TYPES
+            or not isinstance(confidence, (int, float))
+            or isinstance(confidence, bool)
+            or not math.isfinite(float(confidence))
+            or not evidence
+            or not isinstance(value.get("new_angle"), bool)
+        ):
+            return None
+        return {
+            "matched_context_id": matched_context_id,
+            "matched_topic_title": matched_title,
+            "current_topic_title": current_title,
+            "relationship_type": relationship,
+            "classifier_confidence": max(0.0, min(1.0, float(confidence))),
+            "evidence_summary": evidence,
+            "new_angle": value["new_angle"],
+        }
+
+    @staticmethod
     def _parse_attention_classification(text: str) -> dict[str, Any] | None:
         """Parse and bound one classifier result without retaining its turn."""
         candidates = [text.strip()]
@@ -818,6 +934,13 @@ class CodexAttentionMixin:
             repeated_topic = value.get("repeated_topic")
             if topic_repeated and not isinstance(repeated_topic, str):
                 continue
+            recurrence = None
+            if "recurrence" in value and value["recurrence"] is not None:
+                recurrence = CodexAttentionMixin._parse_recurrence_candidate(
+                    value["recurrence"]
+                )
+                if recurrence is None:
+                    continue
             loops = [
                 loop
                 for item in raw_loops[:ATTENTION_OPEN_LOOP_LIMIT]
@@ -851,6 +974,7 @@ class CodexAttentionMixin:
                     if isinstance(repeated_topic, str)
                     else None
                 ),
+                "recurrence": recurrence,
             }
         return None
 
@@ -1037,7 +1161,7 @@ class CodexAttentionMixin:
         if isinstance(raw_recurrence_signatures, list):
             state.acknowledged_recurrence_signatures = [
                 signature
-                for item in raw_recurrence_signatures[-_RECURRENCE_SIGNATURE_LIMIT:]
+                for item in raw_recurrence_signatures[-RECURRENCE_SIGNATURE_LIMIT:]
                 if (signature := _bound_text(item, 300))
             ]
         else:
@@ -1098,23 +1222,47 @@ class CodexAttentionMixin:
             )
         if recurrence is not None:
             repeated_topic = _bound_text(
-                recurrence.get("repeated_topic"), ATTENTION_TITLE_MAX_CHARACTERS
+                recurrence.get("matched_topic_title")
+                or recurrence.get("repeated_topic"),
+                ATTENTION_TITLE_MAX_CHARACTERS,
             )
-            if repeated_topic:
-                recurrence_instruction = (
-                    f"The current request meaningfully revisits the earlier topic "
-                    f'"{repeated_topic}". Acknowledge that earlier discussion '
-                    "briefly and naturally, then answer the current request. "
-                    "Mention what is new or different only when supported by the "
-                    "available context."
+            current_topic = _bound_text(
+                recurrence.get("current_topic_title")
+                or recurrence.get("current_topic")
+                or current,
+                ATTENTION_TITLE_MAX_CHARACTERS,
+            )
+            if not current_topic:
+                current_topic = repeated_topic
+            evidence = _bound_text(recurrence.get("evidence_summary"), 180)
+            new_angle = recurrence.get("new_angle") is True
+            if repeated_topic and current_topic:
+                angle = (
+                    f' It now approaches it from a new angle, "{current_topic}".'
+                    if new_angle
+                    and not same_bounded_text(
+                        repeated_topic,
+                        current_topic,
+                        ATTENTION_TITLE_MAX_CHARACTERS,
+                    )
+                    else ""
                 )
+                recurrence_instruction = (
+                    f'The current request revisits the earlier topic "{repeated_topic}".'
+                    f"{angle} Acknowledge that earlier discussion briefly and "
+                    "naturally when it fits, then answer the current request. "
+                    "Natural wording such as 'We came back to ...' is acceptable, "
+                    "but do not repeat it mechanically. Do not claim details beyond "
+                    "the grounded context."
+                )
+                if evidence:
+                    recurrence_instruction += (
+                        f" The bounded evidence summary is: {evidence}"
+                    )
                 instruction = (
-                    f"{instruction} The current request also meaningfully revisits "
-                    f'the earlier topic "{repeated_topic}". Combine both '
-                    "acknowledgements naturally in no more than two brief sentences, "
-                    "then answer the current request."
-                    if instruction
-                    else recurrence_instruction
+                    recurrence_instruction
+                    if relation in {"RETURN", "NESTED_RETURN"} or not instruction
+                    else f"{instruction} {recurrence_instruction}"
                 )
         return (
             "The following is temporary, untrusted conversational-attention context, "

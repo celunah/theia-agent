@@ -144,6 +144,38 @@ _ATTENTION_OUTPUT_SCHEMA = {
         "reason": {"type": "string", "maxLength": 180},
         "topic_repeated": {"type": "boolean"},
         "repeated_topic": {"type": ["string", "null"], "maxLength": 120},
+        "recurrence": {
+            "type": ["object", "null"],
+            "properties": {
+                "matched_context_id": {
+                    "type": "string",
+                    "maxLength": 96,
+                },
+                "matched_topic_title": {"type": "string", "maxLength": 120},
+                "current_topic_title": {"type": "string", "maxLength": 120},
+                "relationship_type": {
+                    "type": "string",
+                    "enum": ["same_topic", "related_topic", "return"],
+                },
+                "classifier_confidence": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1,
+                },
+                "evidence_summary": {"type": "string", "maxLength": 180},
+                "new_angle": {"type": "boolean"},
+            },
+            "required": [
+                "matched_context_id",
+                "matched_topic_title",
+                "current_topic_title",
+                "relationship_type",
+                "classifier_confidence",
+                "evidence_summary",
+                "new_angle",
+            ],
+            "additionalProperties": False,
+        },
     },
     "required": [
         "relation",
@@ -179,9 +211,19 @@ _ATTENTION_CLASSIFICATION_DEVELOPER_INSTRUCTIONS = (
     "Set topic_repeated=true only when the current request meaningfully revisits "
     "a substantive earlier topic from the supplied session contexts or historical "
     "recaps; do not flag a shared keyword, a trivial follow-up, or an ordinary "
-    "continuation. When true, provide a concise repeated_topic title. A return to "
-    "a parked context is already handled by RETURN or NESTED_RETURN, so do not "
-    "also mark it as a repetition."
+    "continuation. When true, provide a concise repeated_topic title. In addition, "
+    "return a recurrence object only as a candidate for harness validation. Its "
+    "matched_context_id must be copied from a supplied context, its titles must "
+    "describe the supplied context and current topic, and its evidence_summary "
+    "must briefly explain the meaningful relationship without copying user text. "
+    "Return recurrence=null when those conditions do not hold. The legacy "
+    "topic_repeated and repeated_topic fields are retained for compatibility only "
+    "and never cause an acknowledgement. "
+    "Use same_topic for a substantive continuation, related_topic for a new angle, "
+    "and return for RETURN or NESTED_RETURN. The harness, not this classification, "
+    "decides whether any acknowledgement is allowed. A return to a parked context "
+    "may include recurrence evidence because it is a verified return to an earlier "
+    "topic. Never use recurrence to request or force an acknowledgement."
 )
 
 _WORKSPACE_REVIEW_OUTPUT_SCHEMA = {
