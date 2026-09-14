@@ -915,6 +915,80 @@ class CodexStateMixin:
             session.lock = asyncio.Lock()
         return session
 
+    def select_session(
+        self,
+        session_key: str,
+        *,
+        channel: Any | None = None,
+        user: Any | None = None,
+        event: str = "session_selected",
+        preserve_route: bool = False,
+    ) -> _Session:
+        """Select an existing session for live operator state.
+
+        The selection is a pointer to the normal ``_Session`` store, not a
+        second session object. It is runtime-only so restored sessions remain
+        invisible until the harness explicitly resumes or uses them again.
+        """
+        canonical_key = self._canonical_session_key(session_key)
+        session = self._session(canonical_key)
+        if canonical_key.startswith("__"):
+            return session
+
+        self._lighthouse_active_session_key = canonical_key
+        session.lighthouse_status = "active"
+        session.lighthouse_reason = None
+        if channel is not None:
+            guild = getattr(channel, "guild", None)
+            session.lighthouse_is_guild = guild is not None
+            session.lighthouse_channel_name = (
+                _safe_intermediate_text(getattr(channel, "name", None), 60) or None
+            )
+            session.lighthouse_user_name = None
+            if guild is None and user is not None:
+                session.lighthouse_user_name = (
+                    _safe_intermediate_text(
+                        getattr(user, "display_name", None)
+                        or getattr(user, "name", None),
+                        60,
+                    )
+                    or None
+                )
+        elif not preserve_route:
+            # A direct resume may not have a Discord channel object. Infer only
+            # the conversation kind from the opaque key; never display the key.
+            session.lighthouse_is_guild = (
+                False
+                if canonical_key.startswith("guild:0:")
+                else True
+                if canonical_key.startswith("guild:")
+                else None
+            )
+            session.lighthouse_channel_name = None
+            session.lighthouse_user_name = None
+        self._record_runtime_event(event)
+        return session
+
+    def _mark_lighthouse_session_degraded(self, session: _Session, reason: str) -> None:
+        """Expose a bounded lifecycle failure without retaining raw errors."""
+        if session.key.startswith("__"):
+            return
+        self._lighthouse_active_session_key = session.key
+        session.lighthouse_status = "degraded"
+        session.lighthouse_reason = _safe_intermediate_text(reason, 96) or "unavailable"
+        self._record_runtime_event("session_degraded", session.lighthouse_reason)
+
+    def _clear_lighthouse_session(self, session: _Session) -> None:
+        """Remove one session from the live dashboard selection."""
+        if self._lighthouse_active_session_key == session.key:
+            self._lighthouse_active_session_key = None
+        session.lighthouse_status = "inactive"
+        session.lighthouse_reason = None
+        session.lighthouse_is_guild = None
+        session.lighthouse_channel_name = None
+        session.lighthouse_user_name = None
+        self._record_runtime_event("session_reset")
+
     def rebind_session(self, old_key: str, new_key: str) -> bool:
         """Keep a turn's Codex session available after moving to a Discord thread."""
         old_canonical = self._canonical_session_key(old_key)
@@ -933,6 +1007,8 @@ class CodexStateMixin:
         self._sessions.pop(old_canonical, None)
         session.key = new_canonical
         self._sessions[new_canonical] = session
+        if self._lighthouse_active_session_key == old_canonical:
+            self._lighthouse_active_session_key = new_canonical
         for alias, target in tuple(self._session_aliases.items()):
             if self._canonical_session_key(target) == old_canonical:
                 self._session_aliases[alias] = new_canonical
@@ -982,6 +1058,7 @@ class CodexStateMixin:
         for session in self._sessions.values():
             if session.thread_id != thread_id:
                 continue
+            self._clear_lighthouse_session(session)
             session.thread_id = None
             session.loaded = False
             session.turn_id = None
@@ -1008,7 +1085,9 @@ class CodexStateMixin:
     def _forget_session(self, session_key: str) -> None:
         """Remove a session record and any aliases that point to it."""
         canonical_key = self._canonical_session_key(session_key)
-        self._sessions.pop(canonical_key, None)
+        session = self._sessions.pop(canonical_key, None)
+        if session is not None:
+            self._clear_lighthouse_session(session)
         for alias in tuple(self._session_aliases):
             if (
                 alias == canonical_key

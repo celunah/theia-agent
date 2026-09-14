@@ -347,7 +347,12 @@ class CodexRequestMixin:
         if self.account is None and self.requires_openai_auth:
             raise CodexAppServerError("Run `/login` first.")
 
-        session = self._session(session_key)
+        session = self.select_session(
+            session_key,
+            channel=channel,
+            user=user,
+            event="session_selected",
+        )
         assert session.lock is not None
         attachment_list = tuple(attachments)
         logger.info(

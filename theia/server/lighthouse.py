@@ -49,6 +49,11 @@ _EVENT_LABELS = {
     "worker_completed": "Worker completed",
     "approval_requested": "Approval requested",
     "approval_resolved": "Approval resolved",
+    "session_created": "Session created",
+    "session_resumed": "Session resumed",
+    "session_selected": "Session selected",
+    "session_reset": "Session reset",
+    "session_degraded": "Session degraded",
     "codex_starting": "Codex starting",
     "codex_connected": "Codex connected",
     "codex_recovered": "Codex recovered",
@@ -75,9 +80,16 @@ class CodexLighthouseMixin:
     def __getattr__(self, name: str) -> Any:
         raise AttributeError(name)
 
-    def _lighthouse_active_sessions(self) -> list[tuple[_Session, _TurnState]]:
-        """Return unfinished normal turns grouped by their actual sessions."""
-        active: dict[str, tuple[int, _Session, _TurnState]] = {}
+    def _lighthouse_active_sessions(
+        self,
+    ) -> list[tuple[_Session, _TurnState | None]]:
+        """Return selected sessions and unfinished normal turns.
+
+        The selected value is always the normal ``_Session`` object from the
+        harness. Internal worker sessions and restored-but-unselected sessions
+        never become dashboard sessions.
+        """
+        active: dict[str, tuple[int, _Session, _TurnState | None]] = {}
         for order, state in enumerate(getattr(self, "_turns", {}).values()):
             session = getattr(state, "session", None)
             if session is None:
@@ -94,6 +106,22 @@ class CodexLighthouseMixin:
             except Exception:  # noqa: BLE001 - dashboard state is best effort
                 canonical = key
             active[canonical] = (order, session, state)
+
+        selected_key = getattr(self, "_lighthouse_active_session_key", None)
+        if isinstance(selected_key, str) and selected_key:
+            selected_lookup = selected_key
+            try:
+                selected_lookup = self._canonical_session_key(selected_key)
+            except Exception:  # noqa: BLE001 - dashboard state is best effort
+                selected_lookup = ""
+            selected = getattr(self, "_sessions", {}).get(selected_lookup)
+            if (
+                selected is not None
+                and not selected.key.startswith("__")
+                and getattr(selected, "lighthouse_status", "active") != "inactive"
+                and selected_lookup not in active
+            ):
+                active[selected_lookup] = (len(active), selected, None)
         return [item[1:] for item in sorted(active.values(), key=lambda item: item[0])]
 
     @staticmethod
@@ -118,36 +146,53 @@ class CodexLighthouseMixin:
     def _lighthouse_session_label(
         session: _Session | None, turn: _TurnState | None
     ) -> str | None:
-        if session is None or turn is None:
+        if session is None:
             return None
-        channel = getattr(turn, "channel", None)
+        channel = getattr(turn, "channel", None) if turn is not None else None
         channel_name = _safe_intermediate_text(getattr(channel, "name", None), 60)
-        user = getattr(turn, "user", None)
+        if not channel_name:
+            channel_name = _safe_intermediate_text(
+                getattr(session, "lighthouse_channel_name", None), 60
+            )
+        user = getattr(turn, "user", None) if turn is not None else None
         user_name = _safe_intermediate_text(
             getattr(user, "display_name", None) or getattr(user, "name", None),
             60,
         )
+        if not user_name:
+            user_name = _safe_intermediate_text(
+                getattr(session, "lighthouse_user_name", None), 60
+            )
         guild = getattr(channel, "guild", None)
-        if guild is not None:
+        is_guild = (
+            guild is not None
+            if channel is not None
+            else getattr(session, "lighthouse_is_guild", None)
+        )
+        if is_guild is True:
             return (
                 f"Server conversation · #{channel_name}"
                 if channel_name
                 else "Server conversation"
             )
-        if channel is None:
+        if is_guild is None and channel is None:
             return "Active session"
         if channel_name:
             return f"User conversation · #{channel_name}"
         return f"User conversation · @{user_name}" if user_name else "User conversation"
 
-    def _lighthouse_character(self, session: _Session | None) -> dict[str, str]:
+    def _lighthouse_character(self, session: _Session | None) -> dict[str, Any]:
         if session is None:
-            return {"name": "none", "source": "no overlay"}
+            return {"name": "none", "source": "no overlay", "status": "inactive"}
         try:
             selection = self.personality_selection(session.key)
             name = self.active_personality(session.key)
             if not name:
-                return {"name": "none", "source": "no overlay"}
+                return {
+                    "name": "none",
+                    "source": "no overlay",
+                    "status": "available",
+                }
             summary = self._personalities.summary(name)
             character = _safe_intermediate_text(summary.character_name, 80) or name
             scope = selection.get("scope") if isinstance(selection, dict) else None
@@ -160,9 +205,15 @@ class CodexLighthouseMixin:
                 "name": character,
                 "identifier": _safe_intermediate_text(summary.identifier, 80),
                 "source": source,
+                "status": "available",
             }
         except Exception:  # noqa: BLE001 - the dashboard is best effort
-            return {"name": "unavailable", "source": "overlay unavailable"}
+            return {
+                "name": "unavailable",
+                "source": "overlay unavailable",
+                "status": "degraded",
+                "reason": "character overlay unavailable",
+            }
 
     def _lighthouse_attention(self, session: _Session | None) -> dict[str, Any]:
         if session is None or session.attention is None:
@@ -225,7 +276,7 @@ class CodexLighthouseMixin:
                 requested_key = self._canonical_session_key(session_key)
             except Exception:  # noqa: BLE001 - dashboard state is best effort
                 requested_key = session_key
-        current: tuple[_Session, _TurnState] | None = None
+        current: tuple[_Session, _TurnState | None] | None = None
         if requested_key is not None:
             current = next(
                 (
@@ -236,15 +287,40 @@ class CodexLighthouseMixin:
                 None,
             )
         if current is None and active_sessions:
+            selected_key = getattr(self, "_lighthouse_active_session_key", None)
+            if isinstance(selected_key, str):
+                current = next(
+                    (
+                        item
+                        for item in active_sessions
+                        if getattr(item[0], "key", None) == selected_key
+                    ),
+                    None,
+                )
+        if current is None and active_sessions:
             current = active_sessions[-1]
         session, turn = current or (None, None)
+        session_status = "inactive"
+        session_reason = None
+        if session is not None:
+            session_status = getattr(session, "lighthouse_status", "active")
+            if session_status == "inactive":
+                session_status = "active"
+            session_reason = (
+                _safe_intermediate_text(getattr(session, "lighthouse_reason", None), 96)
+                or None
+            )
         session_snapshot = {
             "active_count": len(active_sessions),
             "current": self._lighthouse_session_label(session, turn),
+            "status": session_status,
+            "reason": session_reason,
         }
         recovery = bool(getattr(self, "_memory_recovery_active", False))
         if recovery:
             action = "Recovering Codex"
+        elif session_status == "degraded":
+            action = "Degraded session"
         elif turn is not None:
             action = "Processing request"
         else:
@@ -442,6 +518,7 @@ def render_lighthouse(snapshot: dict[str, Any]) -> str:
     character = character if isinstance(character, dict) else {}
     name = _dashboard_text(character.get("name"), 80) or "none"
     source = _dashboard_text(character.get("source"), 48) or "unknown"
+    character_reason = _dashboard_text(character.get("reason"), 96)
     mood = snapshot.get("mood")
     mood = mood if isinstance(mood, dict) else {}
     mood_label = _dashboard_text(mood.get("label"), 32).title() or "Unknown"
@@ -489,6 +566,9 @@ def render_lighthouse(snapshot: dict[str, Any]) -> str:
     presence = snapshot.get("presence")
     presence = presence if isinstance(presence, dict) else {}
     session_objective = _dashboard_text(snapshot.get("session_objective"), 180)
+    session = snapshot.get("session")
+    session = session if isinstance(session, dict) else {}
+    session_reason = _dashboard_text(session.get("reason"), 96)
     lines = [
         f"Theia {_dashboard_text(snapshot.get('version'), 24) or 'unknown'} · Lighthouse View",
         "────────────────────────────────────────",
@@ -498,13 +578,22 @@ def render_lighthouse(snapshot: dict[str, Any]) -> str:
             f"Model        {_model_label(snapshot.get('model'))} · "
             f"{_dashboard_text(snapshot.get('reasoning'), 40) or 'unknown'} reasoning"
         ),
-        f"Character    {name} · loaded from {source}",
+        (
+            f"Character    {name} · loaded from {source}"
+            + (f" · {character_reason}" if character_reason else "")
+        ),
         f"Presence     {_render_presence(presence)}",
         f"Voice        {_voice_label(snapshot.get('voice') if isinstance(snapshot.get('voice'), dict) else {})}",
         f"Attention    {attention_line}",
         f"Mood         {mood_line}",
     ]
     lines.extend(_render_session_lines(snapshot.get("session")))
+    if session_reason:
+        lines.append(
+            "Session state "
+            f"{_dashboard_text(session.get('status'), 24) or 'degraded'} · "
+            f"{session_reason}"
+        )
     if session_objective:
         # A separately named objective is not part of the workspace and must
         # never be presented as a workspace goal.

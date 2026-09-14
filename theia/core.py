@@ -663,6 +663,14 @@ class _Session:
     workspace_review_generation: int = 0
     background_review_count: int = 0
     turn_diagnostics: "_TurnDiagnostics | None" = None
+    # Lighthouse-only runtime metadata. These fields are deliberately not
+    # persisted: a restored session is not active until the harness selects or
+    # resumes it again, and only safe display metadata is retained here.
+    lighthouse_status: str = "inactive"
+    lighthouse_reason: str | None = None
+    lighthouse_is_guild: bool | None = None
+    lighthouse_channel_name: str | None = None
+    lighthouse_user_name: str | None = None
     lock: asyncio.Lock | None = None
 
 

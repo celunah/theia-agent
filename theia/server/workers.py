@@ -1189,6 +1189,9 @@ class CodexWorkerMixin:
                     and "unknown thread" not in message
                     and "no rollout found" not in message
                 ):
+                    self._mark_lighthouse_session_degraded(
+                        session, "Codex session resume failed"
+                    )
                     raise
                 session.thread_id = None
             else:
@@ -1197,6 +1200,9 @@ class CodexWorkerMixin:
                 session.loaded = True
                 self._set_thread_loaded(session.thread_id, True)
                 self._persist_state()
+                self.select_session(
+                    session.key, event="session_resumed", preserve_route=True
+                )
                 logger.debug("Resumed Codex thread with current instructions")
 
         if session.thread_id is None:
@@ -1218,10 +1224,19 @@ class CodexWorkerMixin:
             )
             if self._model is not None:
                 params["model"] = self._model
-            result = await self._request("thread/start", params)
+            try:
+                result = await self._request("thread/start", params)
+            except Exception:
+                self._mark_lighthouse_session_degraded(
+                    session, "Codex session creation failed"
+                )
+                raise
             thread = result.get("thread") or {}
             session.thread_id = thread.get("id")
             if not session.thread_id:
+                self._mark_lighthouse_session_degraded(
+                    session, "Codex session creation returned no thread"
+                )
                 raise CodexAppServerError("Codex did not return a thread id.")
             self._claim_usage_thread(session.thread_id)
             session.loaded = True
@@ -1229,6 +1244,9 @@ class CodexWorkerMixin:
             session.tool_policy = allow_tools
             self._set_thread_loaded(session.thread_id, True)
             self._persist_state()
+            self.select_session(
+                session.key, event="session_created", preserve_route=True
+            )
             logger.info(
                 "Created Codex thread (tools_allowed=%s, workspace_roots=%d)",
                 allow_tools,

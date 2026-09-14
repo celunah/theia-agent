@@ -18,7 +18,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import main
 
@@ -32,6 +32,7 @@ class _BoundaryChannel:
     """Small Discord-like channel used by the approval boundary test."""
 
     id = 500
+    name = "general"
 
     def __init__(self) -> None:
         self.sent: list[dict[str, Any]] = []
@@ -695,6 +696,46 @@ class TestLocalCodexBoundary(unittest.IsolatedAsyncioTestCase):
             ),
             "streamed response",
         )
+
+    async def test_explicit_resume_updates_lighthouse_character_and_session(
+        self,
+    ) -> None:
+        """Verify an explicit resume reaches the live Lighthouse snapshot."""
+        server = await self._server()
+        await server.configure_personality(
+            "resume",
+            name="cel",
+            attachment=SimpleNamespace(
+                filename="cel.md",
+                size=30,
+                read=AsyncMock(return_value=b"You are Cel, a calm guide."),
+            ),
+        )
+        channel = _BoundaryChannel()
+        user = SimpleNamespace(display_name="Alice")
+
+        await server.resume_session(
+            "resume",
+            "thread-resumed",
+            channel=channel,
+            user=user,
+        )
+
+        snapshot = server.lighthouse_snapshot()
+        self.assertEqual(snapshot["character"]["name"], "Cel")
+        self.assertEqual(
+            snapshot["session"]["current"], "Server conversation · #general"
+        )
+        self.assertEqual(snapshot["session"]["active_count"], 1)
+        self.assertIn(
+            "Session resumed",
+            main.render_lighthouse(snapshot),
+        )
+
+        await server.new_session("resume")
+        cleared = server.lighthouse_snapshot()
+        self.assertEqual(cleared["session"]["active_count"], 0)
+        self.assertIsNone(cleared["session"]["current"])
 
 
 class TestProjectNodeBridge(unittest.TestCase):

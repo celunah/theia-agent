@@ -177,6 +177,9 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
         self._codex_update_skip_once = False
         self._server_tasks: set[asyncio.Task[Any]] = set()
         self._runtime_events: deque[dict[str, Any]] = deque(maxlen=100)
+        # The active key points at the existing _Session object; it is not a
+        # second session cache and is intentionally transient across restarts.
+        self._lighthouse_active_session_key: str | None = None
         self._heartbeat_last_success_at: float | None = None
         self._heartbeat_last_attempt_at: float | None = None
         self._heartbeat_latency_ms: float | None = None
@@ -821,10 +824,24 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
         session.instruction_fingerprint = None
         session.tool_policy = None
         self._reset_workspace(session)
+        self._clear_lighthouse_session(session)
         self._persist_state()
 
-    async def resume_session(self, session_key: str, thread_id: str) -> None:
+    async def resume_session(
+        self,
+        session_key: str,
+        thread_id: str,
+        *,
+        channel: Any | None = None,
+        user: Any | None = None,
+    ) -> None:
         """Resume a persisted Codex thread and bind it to a Discord session."""
+        session = self.select_session(
+            session_key,
+            channel=channel,
+            user=user,
+            event="session_selected",
+        )
         params: dict[str, Any] = {
             "threadId": thread_id,
             "runtimeWorkspaceRoots": [
@@ -833,11 +850,17 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
         }
         if self._model is not None:
             params["model"] = self._model
-        await self._request("thread/resume", params)
-        session = self._session(session_key)
+        try:
+            await self._request("thread/resume", params)
+        except Exception:
+            self._mark_lighthouse_session_degraded(
+                session, "Codex session resume failed"
+            )
+            raise
         session.thread_id = thread_id
         session.loaded = True
         self._set_thread_loaded(thread_id, True)
+        self._record_runtime_event("session_resumed")
         self._persist_state()
 
     async def fork_session(self, session_key: str) -> str:

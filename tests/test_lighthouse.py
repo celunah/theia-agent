@@ -69,6 +69,87 @@ class _TTYBuffer:
 
 
 class LighthouseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_explicit_session_selection_updates_character_and_dashboard_state(
+        self,
+    ) -> None:
+        server = main.CodexAppServer()
+        channel = SimpleNamespace(name="general", guild=SimpleNamespace(id=1))
+        user = SimpleNamespace(display_name="Alice")
+        session = server.select_session(
+            "guild:1:channel:2:user:7",
+            channel=channel,
+            user=user,
+        )
+        session.personality_name = "cel"
+        session.personality_selected = True
+        with (
+            patch.object(
+                server,
+                "personality_selection",
+                return_value={"scope": "me", "name": "cel"},
+            ),
+            patch.object(server, "active_personality", return_value="cel"),
+            patch.object(
+                server._personalities,
+                "summary",
+                return_value=SimpleNamespace(character_name="Cel", identifier="cel"),
+            ),
+        ):
+            snapshot = server.lighthouse_snapshot()
+
+        self.assertEqual(snapshot["session"]["active_count"], 1)
+        self.assertEqual(
+            snapshot["session"]["current"], "Server conversation · #general"
+        )
+        self.assertEqual(snapshot["character"]["name"], "Cel")
+        self.assertTrue(
+            any(event["event"] == "session_selected" for event in snapshot["events"])
+        )
+
+        await server.new_session(session.key)
+        cleared = server.lighthouse_snapshot()
+        self.assertEqual(cleared["session"]["active_count"], 0)
+        self.assertIsNone(cleared["session"]["current"])
+        self.assertIn("Session      No active session", render_lighthouse(cleared))
+
+    async def test_failed_session_resume_is_visible_as_degraded_state(self) -> None:
+        server = main.CodexAppServer()
+        server._request = AsyncMock(
+            side_effect=main.CodexAppServerError("transport failure")
+        )
+        channel = SimpleNamespace(name="general", guild=SimpleNamespace(id=1))
+
+        with self.assertRaises(main.CodexAppServerError):
+            await server.resume_session(
+                "guild:1:channel:2:user:7",
+                "missing-thread",
+                channel=channel,
+            )
+
+        snapshot = server.lighthouse_snapshot()
+        self.assertEqual(snapshot["session"]["status"], "degraded")
+        self.assertEqual(snapshot["session"]["reason"], "Codex session resume failed")
+        rendered = render_lighthouse(snapshot)
+        self.assertIn("Session state degraded", rendered)
+        self.assertIn("Codex session resume failed", rendered)
+
+    async def test_thread_creation_keeps_the_active_discord_route(self) -> None:
+        server = main.CodexAppServer()
+        server._ensure_running = AsyncMock()
+        server._request = AsyncMock(return_value={"thread": {"id": "created"}})
+        channel = SimpleNamespace(name="general", guild=SimpleNamespace(id=1))
+        session = server.select_session("guild:1:channel:2:user:7", channel=channel)
+
+        await server._ensure_thread(session, allow_tools=False)
+
+        snapshot = server.lighthouse_snapshot()
+        self.assertEqual(
+            snapshot["session"]["current"], "Server conversation · #general"
+        )
+        self.assertTrue(
+            any(event["event"] == "session_created" for event in snapshot["events"])
+        )
+
     async def test_live_session_display_tracks_active_turn_ownership(self) -> None:
         server = main.CodexAppServer()
         no_session = server.lighthouse_snapshot()
