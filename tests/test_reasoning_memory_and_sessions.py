@@ -68,8 +68,46 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
             }
         )
 
-        with self.assertRaisesRegex(main.CodexAppServerError, "404 Not Found"):
+        with self.assertRaisesRegex(
+            main.CodexAppServerError, "404 Not Found"
+        ) as caught:
             await request
+
+        self.assertEqual(caught.exception.protocol_method, "turn/start")
+        self.assertIsNone(caught.exception.protocol_code)
+        self.assertEqual(
+            caught.exception.protocol_data,
+            {"statusCode": 404, "statusText": "Not Found"},
+        )
+
+    async def test_protocol_error_retains_json_rpc_cleanup_metadata(self) -> None:
+        server = main.CodexAppServer()
+        server._send = AsyncMock()
+        request = asyncio.create_task(server._request("thread/delete", {}))
+        await asyncio.sleep(0)
+        request_id = next(iter(server._pending))
+        server._pending[request_id].set_result(
+            {
+                "id": request_id,
+                "error": {
+                    "code": -32600,
+                    "message": "no rollout found for thread id secret-id",
+                    "data": {"reason": "already absent", "path": "/private/file"},
+                },
+            }
+        )
+
+        with self.assertRaises(main.CodexAppServerError) as caught:
+            await request
+
+        self.assertEqual(caught.exception.protocol_method, "thread/delete")
+        self.assertEqual(caught.exception.protocol_code, -32600)
+        self.assertEqual(
+            caught.exception.protocol_message,
+            "no rollout found for thread id [redacted]",
+        )
+        self.assertEqual(caught.exception.protocol_data, {"reason": "already absent"})
+        self.assertTrue(server.cleanup_snapshot()["thread_delete_supported"])
 
     async def test_missing_thread_delete_is_quiet_and_cleans_expired_session(
         self,
@@ -118,7 +156,9 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
 
         warning.assert_not_called()
 
-    async def test_real_expired_thread_delete_failure_degrades_session(self) -> None:
+    async def test_real_expired_thread_delete_failure_degrades_cleanup_only(
+        self,
+    ) -> None:
         server = main.CodexAppServer()
         server._ensure_running = AsyncMock()
         server._persist_state = lambda: None
@@ -135,11 +175,132 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
 
         self.assertEqual(result, {"archived": 0, "deleted": 0})
         self.assertEqual(session.thread_id, "thread")
-        self.assertEqual(session.lighthouse_status, "degraded")
-        self.assertEqual(session.lighthouse_reason, "Expired session cleanup failed")
+        self.assertEqual(session.lighthouse_status, "inactive")
+        self.assertIsNone(session.lighthouse_reason)
+        cleanup = server.cleanup_snapshot()
+        self.assertEqual(cleanup["status"], "degraded")
+        self.assertEqual(cleanup["reason"], "expired session cleanup failed")
+        self.assertEqual(server._request.await_count, 2)
         warning.assert_called_once()
 
-    async def test_expired_thread_delete_failure_during_request_is_degraded(
+    async def test_unsupported_thread_delete_uses_local_cleanup_once(self) -> None:
+        server = main.CodexAppServer()
+        server._ensure_running = AsyncMock()
+        server._persist_state = lambda: None
+        server._request = AsyncMock(
+            side_effect=main.CodexAppServerError(
+                "Codex thread/delete failed: method not found",
+                protocol_method="thread/delete",
+                protocol_code=-32601,
+                protocol_message="method not found",
+            )
+        )
+        now = 1_000_000.0
+        session = server._session("expired-session")
+        session.thread_id = "thread"
+        session.last_activity_at = now - main.SESSION_DELETE_AFTER - 1
+
+        result = await server.enforce_retention(now=now)
+
+        self.assertEqual(result, {"archived": 0, "deleted": 1})
+        self.assertIsNone(session.thread_id)
+        self.assertEqual(server._thread_delete_supported, False)
+        self.assertEqual(
+            server.cleanup_snapshot()["reason"],
+            "thread deletion unsupported; local cleanup used",
+        )
+        server._request.assert_awaited_once_with(
+            "thread/delete", {"threadId": "thread"}
+        )
+
+    async def test_cleanup_deduplicates_same_failure_in_one_cycle(self) -> None:
+        server = main.CodexAppServer()
+        server._ensure_running = AsyncMock()
+        server._persist_state = lambda: None
+        server._request = AsyncMock(
+            side_effect=main.CodexAppServerError(
+                "Codex thread/delete failed: connection lost",
+                protocol_method="thread/delete",
+                protocol_code=-32000,
+                protocol_message="connection lost",
+            )
+        )
+        now = 1_000_000.0
+        for key in ("expired-one", "expired-two"):
+            session = server._session(key)
+            session.thread_id = f"{key}-thread"
+            session.last_activity_at = now - main.SESSION_DELETE_AFTER - 1
+
+        with patch("theia.server.requests.logger.warning") as warning:
+            result = await server.enforce_retention(now=now)
+
+        self.assertEqual(result, {"archived": 0, "deleted": 0})
+        self.assertEqual(server._request.await_count, 4)
+        warning.assert_called_once()
+
+    async def test_resumed_session_is_not_deleted_by_next_retention_cycle(self) -> None:
+        server = main.CodexAppServer()
+        server._ensure_running = AsyncMock()
+        server._persist_state = lambda: None
+        server._request = AsyncMock(return_value={})
+        session = server._session("resumed-session")
+        session.thread_id = "old-thread"
+        session.last_activity_at = 1.0
+        server._sessions = {session.key: session}
+
+        await server.resume_session("resumed-session", "resumed-thread")
+        resumed_at = session.last_activity_at
+        result = await server.enforce_retention(now=float(resumed_at or 0) + 1)
+
+        self.assertEqual(result, {"archived": 0, "deleted": 0})
+        self.assertEqual(session.thread_id, "resumed-thread")
+        self.assertEqual(server._request.await_count, 1)
+
+    async def test_internal_worker_failure_is_not_logged_as_turn_failure(self) -> None:
+        server = main.CodexAppServer()
+        session = server._session("__mood__:session")
+        state = main._TurnState(session=session)
+        state.completed = {"status": "failed", "error": {"message": "classifier"}}
+        state.done.set_result(None)
+
+        with (
+            patch("theia.server.core.logger.warning") as warning,
+            self.assertRaisesRegex(main.CodexAppServerError, "turn failed"),
+        ):
+            await server._wait_for_turn("__mood__:session", session, state, "turn")
+
+        warning.assert_not_called()
+        self.assertEqual(server.runtime_events()[-1]["event"], "worker_failed")
+
+    async def test_internal_worker_error_notification_is_not_a_turn_warning(
+        self,
+    ) -> None:
+        server = main.CodexAppServer()
+        session = server._session("__presence__:session")
+        state = main._TurnState(thread_id="thread", session=session)
+        server._turns["turn-1"] = state
+
+        with (
+            patch("theia.server.notifications.logger.warning") as warning,
+            patch("theia.server.notifications.logger.info") as info,
+        ):
+            server._handle_notification(
+                {
+                    "method": "error",
+                    "params": {
+                        "threadId": "thread",
+                        "turnId": "turn-1",
+                        "error": {"message": "worker unavailable"},
+                    },
+                }
+            )
+
+        warning.assert_not_called()
+        info.assert_called_once_with(
+            "Codex internal worker error notification received"
+        )
+
+    async def test_expired_thread_delete_failure_during_request_degrades_cleanup_only(
         self,
     ) -> None:
         server = main.CodexAppServer()
@@ -153,8 +314,11 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         with self.assertRaisesRegex(main.CodexAppServerError, "timeout"):
             await server._prepare_session_for_activity(session)
 
-        self.assertEqual(session.lighthouse_status, "degraded")
-        self.assertEqual(session.lighthouse_reason, "Expired session cleanup failed")
+        self.assertEqual(session.lighthouse_status, "inactive")
+        self.assertIsNone(session.lighthouse_reason)
+        cleanup = server.cleanup_snapshot()
+        self.assertEqual(cleanup["status"], "degraded")
+        self.assertEqual(cleanup["reason"], "expired session cleanup failed")
 
     async def test_thread_only_codex_error_cannot_fail_active_turn(self) -> None:
         server = main.CodexAppServer()

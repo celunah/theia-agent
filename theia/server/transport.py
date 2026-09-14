@@ -21,9 +21,11 @@ from ..core import (
     _env_float,
     _error_message,
     _is_missing_codex_thread_error,
+    _is_unsupported_codex_method_error,
     _path_from_value,
     _path_is_under,
     _safe_approval_reason,
+    _safe_error_reason,
     _safe_intermediate_text,
     _safe_log_label,
     _subtext,
@@ -49,6 +51,7 @@ class CodexTransportMixin:
         _next_request_id: int
         _skills_refresh_task: asyncio.Task[Any] | None
         _approval_required_workspace_roots: tuple[Path, ...]
+        _thread_delete_supported: bool | None
 
     def __getattr__(self, name: str) -> Any:
         raise AttributeError(name)
@@ -88,7 +91,11 @@ class CodexTransportMixin:
                 method_label,
                 (time.monotonic() - started_at) * 1000,
             )
-            raise CodexAppServerError(f"Codex {method} timed out.") from exc
+            raise CodexAppServerError(
+                f"Codex {method} timed out.",
+                protocol_method=method,
+                protocol_message="request timed out",
+            ) from exc
         except BaseException as exc:
             self._pending.pop(request_id, None)
             logger.debug(
@@ -101,6 +108,15 @@ class CodexTransportMixin:
         if "error" in response:
             error = response["error"]
             message = _error_message(error) or "unknown error"
+            protocol_code = error.get("code") if isinstance(error, dict) else None
+            protocol_data = error.get("data") if isinstance(error, dict) else None
+            if method == "thread/delete":
+                if _is_unsupported_codex_method_error(error):
+                    self._thread_delete_supported = False
+                elif _is_missing_codex_thread_error(error):
+                    # A structured missing-thread error proves that the method
+                    # exists, even though the particular local reference is stale.
+                    self._thread_delete_supported = True
             if method == "thread/delete" and _is_missing_codex_thread_error(error):
                 logger.debug(
                     "Codex thread was already absent during deletion "
@@ -108,12 +124,31 @@ class CodexTransportMixin:
                     (time.monotonic() - started_at) * 1000,
                 )
             else:
-                logger.warning(
-                    "Codex protocol request failed (method=%s, duration_ms=%.1f)",
-                    method_label,
-                    (time.monotonic() - started_at) * 1000,
-                )
-            raise CodexAppServerError(f"Codex {method} failed: {message}")
+                if not (
+                    method == "thread/delete"
+                    and getattr(self, "_cleanup_cycle_active", False)
+                ):
+                    logger.warning(
+                        "Codex protocol request failed (method=%s, code=%s, "
+                        "reason=%s, duration_ms=%.1f)",
+                        method_label,
+                        _safe_log_label(protocol_code),
+                        _safe_log_label(_safe_error_reason(message, 160)),
+                        (time.monotonic() - started_at) * 1000,
+                    )
+            safe_message = _safe_error_reason(message, 240)
+            protocol_message = (
+                error.get("message")
+                if isinstance(error, dict) and isinstance(error.get("message"), str)
+                else message
+            )
+            raise CodexAppServerError(
+                f"Codex {method} failed: {safe_message}",
+                protocol_method=method,
+                protocol_code=protocol_code,
+                protocol_message=_safe_error_reason(protocol_message, 240),
+                protocol_data=protocol_data,
+            )
         result = response.get("result", {})
         if not isinstance(result, dict):
             logger.debug(

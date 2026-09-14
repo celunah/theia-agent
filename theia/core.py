@@ -175,6 +175,33 @@ def _theia_revision() -> str:
 class CodexAppServerError(RuntimeError):
     """A Codex App Server operation failed or returned an unusable result."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        protocol_method: str | None = None,
+        protocol_code: int | str | None = None,
+        protocol_message: str | None = None,
+        protocol_data: Any | None = None,
+    ) -> None:
+        # Keep the original protocol details available to diagnostics, but only
+        # after reducing them to safe, bounded metadata.  The exception itself
+        # remains useful to callers that only need a human-readable reason.
+        self.protocol_method = (
+            _safe_log_label(protocol_method) if protocol_method else None
+        )
+        if isinstance(protocol_code, int) and not isinstance(protocol_code, bool):
+            self.protocol_code = protocol_code
+        elif isinstance(protocol_code, str):
+            self.protocol_code = _safe_log_label(protocol_code, 32)
+        else:
+            self.protocol_code = None
+        self.protocol_message = (
+            _safe_error_reason(protocol_message, 240) if protocol_message else None
+        )
+        self.protocol_data = _safe_protocol_data(protocol_data)
+        super().__init__(message)
+
 
 class CodexTurnCancelled(CodexAppServerError):
     """A user-requested turn interruption was acknowledged by Codex."""
@@ -331,6 +358,23 @@ _ERROR_NESTED_KEYS = frozenset(
 _GENERIC_ERROR_MESSAGES = frozenset(
     {"error", "failed", "failure", "request failed", "unknown error"}
 )
+_PROTOCOL_DATA_KEYS = frozenset(
+    {
+        "category",
+        "code",
+        "description",
+        "detail",
+        "kind",
+        "name",
+        "operation",
+        "reason",
+        "retryable",
+        "status",
+        "statuscode",
+        "statustext",
+        "type",
+    }
+)
 
 
 def _error_key(value: Any) -> str:
@@ -428,6 +472,31 @@ def _error_message(value: Any, *, _depth: int = 0) -> str:
     return "; ".join(local_parts + nested_parts)
 
 
+def _safe_protocol_data(value: Any, *, _depth: int = 0) -> dict[str, Any]:
+    """Retain only bounded, non-sensitive App Server error metadata."""
+    if not isinstance(value, dict) or _depth > 2:
+        return {}
+    result: dict[str, Any] = {}
+    for raw_key, raw_value in list(value.items())[:16]:
+        key = _error_key(raw_key)
+        if key in _ERROR_IGNORED_KEYS or key not in _PROTOCOL_DATA_KEYS:
+            continue
+        display_key = str(raw_key)[:40]
+        if isinstance(raw_value, bool) or (
+            isinstance(raw_value, (int, float)) and not isinstance(raw_value, bool)
+        ):
+            result[display_key] = raw_value
+        elif isinstance(raw_value, str):
+            safe_value = _safe_error_reason(raw_value, 160)
+            if safe_value:
+                result[display_key] = safe_value
+        elif isinstance(raw_value, dict):
+            nested = _safe_protocol_data(raw_value, _depth=_depth + 1)
+            if nested:
+                result[display_key] = nested
+    return result
+
+
 def _is_missing_codex_thread_error(value: Any) -> bool:
     """Return whether Codex reports that a persisted thread is already gone."""
     message = _error_message(value).casefold()
@@ -448,6 +517,23 @@ def _is_missing_codex_thread_error(value: Any) -> bool:
             "rollout does not exist",
             "rollout doesn't exist",
             "already deleted",
+        )
+    )
+
+
+def _is_unsupported_codex_method_error(value: Any) -> bool:
+    """Return whether the App Server rejected a method as unsupported."""
+    code = getattr(value, "protocol_code", None)
+    if code is not None and str(code).strip() == "-32601":
+        return True
+    message = _error_message(value).casefold()
+    return any(
+        marker in message
+        for marker in (
+            "method not found",
+            "unknown method",
+            "unsupported method",
+            "not supported",
         )
     )
 
@@ -659,6 +745,11 @@ def _safe_error_reason(value: Any, limit: int = 1200) -> str:
         flags=re.IGNORECASE,
     )
     text = _safe_intermediate_text(text, limit)
+    text = re.sub(
+        r"(?i)\b(thread|rollout)\s+id\s+[^\s,;]+",
+        r"\1 id [redacted]",
+        text,
+    )
     for token, command in command_refs.items():
         text = text.replace(token, f"`{command}`")
     return text or "The request failed for an unspecified reason."

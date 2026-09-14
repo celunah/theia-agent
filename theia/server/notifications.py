@@ -10,6 +10,7 @@ import discord
 from ..core import (
     _TurnState,
     _codex_logger,
+    _error_message,
     _is_tool_item,
     _safe_log_label,
     _verified_change_status,
@@ -310,10 +311,19 @@ class CodexNotificationMixin:
             if state is None or state.done.done():
                 logger.debug("Ignored unassociated or late Codex error notification")
                 return
+            error = params.get("error")
+            if not error:
+                error = {
+                    "message": _error_message(params)
+                    or "Codex error notification without details"
+                }
             state.completed = {
                 "status": "failed",
-                "error": params.get("error") or params,
+                "error": error,
             }
             if not state.done.done():
                 state.done.set_result(None)
-            logger.warning("Codex turn error notification received")
+            if state.session is not None and state.session.key.startswith("__"):
+                logger.info("Codex internal worker error notification received")
+            else:
+                logger.warning("Codex turn error notification received")

@@ -26,10 +26,16 @@ from ..core import (
     _TurnState,
     _codex_logger,
     _is_missing_codex_thread_error,
+    _is_unsupported_codex_method_error,
+    _safe_log_label,
 )
 from .usage import estimated_tokens
 
 logger = _codex_logger()
+
+_SESSION_CLEANUP_ATTEMPTS = 2
+_SESSION_CLEANUP_TIMEOUT = 5.0
+_SESSION_CLEANUP_RETRY_DELAY = 0.1
 
 
 class CodexRequestMixin:
@@ -37,6 +43,7 @@ class CodexRequestMixin:
         _model: str | None
         _approval_level: str
         _adaptive_reasoning: bool
+        _thread_delete_supported: bool | None
 
     def __getattr__(self, name: str) -> Any:
         raise AttributeError(name)
@@ -169,20 +176,115 @@ class CodexRequestMixin:
         if thread_id and session.last_activity_at is not None:
             inactive_for = max(0.0, activity_at - session.last_activity_at)
             if inactive_for >= SESSION_DELETE_AFTER:
-                try:
-                    await self.delete_thread(thread_id)
-                except CodexAppServerError as exc:
-                    if not _is_missing_codex_thread_error(exc):
-                        self._mark_lighthouse_session_degraded(
-                            session, "Expired session cleanup failed"
-                        )
-                        raise
-                    self._forget_thread(thread_id)
+                await self._delete_expired_thread(session, thread_id)
             elif session.archived:
                 await self.unarchive_thread(thread_id)
 
         session.last_activity_at = activity_at
         self._persist_state()
+
+    def _cleanup_failure_key(self, error: CodexAppServerError) -> str:
+        metadata = self._cleanup_error_metadata(error)
+        return "|".join(
+            (
+                str(metadata.get("method") or "thread/delete"),
+                str(metadata.get("code") or "unknown"),
+                str(metadata.get("message") or "unknown error"),
+            )
+        )
+
+    def _report_cleanup_failure(self, error: CodexAppServerError) -> None:
+        """Record one safe cleanup failure per cycle and retain protocol details."""
+        self._cleanup_cycle_issue_seen = True
+        self._set_cleanup_health(
+            "degraded", "expired session cleanup failed", error=error
+        )
+        failure_key = self._cleanup_failure_key(error)
+        if failure_key in self._cleanup_cycle_logged:
+            return
+        self._cleanup_cycle_logged.add(failure_key)
+        metadata = self._cleanup_error_metadata(error)
+        logger.warning(
+            "Expired Codex session cleanup failed (method=%s, code=%s, reason=%s)",
+            _safe_log_label(metadata.get("method")),
+            _safe_log_label(metadata.get("code")),
+            _safe_log_label(metadata.get("message")),
+        )
+
+    async def _delete_expired_thread(self, session: _Session, thread_id: str) -> None:
+        """Delete one expired thread, or safely discard only its local reference."""
+        if session.thread_id != thread_id:
+            return
+        if any(
+            item.thread_id == thread_id and item.turn_id
+            for item in self._sessions.values()
+        ):
+            # ``delete_thread`` performs the same check, but keeping it here
+            # protects the local fallback when deletion is unsupported.
+            raise CodexAppServerError(
+                "Stop the active Codex turn before deleting the thread."
+            )
+        owns_cycle = not self._cleanup_cycle_active
+        if owns_cycle:
+            self._cleanup_cycle_active = True
+            self._cleanup_cycle_logged = set()
+            self._cleanup_cycle_issue_seen = False
+        try:
+            if self._thread_delete_supported is False:
+                self._cleanup_cycle_issue_seen = True
+                self._forget_thread(thread_id)
+                self._set_cleanup_health(
+                    "degraded",
+                    "thread deletion unsupported; local cleanup used",
+                )
+                return
+
+            last_error: CodexAppServerError | None = None
+            for attempt in range(_SESSION_CLEANUP_ATTEMPTS):
+                try:
+                    await asyncio.wait_for(
+                        self.delete_thread(thread_id),
+                        timeout=_SESSION_CLEANUP_TIMEOUT,
+                    )
+                except asyncio.TimeoutError:
+                    last_error = CodexAppServerError(
+                        "Codex thread/delete timed out.",
+                        protocol_method="thread/delete",
+                        protocol_message="request timed out",
+                    )
+                except CodexAppServerError as exc:
+                    if _is_missing_codex_thread_error(exc):
+                        self._forget_thread(thread_id)
+                        self._thread_delete_supported = True
+                        if not self._cleanup_cycle_issue_seen:
+                            self._set_cleanup_health(
+                                "healthy", "expired thread already absent", error=exc
+                            )
+                        return
+                    if _is_unsupported_codex_method_error(exc):
+                        self._cleanup_cycle_issue_seen = True
+                        self._thread_delete_supported = False
+                        self._forget_thread(thread_id)
+                        self._set_cleanup_health(
+                            "degraded",
+                            "thread deletion unsupported; local cleanup used",
+                            error=exc,
+                        )
+                        return
+                    last_error = exc
+                else:
+                    self._thread_delete_supported = True
+                    if not self._cleanup_cycle_issue_seen:
+                        self._set_cleanup_health("healthy")
+                    return
+                if attempt + 1 < _SESSION_CLEANUP_ATTEMPTS:
+                    await asyncio.sleep(_SESSION_CLEANUP_RETRY_DELAY)
+            if last_error is not None:
+                self._report_cleanup_failure(last_error)
+                raise last_error
+        finally:
+            if owns_cycle:
+                self._cleanup_cycle_active = False
 
     async def enforce_retention(self, *, now: float | None = None) -> dict[str, int]:
         """Archive or delete inactive mapped sessions according to policy."""
@@ -191,65 +293,65 @@ class CodexRequestMixin:
         archived = 0
         deleted = 0
         pruned_sessions = 0
-        for session in tuple(self._sessions.values()):
-            if session.lock is None:
-                session.lock = asyncio.Lock()
-            async with session.lock:
-                if not session.thread_id:
-                    has_session_metadata = bool(
-                        session.mode != DEFAULT_MODE
-                        or session.personality_name
-                        or session.personality_selected
-                        or session.pending_self_improvement_summary
-                        or session.tool_policy is not None
-                        or session.attention is not None
-                        or (
-                            session.workspace is not None
-                            and bool(session.workspace.entries)
+        self._cleanup_cycle_active = True
+        self._cleanup_cycle_logged = set()
+        self._cleanup_cycle_issue_seen = False
+        try:
+            for session in tuple(self._sessions.values()):
+                if session.lock is None:
+                    session.lock = asyncio.Lock()
+                async with session.lock:
+                    if not session.thread_id:
+                        has_session_metadata = bool(
+                            session.mode != DEFAULT_MODE
+                            or session.personality_name
+                            or session.personality_selected
+                            or session.pending_self_improvement_summary
+                            or session.tool_policy is not None
+                            or session.attention is not None
+                            or (
+                                session.workspace is not None
+                                and bool(session.workspace.entries)
+                            )
+                            or bool(session.commitments)
                         )
-                        or bool(session.commitments)
-                    )
-                    if not has_session_metadata and (
-                        session.last_activity_at is None
-                        or checked_at - session.last_activity_at >= SESSION_DELETE_AFTER
-                    ):
-                        self._forget_session(session.key)
-                        pruned_sessions += 1
-                    continue
-                if session.turn_id or session.last_activity_at is None:
-                    continue
-                inactive_for = max(0.0, checked_at - session.last_activity_at)
-                if inactive_for >= SESSION_DELETE_AFTER:
-                    thread_id = session.thread_id
-                    try:
-                        await self.delete_thread(thread_id)
-                    except CodexAppServerError as exc:
-                        if not _is_missing_codex_thread_error(exc):
+                        if not has_session_metadata and (
+                            session.last_activity_at is None
+                            or checked_at - session.last_activity_at
+                            >= SESSION_DELETE_AFTER
+                        ):
+                            self._forget_session(session.key)
+                            pruned_sessions += 1
+                        continue
+                    if session.turn_id or session.last_activity_at is None:
+                        continue
+                    inactive_for = max(0.0, checked_at - session.last_activity_at)
+                    if inactive_for >= SESSION_DELETE_AFTER:
+                        thread_id = session.thread_id
+                        try:
+                            await self._delete_expired_thread(session, thread_id)
+                        except CodexAppServerError:
+                            # Cleanup health is recorded separately. Keep the
+                            # session reference so a later cycle can retry it.
+                            continue
+                        deleted += 1
+                    elif inactive_for >= SESSION_ARCHIVE_AFTER and not session.archived:
+                        try:
+                            await self._request(
+                                "thread/archive", {"threadId": session.thread_id}
+                            )
+                        except CodexAppServerError as exc:
                             logger.warning(
-                                "Could not delete an expired Codex session (error=%s)",
+                                "Could not archive an inactive Codex session (error=%s)",
                                 type(exc).__name__,
                             )
-                            self._mark_lighthouse_session_degraded(
-                                session, "Expired session cleanup failed"
-                            )
                             continue
-                        self._forget_thread(thread_id)
-                    deleted += 1
-                elif inactive_for >= SESSION_ARCHIVE_AFTER and not session.archived:
-                    try:
-                        await self._request(
-                            "thread/archive", {"threadId": session.thread_id}
-                        )
-                    except CodexAppServerError as exc:
-                        logger.warning(
-                            "Could not archive an inactive Codex session (error=%s)",
-                            type(exc).__name__,
-                        )
-                        continue
-                    self._set_thread_archived(session.thread_id, True)
-                    self._set_thread_loaded(session.thread_id, False)
-                    self._persist_state()
-                    archived += 1
+                        self._set_thread_archived(session.thread_id, True)
+                        self._set_thread_loaded(session.thread_id, False)
+                        self._persist_state()
+                        archived += 1
+        finally:
+            self._cleanup_cycle_active = False
         if archived or deleted or pruned_sessions:
             logger.info(
                 "Applied Codex session retention (archived=%d, deleted=%d, "

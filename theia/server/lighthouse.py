@@ -47,6 +47,7 @@ _EVENT_LABELS = {
     "model_changed": "Model changed",
     "worker_started": "Worker started",
     "worker_completed": "Worker completed",
+    "worker_failed": "Worker degraded",
     "approval_requested": "Approval requested",
     "approval_resolved": "Approval resolved",
     "session_created": "Session created",
@@ -410,6 +411,9 @@ class CodexLighthouseMixin:
                 "recovery": recovery,
                 "update": "enabled" if update_status.get("enabled") else "disabled",
                 "heartbeat": self.heartbeat_snapshot(),
+                "cleanup": self.cleanup_snapshot()
+                if callable(getattr(self, "cleanup_snapshot", None))
+                else {"status": "unknown", "reason": None},
             },
             "events": self.runtime_events(limit=12),
         }
@@ -547,6 +551,8 @@ def render_lighthouse(snapshot: dict[str, Any]) -> str:
     runtime = runtime if isinstance(runtime, dict) else {}
     heartbeat = runtime.get("heartbeat")
     heartbeat = heartbeat if isinstance(heartbeat, dict) else {}
+    cleanup = runtime.get("cleanup")
+    cleanup = cleanup if isinstance(cleanup, dict) else {}
     heartbeat_state = _dashboard_text(heartbeat.get("state"), 24) or "unknown"
     latency = heartbeat.get("latency_ms")
     latency_text = (
@@ -563,6 +569,11 @@ def render_lighthouse(snapshot: dict[str, Any]) -> str:
     workers = runtime.get("workers", 0)
     approvals = runtime.get("approvals", 0)
     memory_entries = runtime.get("memory_entries", 0)
+    cleanup_status = _dashboard_text(cleanup.get("status"), 24) or "unknown"
+    cleanup_reason = _dashboard_text(cleanup.get("reason"), 120)
+    cleanup_line = f"{cleanup_status}"
+    if cleanup_reason:
+        cleanup_line += f" · {cleanup_reason}"
     presence = snapshot.get("presence")
     presence = presence if isinstance(presence, dict) else {}
     session_objective = _dashboard_text(snapshot.get("session_objective"), 180)
@@ -636,6 +647,7 @@ def render_lighthouse(snapshot: dict[str, Any]) -> str:
             f"  Recovery     {'active' if runtime.get('recovery') else 'inactive'}",
             f"  Heartbeat    {heartbeat_state} · {latency_text} · {failures} failures",
             f"  Codex update {_dashboard_text(runtime.get('update'), 24) or 'unknown'}",
+            f"  Cleanup      {cleanup_line}",
             "────────────────────────────────────────",
             "Recent events",
         ]

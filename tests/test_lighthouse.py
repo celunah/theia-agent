@@ -247,6 +247,25 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Qwen Audio Agent · listening", rendered)
         self.assertIn("7.0 GB", rendered)
 
+    def test_render_separates_cleanup_health_from_session_health(self) -> None:
+        base_runtime = _snapshot()["runtime"]
+        rendered = render_lighthouse(
+            _snapshot(
+                runtime={
+                    **base_runtime,
+                    "cleanup": {
+                        "status": "degraded",
+                        "reason": "expired session cleanup failed",
+                    },
+                }
+            )
+        )
+
+        self.assertIn(
+            "Cleanup      degraded · expired session cleanup failed", rendered
+        )
+        self.assertNotIn("Session state degraded", rendered)
+
     def test_empty_workspace_and_missing_subsystems_are_truthful(self) -> None:
         stale_goal = "stale demo objective"
         rendered = render_lighthouse(

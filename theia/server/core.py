@@ -185,6 +185,15 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
         self._heartbeat_latency_ms: float | None = None
         self._heartbeat_consecutive_failures = 0
         self._codex_version: str | None = None
+        # ``None`` means the current App Server has not answered a deletion
+        # request yet. This capability is runtime-only and is never persisted.
+        self._thread_delete_supported: bool | None = None
+        self._cleanup_status = "unknown"
+        self._cleanup_reason: str | None = None
+        self._cleanup_last_error: dict[str, Any] | None = None
+        self._cleanup_cycle_active = False
+        self._cleanup_cycle_logged: set[str] = set()
+        self._cleanup_cycle_issue_seen = False
         self._write_lock = asyncio.Lock()
         self._models_lock = asyncio.Lock()
         self._next_request_id = 1
@@ -537,6 +546,49 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
             ),
         }
 
+    def _cleanup_error_metadata(
+        self, error: CodexAppServerError, *, method: str = "thread/delete"
+    ) -> dict[str, Any]:
+        """Return safe protocol metadata for the Lighthouse cleanup panel."""
+        protocol_method = getattr(error, "protocol_method", None) or method
+        protocol_message = getattr(error, "protocol_message", None)
+        message = protocol_message or _safe_error_reason(error, 240)
+        metadata: dict[str, Any] = {
+            "method": _safe_log_label(protocol_method),
+            "code": getattr(error, "protocol_code", None),
+            "message": _safe_intermediate_text(message, 240) or "unknown error",
+            "data": dict(getattr(error, "protocol_data", {}) or {}),
+        }
+        return metadata
+
+    def _set_cleanup_health(
+        self,
+        status: str,
+        reason: str | None = None,
+        *,
+        error: CodexAppServerError | None = None,
+        method: str = "thread/delete",
+    ) -> None:
+        self._cleanup_status = status
+        self._cleanup_reason = _safe_intermediate_text(reason, 120) if reason else None
+        if error is not None:
+            self._cleanup_last_error = self._cleanup_error_metadata(
+                error, method=method
+            )
+
+    def cleanup_snapshot(self) -> dict[str, Any]:
+        """Return bounded cleanup health without changing session health."""
+        return {
+            "status": self._cleanup_status,
+            "reason": self._cleanup_reason,
+            "thread_delete_supported": self._thread_delete_supported,
+            "last_error": (
+                dict(self._cleanup_last_error)
+                if self._cleanup_last_error is not None
+                else None
+            ),
+        }
+
     @staticmethod
     def _approval_policy(allow_tools: bool) -> str:
         if not allow_tools:
@@ -569,7 +621,13 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
             if completed.get("status") != "completed":
                 error = completed.get("error") or {}
                 terminal_status = str(completed.get("status") or "").strip()
-                message = _error_message(error) or terminal_status or "unknown error"
+                message = _error_message(error)
+                if not message:
+                    message = (
+                        terminal_status
+                        if terminal_status.casefold() not in {"", "failed"}
+                        else "Codex error notification without details"
+                    )
                 state.terminal_reason = message
                 if state.user_cancel_requested and _is_cancellation_terminal(
                     terminal_status, message
@@ -577,21 +635,36 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
                     reason = _cancel_terminal_reason(terminal_status, message)
                     diagnostic_reason = _safe_error_reason(message, 120) or reason
                     logger.info(
-                        "Codex turn cancelled (status=%s, reason=%s, duration_ms=%.1f)",
+                        "Codex %s cancelled (status=%s, reason=%s, duration_ms=%.1f)",
+                        "internal worker" if session.key.startswith("__") else "turn",
                         _safe_log_label(terminal_status),
                         _safe_log_label(diagnostic_reason),
                         (time.monotonic() - started_at) * 1000,
                     )
-                    self._record_runtime_event("turn_cancelled", diagnostic_reason)
+                    if not session.key.startswith("__"):
+                        self._record_runtime_event("turn_cancelled", diagnostic_reason)
                     raise CodexTurnCancelled(reason)
-                logger.warning(
-                    "Codex turn failed (status=%s, reason=%s, error_type=%s, "
-                    "duration_ms=%.1f)",
-                    _safe_log_label(terminal_status),
-                    _safe_log_label(_safe_error_reason(error or message, 120)),
-                    type(error).__name__,
-                    (time.monotonic() - started_at) * 1000,
-                )
+                diagnostic_reason = _safe_error_reason(message, 120)
+                internal_worker = bool(session.key and session.key.startswith("__"))
+                if internal_worker:
+                    logger.info(
+                        "Codex internal worker failed (status=%s, reason=%s, "
+                        "error_type=%s, duration_ms=%.1f)",
+                        _safe_log_label(terminal_status),
+                        _safe_log_label(diagnostic_reason),
+                        type(error).__name__,
+                        (time.monotonic() - started_at) * 1000,
+                    )
+                    self._record_runtime_event("worker_failed", diagnostic_reason)
+                else:
+                    logger.warning(
+                        "Codex turn failed (status=%s, reason=%s, error_type=%s, "
+                        "duration_ms=%.1f)",
+                        _safe_log_label(terminal_status),
+                        _safe_log_label(diagnostic_reason),
+                        type(error).__name__,
+                        (time.monotonic() - started_at) * 1000,
+                    )
                 raise CodexAppServerError(f"Codex turn failed: {message}")
             fallback = ""
             if state.last_agent_message_id:
@@ -605,12 +678,19 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
                 or fallback
                 or ("Codex completed the request without a text response.")
             )
-            logger.info(
-                "Codex turn completed (items=%d, duration_ms=%.1f)",
-                len(state.items),
-                (time.monotonic() - started_at) * 1000,
-            )
-            self._record_runtime_event("turn_completed")
+            if session.key.startswith("__"):
+                logger.debug(
+                    "Codex internal worker completed (items=%d, duration_ms=%.1f)",
+                    len(state.items),
+                    (time.monotonic() - started_at) * 1000,
+                )
+            else:
+                logger.info(
+                    "Codex turn completed (items=%d, duration_ms=%.1f)",
+                    len(state.items),
+                    (time.monotonic() - started_at) * 1000,
+                )
+                self._record_runtime_event("turn_completed")
             return result
         except asyncio.CancelledError:
             if state.diagnostics is not None:
@@ -620,11 +700,17 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
             if state.diagnostics is not None:
                 state.diagnostics.record_timeout()
             record_current_worker_timeout()
-            logger.warning(
-                "Codex turn timed out; interrupting it (duration_ms=%.1f)",
+            internal_worker = session.key.startswith("__")
+            logger_method = logger.info if internal_worker else logger.warning
+            logger_method(
+                "Codex %s timed out; interrupting it (duration_ms=%.1f)",
+                "internal worker" if internal_worker else "turn",
                 (time.monotonic() - started_at) * 1000,
             )
-            self._record_runtime_event("turn_timed_out")
+            if internal_worker:
+                self._record_runtime_event("worker_failed", "timeout")
+            else:
+                self._record_runtime_event("turn_timed_out")
             with contextlib.suppress(CodexAppServerError):
                 await self.interrupt(session_key)
             raise CodexTurnTimeoutError() from exc
@@ -850,18 +936,24 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
         }
         if self._model is not None:
             params["model"] = self._model
-        try:
-            await self._request("thread/resume", params)
-        except Exception:
-            self._mark_lighthouse_session_degraded(
-                session, "Codex session resume failed"
-            )
-            raise
-        session.thread_id = thread_id
-        session.loaded = True
-        self._set_thread_loaded(thread_id, True)
-        self._record_runtime_event("session_resumed")
-        self._persist_state()
+        assert session.lock is not None
+        async with session.lock:
+            try:
+                await self._request("thread/resume", params)
+            except Exception:
+                self._mark_lighthouse_session_degraded(
+                    session, "Codex session resume failed"
+                )
+                raise
+            session.thread_id = thread_id
+            session.loaded = True
+            # A resumed thread is fresh activity for retention purposes. This
+            # also prevents the next cleanup cycle from deleting it immediately
+            # because its persisted timestamp predates the resume.
+            session.last_activity_at = time.time()
+            self._set_thread_loaded(thread_id, True)
+            self._record_runtime_event("session_resumed")
+            self._persist_state()
 
     async def fork_session(self, session_key: str) -> str:
         """Fork the session's current Codex thread and return the new thread id."""
