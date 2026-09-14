@@ -24,10 +24,11 @@ def _snapshot(**overrides: Any) -> dict[str, Any]:
         },
         "session": "Server conversation · #general",
         "workspace": {
+            "source": "session workspace",
             "entries": (
                 {"category": "goal", "text": "Inspect the runtime"},
                 {"category": "open_question", "text": "Should the view stay enabled?"},
-            )
+            ),
         },
         "runtime": {
             "codex": "connected",
@@ -104,12 +105,18 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("7.0 GB", rendered)
 
     def test_empty_workspace_and_missing_subsystems_are_truthful(self) -> None:
+        stale_goal = "stale demo objective"
         rendered = render_lighthouse(
             _snapshot(
                 character={"name": "none", "source": "no overlay"},
                 presence={"status": "unknown", "line": "none"},
                 voice={"providers": (), "state": "disabled"},
-                workspace={"entries": ()},
+                workspace={
+                    "source": "session workspace",
+                    "entries": (),
+                    "goal": stale_goal,
+                },
+                session_objective=None,
                 runtime={"heartbeat": {"state": "unknown"}},
                 events=(),
             )
@@ -119,6 +126,30 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Voice        disabled", rendered)
         self.assertIn("No recent events", rendered)
         self.assertIn("Codex        unknown · unknown", rendered)
+        self.assertNotIn(stale_goal, rendered)
+        self.assertNotIn("Session objective", rendered)
+
+    def test_session_objective_is_distinct_from_workspace(self) -> None:
+        rendered = render_lighthouse(
+            _snapshot(
+                workspace={"source": "session workspace", "entries": ()},
+                session_objective="Ship the current release",
+            )
+        )
+        self.assertIn("Session objective Ship the current release", rendered)
+        self.assertIn("Workspace\n  No active workspace entries", rendered)
+
+    def test_workspace_entries_without_current_source_are_not_rendered(self) -> None:
+        rendered = render_lighthouse(
+            _snapshot(
+                workspace={
+                    "entries": ({"category": "goal", "text": "untrusted objective"},)
+                },
+                session_objective=None,
+            )
+        )
+        self.assertIn("Workspace\n  No active workspace entries", rendered)
+        self.assertNotIn("untrusted objective", rendered)
 
     async def test_noninteractive_terminal_keeps_normal_logging_and_no_heartbeat(self):
         heartbeat = AsyncMock()

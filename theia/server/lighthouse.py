@@ -190,11 +190,11 @@ class CodexLighthouseMixin:
 
     def _lighthouse_workspace(self, session: _Session | None) -> dict[str, Any]:
         if session is None:
-            return {"entries": (), "revision": 0}
+            return {"entries": (), "revision": 0, "source": "session workspace"}
         try:
             workspace = self._workspace_snapshot(session)
         except Exception:  # noqa: BLE001 - missing workspace must not stop the view
-            return {"entries": (), "revision": 0}
+            return {"entries": (), "revision": 0, "source": "session workspace"}
         entries = []
         for item in workspace.get("entries", ()):
             if not isinstance(item, dict):
@@ -207,7 +207,11 @@ class CodexLighthouseMixin:
             revision = max(0, int(workspace.get("revision", 0)))
         except (TypeError, ValueError):
             revision = 0
-        return {"entries": tuple(entries[:10]), "revision": revision}
+        return {
+            "entries": tuple(entries[:10]),
+            "revision": revision,
+            "source": "session workspace",
+        }
 
     @staticmethod
     def _lighthouse_integer(value: Any) -> int:
@@ -413,8 +417,14 @@ def render_lighthouse(snapshot: dict[str, Any]) -> str:
     attention_line = _dashboard_text(attention.get("active"), 100) or "none"
     workspace = snapshot.get("workspace")
     workspace = workspace if isinstance(workspace, dict) else {}
+    workspace_source = _dashboard_text(workspace.get("source"), 40).casefold()
     entries = workspace.get("entries")
-    entries = entries if isinstance(entries, (list, tuple)) else ()
+    entries = (
+        entries
+        if workspace_source == "session workspace"
+        and isinstance(entries, (list, tuple))
+        else ()
+    )
     runtime = snapshot.get("runtime")
     runtime = runtime if isinstance(runtime, dict) else {}
     heartbeat = runtime.get("heartbeat")
@@ -437,6 +447,7 @@ def render_lighthouse(snapshot: dict[str, Any]) -> str:
     memory_entries = runtime.get("memory_entries", 0)
     presence = snapshot.get("presence")
     presence = presence if isinstance(presence, dict) else {}
+    session_objective = _dashboard_text(snapshot.get("session_objective"), 180)
     lines = [
         f"Theia {_dashboard_text(snapshot.get('version'), 24) or 'unknown'} · Lighthouse View",
         "────────────────────────────────────────",
@@ -452,9 +463,12 @@ def render_lighthouse(snapshot: dict[str, Any]) -> str:
         f"Attention    {attention_line}",
         f"Mood         {mood_line}",
         f"Session      {_dashboard_session_label(snapshot.get('session'))}",
-        "────────────────────────────────────────",
-        "Workspace",
     ]
+    if session_objective:
+        # A separately named objective is not part of the workspace and must
+        # never be presented as a workspace goal.
+        lines.append(f"Session objective {session_objective}")
+    lines.extend(["────────────────────────────────────────", "Workspace"])
     workspace_count_before = len(lines)
     if not entries:
         lines.append("  No active workspace entries")

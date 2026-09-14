@@ -273,7 +273,7 @@ class WorkspaceStateTests(AsyncBehaviorTestBase):
         self.assertTrue(
             server._apply_workspace_delta(
                 first,
-                _operations(("goal", "goal", "Finish the design")),
+                _operations(("goal", "goal", "Verify workspace isolation")),
                 base_generation=1,
                 base_revision=0,
                 now=time.time(),
