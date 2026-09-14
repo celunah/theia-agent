@@ -49,6 +49,7 @@ from ..core import (
     _codex_logger,
     _path_from_value,
     _path_is_under,
+    _is_missing_codex_thread_error,
     _safe_intermediate_text,
     _truncate,
 )
@@ -1183,12 +1184,7 @@ class CodexWorkerMixin:
             try:
                 await self._request("thread/resume", params)
             except CodexAppServerError as exc:
-                message = str(exc).casefold()
-                if (
-                    "not found" not in message
-                    and "unknown thread" not in message
-                    and "no rollout found" not in message
-                ):
+                if not _is_missing_codex_thread_error(exc):
                     self._mark_lighthouse_session_degraded(
                         session, "Codex session resume failed"
                     )

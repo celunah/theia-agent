@@ -25,6 +25,7 @@ from ..core import (
     _TurnDiagnostics,
     _TurnState,
     _codex_logger,
+    _is_missing_codex_thread_error,
 )
 from .usage import estimated_tokens
 
@@ -171,12 +172,10 @@ class CodexRequestMixin:
                 try:
                     await self.delete_thread(thread_id)
                 except CodexAppServerError as exc:
-                    message = str(exc).casefold()
-                    if (
-                        "not found" not in message
-                        and "unknown thread" not in message
-                        and "no rollout found" not in message
-                    ):
+                    if not _is_missing_codex_thread_error(exc):
+                        self._mark_lighthouse_session_degraded(
+                            session, "Expired session cleanup failed"
+                        )
                         raise
                     self._forget_thread(thread_id)
             elif session.archived:
@@ -225,15 +224,13 @@ class CodexRequestMixin:
                     try:
                         await self.delete_thread(thread_id)
                     except CodexAppServerError as exc:
-                        message = str(exc).casefold()
-                        if (
-                            "not found" not in message
-                            and "unknown thread" not in message
-                            and "no rollout found" not in message
-                        ):
+                        if not _is_missing_codex_thread_error(exc):
                             logger.warning(
                                 "Could not delete an expired Codex session (error=%s)",
                                 type(exc).__name__,
+                            )
+                            self._mark_lighthouse_session_degraded(
+                                session, "Expired session cleanup failed"
                             )
                             continue
                         self._forget_thread(thread_id)

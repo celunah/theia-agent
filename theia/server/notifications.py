@@ -289,7 +289,27 @@ class CodexNotificationMixin:
         if method in {"context/compacted", "thread/compacted"} and state is not None:
             self._emit(state, "compacted", params)
             return
-        if method == "error" and state is not None:
+        if method == "error":
+            # A server-level error may carry only a thread id. It must not be
+            # attached to whichever turn happens to be active on that thread:
+            # late or unrelated errors otherwise surface as false turn
+            # failures. Turn errors are authoritative only with an exact,
+            # still-live turn id.
+            error_turn_id = params.get("turnId")
+            if not error_turn_id:
+                nested_turn = params.get("turn")
+                if isinstance(nested_turn, dict):
+                    error_turn_id = nested_turn.get("id")
+            state = self._turns.get(str(error_turn_id)) if error_turn_id else None
+            if (
+                state is not None
+                and params.get("threadId") is not None
+                and state.thread_id != str(params["threadId"])
+            ):
+                state = None
+            if state is None or state.done.done():
+                logger.debug("Ignored unassociated or late Codex error notification")
+                return
             state.completed = {
                 "status": "failed",
                 "error": params.get("error") or params,

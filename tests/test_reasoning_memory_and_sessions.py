@@ -71,6 +71,153 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         with self.assertRaisesRegex(main.CodexAppServerError, "404 Not Found"):
             await request
 
+    async def test_missing_thread_delete_is_quiet_and_cleans_expired_session(
+        self,
+    ) -> None:
+        server = main.CodexAppServer()
+        server._ensure_running = AsyncMock()
+        server._persist_state = lambda: None
+        server._request = AsyncMock(
+            side_effect=main.CodexAppServerError(
+                "Codex thread/delete failed: Request failed; 404 Not Found"
+            )
+        )
+        now = 1_000_000.0
+        session = server._session("expired-session")
+        session.thread_id = "gone-thread"
+        session.last_activity_at = now - main.SESSION_DELETE_AFTER - 1
+
+        with patch("theia.server.requests.logger.warning") as warning:
+            result = await server.enforce_retention(now=now)
+
+        self.assertEqual(result, {"archived": 0, "deleted": 1})
+        self.assertIsNone(session.thread_id)
+        warning.assert_not_called()
+
+    async def test_transport_does_not_warn_for_already_deleted_thread(self) -> None:
+        server = main.CodexAppServer()
+        server._send = AsyncMock()
+        request = asyncio.create_task(server._request("thread/delete", {}))
+        await asyncio.sleep(0)
+        request_id = next(iter(server._pending))
+        server._pending[request_id].set_result(
+            {
+                "id": request_id,
+                "error": {
+                    "message": "Request failed",
+                    "data": {"statusCode": 404, "statusText": "Not Found"},
+                },
+            }
+        )
+
+        with (
+            patch("theia.server.transport.logger.warning") as warning,
+            self.assertRaises(main.CodexAppServerError),
+        ):
+            await request
+
+        warning.assert_not_called()
+
+    async def test_real_expired_thread_delete_failure_degrades_session(self) -> None:
+        server = main.CodexAppServer()
+        server._ensure_running = AsyncMock()
+        server._persist_state = lambda: None
+        server._request = AsyncMock(
+            side_effect=main.CodexAppServerError("connection lost")
+        )
+        now = 1_000_000.0
+        session = server._session("expired-session")
+        session.thread_id = "thread"
+        session.last_activity_at = now - main.SESSION_DELETE_AFTER - 1
+
+        with patch("theia.server.requests.logger.warning") as warning:
+            result = await server.enforce_retention(now=now)
+
+        self.assertEqual(result, {"archived": 0, "deleted": 0})
+        self.assertEqual(session.thread_id, "thread")
+        self.assertEqual(session.lighthouse_status, "degraded")
+        self.assertEqual(session.lighthouse_reason, "Expired session cleanup failed")
+        warning.assert_called_once()
+
+    async def test_expired_thread_delete_failure_during_request_is_degraded(
+        self,
+    ) -> None:
+        server = main.CodexAppServer()
+        server._ensure_running = AsyncMock()
+        server._persist_state = lambda: None
+        server._request = AsyncMock(side_effect=main.CodexAppServerError("timeout"))
+        session = server._session("expired-session")
+        session.thread_id = "thread"
+        session.last_activity_at = time.time() - main.SESSION_DELETE_AFTER - 1
+
+        with self.assertRaisesRegex(main.CodexAppServerError, "timeout"):
+            await server._prepare_session_for_activity(session)
+
+        self.assertEqual(session.lighthouse_status, "degraded")
+        self.assertEqual(session.lighthouse_reason, "Expired session cleanup failed")
+
+    async def test_thread_only_codex_error_cannot_fail_active_turn(self) -> None:
+        server = main.CodexAppServer()
+        session = server._session("active-session")
+        state = main._TurnState(thread_id="thread", session=session)
+        server._turns["turn-1"] = state
+
+        server._handle_notification(
+            {
+                "method": "error",
+                "params": {
+                    "threadId": "thread",
+                    "error": {"message": "a stale server-level error"},
+                },
+            }
+        )
+
+        self.assertIsNone(state.completed)
+        self.assertFalse(state.done.done())
+
+    async def test_exact_live_codex_error_still_fails_active_turn(self) -> None:
+        server = main.CodexAppServer()
+        session = server._session("active-session")
+        state = main._TurnState(thread_id="thread", session=session)
+        server._turns["turn-1"] = state
+
+        server._handle_notification(
+            {
+                "method": "error",
+                "params": {
+                    "threadId": "thread",
+                    "turnId": "turn-1",
+                    "error": {"message": "real turn failure"},
+                },
+            }
+        )
+
+        self.assertEqual(
+            state.completed,
+            {"status": "failed", "error": {"message": "real turn failure"}},
+        )
+        self.assertTrue(state.done.done())
+
+    async def test_codex_error_from_another_thread_cannot_fail_live_turn(self) -> None:
+        server = main.CodexAppServer()
+        session = server._session("active-session")
+        state = main._TurnState(thread_id="thread", session=session)
+        server._turns["turn-1"] = state
+
+        server._handle_notification(
+            {
+                "method": "error",
+                "params": {
+                    "threadId": "another-thread",
+                    "turnId": "turn-1",
+                    "error": {"message": "unrelated failure"},
+                },
+            }
+        )
+
+        self.assertIsNone(state.completed)
+        self.assertFalse(state.done.done())
+
     async def test_non_adaptive_request_skips_assessment(self) -> None:
         with patch.dict(os.environ, {"CODEX_ADAPTIVE_REASONING": "false"}):
             server = main.CodexAppServer()

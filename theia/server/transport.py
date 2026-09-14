@@ -20,6 +20,7 @@ from ..core import (
     _codex_logger,
     _env_float,
     _error_message,
+    _is_missing_codex_thread_error,
     _path_from_value,
     _path_is_under,
     _safe_approval_reason,
@@ -100,11 +101,18 @@ class CodexTransportMixin:
         if "error" in response:
             error = response["error"]
             message = _error_message(error) or "unknown error"
-            logger.warning(
-                "Codex protocol request failed (method=%s, duration_ms=%.1f)",
-                method_label,
-                (time.monotonic() - started_at) * 1000,
-            )
+            if method == "thread/delete" and _is_missing_codex_thread_error(error):
+                logger.debug(
+                    "Codex thread was already absent during deletion "
+                    "(duration_ms=%.1f)",
+                    (time.monotonic() - started_at) * 1000,
+                )
+            else:
+                logger.warning(
+                    "Codex protocol request failed (method=%s, duration_ms=%.1f)",
+                    method_label,
+                    (time.monotonic() - started_at) * 1000,
+                )
             raise CodexAppServerError(f"Codex {method} failed: {message}")
         result = response.get("result", {})
         if not isinstance(result, dict):

@@ -428,6 +428,30 @@ def _error_message(value: Any, *, _depth: int = 0) -> str:
     return "; ".join(local_parts + nested_parts)
 
 
+def _is_missing_codex_thread_error(value: Any) -> bool:
+    """Return whether Codex reports that a persisted thread is already gone."""
+    message = _error_message(value).casefold()
+    if not message or any(
+        marker in message
+        for marker in ("method not found", "unknown method", "unsupported")
+    ):
+        return False
+    return any(
+        marker in message
+        for marker in (
+            "not found",
+            "unknown thread",
+            "unknown rollout",
+            "no rollout found",
+            "thread does not exist",
+            "thread doesn't exist",
+            "rollout does not exist",
+            "rollout doesn't exist",
+            "already deleted",
+        )
+    )
+
+
 def _env_float(name: str, default: float) -> float:
     try:
         return float(os.getenv(name, str(default)))
