@@ -452,10 +452,7 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
             "[2026-09-15 06:51] WARNING  Cleanup failed",
             rendered,
         )
-        self.assertIn(
-            "[2026-09-15 03:11] WARNING  Worker degraded",
-            rendered,
-        )
+        self.assertNotIn("Worker degraded", rendered)
         self.assertIn(
             "[2026-09-14 19:54] INFO     Codex turn completed",
             rendered,
@@ -463,6 +460,33 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("thread/delete", rendered)
         self.assertNotIn("serverOverloaded", rendered)
         self.assertNotIn("internal protocol detail", rendered)
+
+    def test_generic_internal_app_server_errors_are_diagnostic_only(self) -> None:
+        snapshot = _snapshot(
+            events=(
+                {
+                    "timestamp": 0,
+                    "event": "worker_failed",
+                    "detail": "serverOverloaded",
+                },
+            )
+        )
+        record = logging.LogRecord(
+            "theia.codex",
+            logging.INFO,
+            "core.py",
+            652,
+            "Codex internal worker failed (status=failed, reason=serverOverloaded)",
+            (),
+            None,
+        )
+        record.module = "core"
+        record.funcName = "_wait_for_turn"
+
+        self.assertNotIn("Worker degraded", render_lighthouse(snapshot))
+        diagnostics = render_lighthouse_diagnostics(snapshot, (record,))
+        self.assertIn("serverOverloaded", diagnostics)
+        self.assertIn("theia.codex/core._wait_for_turn", diagnostics)
 
     def test_diagnostic_detail_view_retains_technical_event_details(self) -> None:
         snapshot = _snapshot(

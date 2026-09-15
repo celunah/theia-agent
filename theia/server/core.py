@@ -656,7 +656,6 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
                         type(error).__name__,
                         (time.monotonic() - started_at) * 1000,
                     )
-                    self._record_runtime_event("worker_failed", diagnostic_reason)
                 else:
                     logger.warning(
                         "Codex turn failed (status=%s, reason=%s, error_type=%s, "
@@ -708,9 +707,7 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
                 "internal worker" if internal_worker else "turn",
                 (time.monotonic() - started_at) * 1000,
             )
-            if internal_worker:
-                self._record_runtime_event("worker_failed", "timeout")
-            else:
+            if not internal_worker:
                 self._record_runtime_event("turn_timed_out")
             with contextlib.suppress(CodexAppServerError):
                 await self.interrupt(session_key)

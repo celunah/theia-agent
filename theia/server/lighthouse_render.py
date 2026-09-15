@@ -108,6 +108,15 @@ def _stable_log_event_name(detail: Any) -> str | None:
     return None
 
 
+def _is_internal_worker_event(event_name: str, detail: Any = None) -> bool:
+    """Keep generic internal App Server failures out of the main dashboard."""
+    if event_name == "worker_failed":
+        return True
+    return event_name in {"log_warning", "log_error"} and (
+        _stable_log_event_name(detail) == "worker_failed"
+    )
+
+
 def _event_title(event_name: str, detail: Any = None) -> str:
     """Return a stable, operator-facing title for one runtime event."""
     if event_name in {"log_warning", "log_error"}:
@@ -492,6 +501,8 @@ def _event_lines(snapshot: dict[str, Any]) -> list[str]:
         if not isinstance(event, dict):
             continue
         event_name = str(event.get("event") or "").casefold()
+        if _is_internal_worker_event(event_name, event.get("detail")):
+            continue
         label = _event_title(event_name, event.get("detail"))
         severity = _event_severity(event_name, event.get("detail"))
         lines.append(
@@ -507,6 +518,8 @@ def _latest_problem(snapshot: dict[str, Any]) -> str:
         if not isinstance(event, dict):
             continue
         name = str(event.get("event") or "").casefold()
+        if _is_internal_worker_event(name, event.get("detail")):
+            continue
         if _event_severity(name, event.get("detail")) in {"WARNING", "ERROR", "FATAL"}:
             return _event_title(name, event.get("detail"))
     return "none"
@@ -671,6 +684,8 @@ def _compact_event_label(snapshot: dict[str, Any]) -> str:
         if not isinstance(event, dict):
             continue
         name = str(event.get("event") or "").casefold()
+        if _is_internal_worker_event(name, event.get("detail")):
+            continue
         return _event_title(name, event.get("detail"))
     return "none"
 
@@ -682,10 +697,23 @@ def _tight_compact_lines(snapshot: dict[str, Any], *, width: int) -> list[str]:
     workspace = parts["workspace"]
     runtime = parts["runtime"]
     events = snapshot.get("events")
-    event_count = len(events) if isinstance(events, (list, tuple)) else 0
+    event_count = (
+        sum(
+            1
+            for event in events
+            if isinstance(event, dict)
+            and not _is_internal_worker_event(
+                str(event.get("event") or "").casefold(), event.get("detail")
+            )
+        )
+        if isinstance(events, (list, tuple))
+        else 0
+    )
     event_label = _compact_event_label(snapshot)
     event_label = event_label.removeprefix("Codex ")
-    event_text = f"Recent events {event_count} · {event_label}"
+    event_text = f"Recent events {event_count}"
+    if event_count:
+        event_text += f" · {event_label}"
     if parts["errors"]:
         event_text = "Error " + _latest_problem(snapshot)
     presence_state = secondary[0].removeprefix("Presence     ").split(" · ")[0]
@@ -904,6 +932,26 @@ def _record_level_name(record: Any) -> str:
     return value or _record_severity(record)
 
 
+def _diagnostic_identifier(value: Any, limit: int) -> str:
+    """Return one safe logger/module/function identifier for diagnostics."""
+    value = _dashboard_text(value, limit)
+    return re.sub(r"[^A-Za-z0-9_.<>-]", "", value)
+
+
+def _diagnostic_source_label(record: Any) -> str:
+    """Show the safe logger, module, and originating Theia function."""
+    logger_name = _diagnostic_identifier(getattr(record, "name", "root"), 48)
+    logger_name = logger_name or "root"
+    module_name = _diagnostic_identifier(getattr(record, "module", ""), 40)
+    function_name = _diagnostic_identifier(getattr(record, "funcName", ""), 64)
+    source = logger_name
+    if module_name and module_name.casefold() != logger_name.casefold():
+        source += f"/{module_name}"
+    if function_name and function_name != "<module>":
+        source += f".{function_name}"
+    return source
+
+
 def _diagnostic_event_prefix(message: str, record: Any) -> str:
     """Find an event title from structured metadata or the message prefix."""
     explicit = getattr(record, "event_name", None) or getattr(record, "event", None)
@@ -921,13 +969,7 @@ def _styled_diagnostic_line(record: Any) -> Any:
     message = _diagnostic_message(record)
     severity = _record_severity(record)
     level_name = _record_level_name(record)
-    logger_name = _dashboard_text(getattr(record, "name", "root"), 48) or "root"
-    module_name = _dashboard_text(getattr(record, "module", ""), 40)
-    logger_label = (
-        f"{logger_name}/{module_name}"
-        if module_name and module_name.casefold() != logger_name.casefold()
-        else logger_name
-    )
+    source_label = _diagnostic_source_label(record)
     timestamp = _format_event_time(getattr(record, "created", None))
     exception = _diagnostic_exception(record)
     explicit_event = getattr(record, "event_name", None) or getattr(
@@ -947,7 +989,7 @@ def _styled_diagnostic_line(record: Any) -> Any:
         style=_severity_style(severity, emphasis=severity == "FATAL"),
     )
     line.append(" ")
-    line.append(logger_label, style=rich_style("INFO"))
+    line.append(source_label, style=rich_style("INFO"))
     line.append(": ")
     if explicit_event:
         line.append(explicit_event, style=f"bold {rich_style('INFO')}")

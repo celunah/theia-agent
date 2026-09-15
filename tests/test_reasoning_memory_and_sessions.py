@@ -298,12 +298,16 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
 
         with (
             patch("theia.server.core.logger.warning") as warning,
+            patch("theia.server.core.logger.info") as info,
             self.assertRaisesRegex(main.CodexAppServerError, "turn failed"),
         ):
             await server._wait_for_turn("__mood__:session", session, state, "turn")
 
         warning.assert_not_called()
-        self.assertEqual(server.runtime_events()[-1]["event"], "worker_failed")
+        info.assert_called_once()
+        self.assertFalse(
+            any(event["event"] == "worker_failed" for event in server.runtime_events())
+        )
 
     async def test_expired_thread_delete_failure_during_request_degrades_cleanup_only(
         self,
