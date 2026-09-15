@@ -29,6 +29,8 @@ from ..core import (
     _env_float,
     _error_message,
     _safe_error_reason,
+    _safe_failure_reason,
+    _preferred_error_message,
     _safe_log_label,
     _is_super_admin_user,
     _codex_logger,
@@ -477,6 +479,7 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
         self._skills_loaded_at = 0.0
         self._skills_lock = asyncio.Lock()
         self._skills_refresh_task: asyncio.Task[Any] | None = None
+        self._skills_last_at = 0.0
         self._rate_limits: dict[str, Any] | None = None
         self.account: dict[str, Any] | None = None
         self.requires_openai_auth = True
@@ -622,10 +625,10 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
             if completed.get("status") != "completed":
                 error = completed.get("error") or {}
                 terminal_status = str(completed.get("status") or "").strip()
-                message = (
-                    _error_message(error)
-                    or getattr(state, "notification_error_reason", None)
-                    or terminal_status
+                error_message = _error_message(error)
+                notification_reason = getattr(state, "notification_error_reason", None)
+                message = _preferred_error_message(
+                    error_message, notification_reason, terminal_status
                 )
                 if not message or message.casefold() == "failed":
                     message = "Codex reported a failed turn without a reason."
@@ -639,20 +642,20 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
                         "Codex %s cancelled (status=%s, reason=%s, duration_ms=%.1f)",
                         "internal worker" if session.key.startswith("__") else "turn",
                         _safe_log_label(terminal_status),
-                        _safe_log_label(diagnostic_reason),
+                        diagnostic_reason,
                         (time.monotonic() - started_at) * 1000,
                     )
                     if not session.key.startswith("__"):
                         self._record_runtime_event("turn_cancelled", diagnostic_reason)
                     raise CodexTurnCancelled(reason)
-                diagnostic_reason = _safe_error_reason(message, 120)
+                diagnostic_reason = _safe_failure_reason(message, error)
                 internal_worker = bool(session.key and session.key.startswith("__"))
                 if internal_worker:
                     logger.info(
                         "Codex internal worker failed (status=%s, reason=%s, "
                         "error_type=%s, duration_ms=%.1f)",
                         _safe_log_label(terminal_status),
-                        _safe_log_label(diagnostic_reason),
+                        diagnostic_reason,
                         type(error).__name__,
                         (time.monotonic() - started_at) * 1000,
                     )
@@ -661,7 +664,7 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
                         "Codex turn failed (status=%s, reason=%s, error_type=%s, "
                         "duration_ms=%.1f)",
                         _safe_log_label(terminal_status),
-                        _safe_log_label(diagnostic_reason),
+                        diagnostic_reason,
                         type(error).__name__,
                         (time.monotonic() - started_at) * 1000,
                     )

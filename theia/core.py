@@ -340,10 +340,18 @@ _ERROR_IGNORED_KEYS = frozenset(
     }
 )
 _ERROR_MESSAGE_KEYS = frozenset(
-    {"message", "detail", "details", "reason", "description"}
+    {
+        "message",
+        "detail",
+        "details",
+        "reason",
+        "description",
+        "additionaldetails",
+    }
 )
 _ERROR_STATUS_KEYS = frozenset(
     {
+        "code",
         "status",
         "statustext",
         "statuscode",
@@ -356,8 +364,11 @@ _ERROR_STATUS_KEYS = frozenset(
 _ERROR_NESTED_KEYS = frozenset(
     {"cause", "causes", "codexerrorinfo", "error", "errors", "inner"}
 )
+_ERROR_CONTEXT_KEYS = frozenset(
+    {"category", "code", "kind", "name", "operation", "type"}
+)
 _GENERIC_ERROR_MESSAGES = frozenset(
-    {"error", "failed", "failure", "request failed", "unknown error"}
+    {"error", "failed", "failure", "other", "request failed", "unknown error"}
 )
 _UNSPECIFIC_ERROR_KEYS = frozenset(
     {
@@ -365,8 +376,16 @@ _UNSPECIFIC_ERROR_KEYS = frozenset(
         "failed",
         "failure",
         "requestfailed",
+        "other",
         "unknownerror",
         "therequestfailedforanunspecifiedreason",
+    }
+)
+_GENERIC_TURN_ERROR_KEYS = frozenset(
+    {
+        "failed",
+        "codexreturnedanerrorwithoutdetails",
+        "codexreportedafailedturnwithoutareason",
     }
 )
 _PROTOCOL_DATA_KEYS = frozenset(
@@ -392,6 +411,51 @@ def _error_key(value: Any) -> str:
     return re.sub(r"[^a-z0-9]", "", str(value or "").casefold())
 
 
+def _humanize_error_label(value: Any) -> str:
+    """Make a bounded protocol enum or tagged-error key readable."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
+    text = re.sub(r"[_-]+", " ", text)
+    text = text[:96].strip()
+    return text[:1].upper() + text[1:]
+
+
+def _codex_error_info_message(value: Any, *, _depth: int) -> str:
+    """Preserve Codex's typed error classification alongside its details."""
+    if isinstance(value, str):
+        label = _humanize_error_label(value)
+        return f"Codex classification: {label}" if label else ""
+    if not isinstance(value, dict):
+        return _error_message(value, _depth=_depth)
+
+    base = _error_message(value, _depth=_depth)
+    classifications: list[str] = []
+    for key, item in value.items():
+        normalized_key = _error_key(key)
+        if normalized_key in {
+            *_ERROR_IGNORED_KEYS,
+            *_ERROR_MESSAGE_KEYS,
+            *_ERROR_STATUS_KEYS,
+            *_ERROR_CONTEXT_KEYS,
+        }:
+            continue
+        if not isinstance(item, (dict, list, str)):
+            continue
+        label = _humanize_error_label(key)
+        if not label:
+            continue
+        detail = _error_message(item, _depth=_depth + 1)
+        classifications.append(f"{label}: {detail}" if detail else label)
+    if classifications:
+        classification_text = "; ".join(classifications)
+        if not base or base in classification_text:
+            return classification_text
+        return f"{classification_text}; {base}"
+    return base
+
+
 def _error_message(value: Any, *, _depth: int = 0) -> str:
     """Extract useful nested Codex error details without serializing payloads."""
     if _depth > 5:
@@ -415,14 +479,27 @@ def _error_message(value: Any, *, _depth: int = 0) -> str:
     direct_message = next(
         (
             str(normalized[key]).strip()
-            for key in ("message", "detail", "details", "reason", "description")
+            for key in (
+                "message",
+                "detail",
+                "details",
+                "reason",
+                "description",
+                "additionaldetails",
+            )
             if isinstance(normalized.get(key), str) and normalized[key].strip()
         ),
         "",
     )
     detail_parts = [
         str(normalized[key]).strip()
-        for key in ("detail", "details", "reason", "description")
+        for key in (
+            "detail",
+            "details",
+            "reason",
+            "description",
+            "additionaldetails",
+        )
         if isinstance(normalized.get(key), str) and normalized[key].strip()
     ]
 
@@ -467,6 +544,17 @@ def _error_message(value: Any, *, _depth: int = 0) -> str:
         if part not in local_parts:
             local_parts.append(part)
 
+    for key in ("category", "kind", "name", "operation", "type", "code"):
+        candidate = normalized.get(key)
+        if not isinstance(candidate, str) or not candidate.strip():
+            continue
+        candidate = candidate.strip()
+        if candidate.casefold() in _GENERIC_ERROR_MESSAGES:
+            continue
+        context = _humanize_error_label(candidate)
+        if context and context not in local_parts:
+            local_parts.append(context)
+
     nested_parts: list[str] = []
     for key, item in value.items():
         normalized_key = _error_key(key)
@@ -476,7 +564,10 @@ def _error_message(value: Any, *, _depth: int = 0) -> str:
         }:
             continue
         if isinstance(item, (dict, list)) or normalized_key in _ERROR_NESTED_KEYS:
-            part = _error_message(item, _depth=_depth + 1)
+            if normalized_key == "codexerrorinfo":
+                part = _codex_error_info_message(item, _depth=_depth + 1)
+            else:
+                part = _error_message(item, _depth=_depth + 1)
             if part and part not in local_parts and part not in nested_parts:
                 nested_parts.append(part)
 
@@ -799,6 +890,62 @@ def _safe_error_reason(
     if _error_key(text) in _UNSPECIFIC_ERROR_KEYS:
         text = ""
     return text or fallback
+
+
+def _safe_error_context(value: Any, limit: int = 240) -> str:
+    """Return safe protocol metadata that complements a generic error reason."""
+    if not isinstance(value, dict):
+        return ""
+    normalized = {_error_key(key): item for key, item in value.items()}
+    parts: list[str] = []
+    for key in (
+        "code",
+        "statuscode",
+        "status",
+        "statustext",
+        "type",
+        "kind",
+        "category",
+        "operation",
+    ):
+        item = normalized.get(key)
+        if isinstance(item, bool) or not isinstance(item, (int, float, str)):
+            continue
+        text = str(item).strip()
+        if not text or _error_key(text) in _GENERIC_ERROR_MESSAGES:
+            continue
+        label = {
+            "statuscode": "status_code",
+            "statustext": "status_text",
+        }.get(key, key)
+        safe = (
+            str(item)
+            if isinstance(item, (int, float)) and not isinstance(item, bool)
+            else _safe_intermediate_text(text, 80)
+        )
+        if safe:
+            parts.append(f"{label}={safe}")
+    data = normalized.get("data")
+    data_text = _error_message(data)
+    if data_text:
+        safe_data = _safe_error_reason(data_text, 160, fallback="")
+        if safe_data:
+            parts.append(f"data={safe_data}")
+    return _truncate("; ".join(parts), limit)
+
+
+def _preferred_error_message(primary: str, secondary: str | None, fallback: str) -> str:
+    """Prefer a specific notification reason over a generic terminal error."""
+    if secondary and (not primary or _error_key(primary) in _GENERIC_TURN_ERROR_KEYS):
+        return secondary
+    return primary or secondary or fallback
+
+
+def _safe_failure_reason(value: Any, error: Any, limit: int = 240) -> str:
+    """Combine a safe error reason with bounded protocol context."""
+    reason = _safe_error_reason(value, limit)
+    context = _safe_error_context(error)
+    return _truncate(f"{reason}; {context}" if context else reason, limit)
 
 
 @dataclass

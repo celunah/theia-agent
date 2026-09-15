@@ -652,6 +652,21 @@ class CommandSurfaceTests(unittest.TestCase):
         )
         self.assertEqual(reason, "Request failed; 404 Not Found")
 
+    def test_error_reason_preserves_app_server_classification_and_details(self) -> None:
+        reason = main._safe_error_reason(
+            {
+                "message": "",
+                "codexErrorInfo": "other",
+                "additionalDetails": "response stream ended",
+            }
+        )
+        self.assertEqual(reason, "response stream ended; Codex classification: Other")
+
+        reason = main._safe_error_reason(
+            {"codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": 503}}}
+        )
+        self.assertEqual(reason, "Response Stream Disconnected: 503")
+
     def test_error_reason_redacts_credentials_while_preserving_status(self) -> None:
         reason = main._safe_error_reason(
             "Request failed: HTTP 404 Not Found api_key=secret-value"

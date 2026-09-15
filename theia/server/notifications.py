@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import TYPE_CHECKING, Any
 
 from ..colors import discord_color
@@ -16,6 +17,7 @@ from ..core import (
 )
 
 logger = _codex_logger()
+SKILLS_CHANGE_DEDUP_SECONDS = 30.0
 
 
 class CodexNotificationMixin:
@@ -23,6 +25,7 @@ class CodexNotificationMixin:
         _memory_roots: Any
         _skill_roots: Any
         _skills_refresh_task: asyncio.Task[Any] | None
+        _skills_last_at: float
         _turns: Any
 
     def __getattr__(self, name: str) -> Any:
@@ -151,13 +154,19 @@ class CodexNotificationMixin:
                 self._set_thread_loaded(thread_id, False)
             return
         if method == "skills/changed":
-            logger.info("Codex skill catalog changed; refreshing it")
             self._skills_cache = ()
             self._skills_loaded_at = 0.0
-            if self._skills_refresh_task is None or self._skills_refresh_task.done():
-                self._skills_refresh_task = asyncio.create_task(
-                    self._refresh_skills_after_change()
-                )
+            refresh_task = self._skills_refresh_task
+            if refresh_task is not None and not refresh_task.done():
+                return
+            now = time.monotonic()
+            if now - self._skills_last_at < SKILLS_CHANGE_DEDUP_SECONDS:
+                return
+            self._skills_last_at = now
+            logger.info("Codex skill catalog changed; refreshing it")
+            self._skills_refresh_task = asyncio.create_task(
+                self._refresh_skills_after_change()
+            )
             return
         if method == "item/agentMessage/delta":
             delta = params.get("delta")
