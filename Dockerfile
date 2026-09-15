@@ -16,6 +16,8 @@ RUN git rev-parse --short=7 HEAD > /theia-build-revision
 FROM python:3.12-slim-bookworm
 
 ARG THEIA_VERSION=2.0.0
+ARG THEIA_UID=1000
+ARG THEIA_GID=1000
 
 LABEL org.opencontainers.image.version="${THEIA_VERSION}"
 
@@ -44,8 +46,9 @@ RUN apt-get update \
         nodejs \
         npm \
     && rm -rf /var/lib/apt/lists/* \
-    && groupadd --gid 10001 theia \
-    && useradd --create-home --gid 10001 --uid 10001 --shell /usr/sbin/nologin theia
+    && groupadd --gid "${THEIA_GID}" theia \
+    && useradd --create-home --gid "${THEIA_GID}" --uid "${THEIA_UID}" \
+        --shell /usr/sbin/nologin theia
 
 WORKDIR /app
 

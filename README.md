@@ -74,10 +74,16 @@ Create `.env`, add your Discord bot token, then run:
 
 ```bash
 cp .env.example .env
+export THEIA_UID="$(id -u)"
+export THEIA_GID="$(id -g)"
 docker compose up --build -d
 ```
 
-Theia keeps her private data and working files in the mounted directories.
+The UID and GID are passed both to the image build and the container runtime,
+so Theia owns bind-mounted files as the same account as the host. Compose
+fails closed if either identity is missing instead of silently creating files
+with a mismatched owner. Theia keeps her private data and working files in the
+mounted directories.
 
 Administrator requests can inspect the private `.theia` runtime when needed,
 but operations there always require approval.

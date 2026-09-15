@@ -1,12 +1,14 @@
 services:
   theia:
-    userns_mode: "keep-id:uid=10001,gid=10001"
+    user: "${THEIA_UID:?Set THEIA_UID to the host UID}:${THEIA_GID:?Set THEIA_GID to the host GID}"
     network_mode: host
     build:
       context: .
       dockerfile: Dockerfile
       args:
         THEIA_VERSION: 2.0.0
+        THEIA_UID: "${THEIA_UID:?Set THEIA_UID to the host UID}"
+        THEIA_GID: "${THEIA_GID:?Set THEIA_GID to the host GID}"
     image: theia-agent:2.0.0
     env_file:
       - .env
