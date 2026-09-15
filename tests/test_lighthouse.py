@@ -1142,15 +1142,11 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("TERM: xterm-256color", compose)
         self.assertIn("COLORTERM: truecolor", compose)
         self.assertIn(
-            'user: "${THEIA_UID:?Set THEIA_UID to the host UID}:${THEIA_GID:?Set THEIA_GID to the host GID}"',
+            'user: "${THEIA_UID:-1000}:${THEIA_GID:-1000}"',
             compose,
         )
-        self.assertIn(
-            'THEIA_UID: "${THEIA_UID:?Set THEIA_UID to the host UID}"', compose
-        )
-        self.assertIn(
-            'THEIA_GID: "${THEIA_GID:?Set THEIA_GID to the host GID}"', compose
-        )
+        self.assertIn('THEIA_UID: "${THEIA_UID:-1000}"', compose)
+        self.assertIn('THEIA_GID: "${THEIA_GID:-1000}"', compose)
         self.assertNotIn("userns_mode:", compose)
 
         dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
