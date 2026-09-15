@@ -1115,6 +1115,44 @@ def _styled_diagnostic_event(event: dict[str, Any]) -> Any:
     return line
 
 
+def _wrap_diagnostic_lines(lines: list[Any], *, width: int) -> list[Any]:
+    """Wrap styled diagnostic rows so terminal height calculations stay true."""
+    from rich.console import Console
+
+    console = Console(width=max(1, _usable_width(width)), color_system=None)
+    wrapped: list[Any] = []
+    for line in lines:
+        wrapped.extend(
+            line.wrap(
+                console,
+                width=max(1, _usable_width(width)),
+                overflow="fold",
+                no_wrap=False,
+            )
+            or [line]
+        )
+    return wrapped
+
+
+def _fit_diagnostic_lines(lines: list[Any], *, width: int, height: int) -> list[Any]:
+    """Keep the diagnostic header and footer visible in a short terminal."""
+    from rich.text import Text
+
+    wrapped = _wrap_diagnostic_lines(lines, width=width)
+    content_budget = max(0, height - 1)
+    if len(wrapped) > content_budget:
+        if content_budget == 0:
+            return []
+        if content_budget == 1:
+            return wrapped[:1]
+        if content_budget == 2:
+            return [wrapped[0], wrapped[-1]]
+        marker = Text("  … diagnostic details truncated", style=rich_style("DISABLED"))
+        tail_count = content_budget - 3
+        return [wrapped[0], marker, *wrapped[-(tail_count + 1) :]]
+    return [*wrapped, *([Text()] * (content_budget - len(wrapped)))]
+
+
 def render_lighthouse_diagnostics_rich(
     snapshot: dict[str, Any],
     records: Any = (),
@@ -1126,13 +1164,12 @@ def render_lighthouse_diagnostics_rich(
     from rich.text import Text
 
     width, height = _dimensions(width, height)
-    rendered = Text()
+    lines: list[Text] = []
     version = _dashboard_text(snapshot.get("version"), 24) or THEIA_VERSION
-    rendered.append(
-        f"Theia {version} · Lighthouse Diagnostics", style=rich_style("INFO")
+    lines.append(
+        Text(f"Theia {version} · Lighthouse Diagnostics", style=rich_style("INFO"))
     )
-    rendered.append("\n")
-    rendered.append(_separator(width), style=rich_style("INFO"))
+    lines.append(Text(_separator(width), style=rich_style("INFO")))
     events = snapshot.get("events")
     events = events if isinstance(events, (list, tuple)) else ()
     event_items = [
@@ -1143,25 +1180,24 @@ def render_lighthouse_diagnostics_rich(
         and _dashboard_text(event.get("detail"), 180)
     ]
     for event in event_items:
-        rendered.append("\n")
-        rendered.append(_styled_diagnostic_event(event))
+        lines.append(_styled_diagnostic_event(event))
     if event_items:
-        rendered.append("\n")
-        rendered.append(_separator(width), style=rich_style("INFO"))
+        lines.append(Text(_separator(width), style=rich_style("INFO")))
     valid_records = [
         record
         for record in list(records)[-LIGHTHOUSE_DIAGNOSTIC_LIMIT:][::-1]
         if _diagnostic_message(record)
     ]
     if valid_records:
-        for record in valid_records:
-            rendered.append("\n")
-            rendered.append(_styled_diagnostic_line(record))
+        lines.extend(_styled_diagnostic_line(record) for record in valid_records)
     elif not event_items:
-        rendered.append("\n  No diagnostic details", style=rich_style("DISABLED"))
-    rendered.append("\n")
-    rendered.append(_separator(width), style=rich_style("INFO"))
-    rendered.append("\n")
+        lines.append(Text("  No diagnostic details", style=rich_style("DISABLED")))
+    lines.append(Text(_separator(width), style=rich_style("INFO")))
+
+    rendered = Text()
+    for line in _fit_diagnostic_lines(lines, width=width, height=height):
+        rendered.append(line)
+        rendered.append("\n")
     rendered.append(_footer(width, "ESC go back"), style=rich_style("INFO"))
     return rendered
 

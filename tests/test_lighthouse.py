@@ -93,11 +93,11 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
                 "CONNECTED": "#A5BAFF",
                 "HEALTHY": "#A5BAFF",
                 "DEGRADED": "#C0E68C",
-                "DISABLED": "#2E304C",
+                "DISABLED": "#8A86A0",
             },
         )
         self.assertEqual(color_value("INFO"), 0xA5BAFF)
-        self.assertEqual(color_value("DISABLED"), 0x2E304C)
+        self.assertEqual(color_value("DISABLED"), 0x8A86A0)
 
         formatter = core_module._CodexColorFormatter(use_colors=True)
         info = logging.LogRecord(
@@ -159,8 +159,8 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
             },
             attention={"active": "none"},
         )
-        self.assertIn("#2e304c", style_for(neutral, "not configured"))
-        self.assertIn("#2e304c", style_for(neutral, "none"))
+        self.assertIn("#8a86a0", style_for(neutral, "not configured"))
+        self.assertIn("#8a86a0", style_for(neutral, "none"))
 
     def test_diagnostic_fatal_uses_the_darker_red(self) -> None:
         record = logging.LogRecord(
@@ -584,7 +584,7 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
             "bold reverse", str(rendered.get_style_at_offset(console, fatal_offset))
         )
         self.assertIn(
-            "#2e304c",
+            "#8a86a0",
             str(
                 rendered.get_style_at_offset(console, rendered.plain.index("2026-"))
             ).casefold(),
@@ -598,7 +598,7 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
             ).casefold(),
         )
         self.assertIn(
-            "#2e304c",
+            "#8a86a0",
             str(
                 rendered.get_style_at_offset(
                     console, rendered.plain.index("method=worker")
@@ -731,7 +731,27 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("Theia 2.0.7 · Lighthouse Diagnostics", rendered)
         self.assertTrue(all(len(line) <= 42 for line in rendered.splitlines()))
+        self.assertEqual(len(rendered.splitlines()), 12)
         self.assertEqual(rendered.splitlines()[-1].strip(), "ESC go back")
+
+    def test_diagnostic_footer_stays_anchored_with_wrapped_details(self) -> None:
+        record = logging.LogRecord(
+            "theia.codex",
+            logging.INFO,
+            "notifications.py",
+            1,
+            "A diagnostic detail that is long enough to wrap across multiple terminal rows.",
+            (),
+            None,
+        )
+        rendered = render_lighthouse_diagnostics(
+            _snapshot(), (record,), width=44, height=12
+        )
+        lines = rendered.splitlines()
+
+        self.assertEqual(len(lines), 12)
+        self.assertEqual(lines[-1].strip(), "ESC go back")
+        self.assertIn("detail that is long enough", rendered)
 
     def test_empty_workspace_and_missing_subsystems_are_truthful(self) -> None:
         stale_goal = "stale demo objective"

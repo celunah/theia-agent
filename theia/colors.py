@@ -17,7 +17,9 @@ THEIA_COLORS: dict[str, str] = {
     "CONNECTED": "#A5BAFF",
     "HEALTHY": "#A5BAFF",
     "DEGRADED": "#C0E68C",
-    "DISABLED": "#2E304C",
+    # Keep secondary and unavailable values muted without losing contrast on
+    # the dark terminal background used by the Lighthouse View.
+    "DISABLED": "#8A86A0",
 }
 
 
