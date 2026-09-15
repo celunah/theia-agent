@@ -1,6 +1,9 @@
 # pylint: disable=wildcard-import,unused-wildcard-import,undefined-variable
 import io
 
+from rich.console import Console
+from rich.text import Text
+
 from tests.test_support import *
 
 from theia.server.lighthouse import (
@@ -9,6 +12,7 @@ from theia.server.lighthouse import (
     render_lighthouse_diagnostics,
     render_lighthouse_rich,
 )
+from theia.server.lighthouse_render import render_lighthouse_diagnostics_rich
 from theia.colors import THEIA_COLORS, color_value
 
 
@@ -429,10 +433,171 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
 
         rendered = render_lighthouse_diagnostics(snapshot, (record,))
 
+        self.assertIn("Theia 2.0.0 · Lighthouse Diagnostics", rendered)
+        self.assertNotIn("Status       Processing request", rendered)
+        self.assertNotIn("Runtime\n", rendered)
         self.assertIn("method=thread/delete", rendered)
         self.assertIn("code=-32600", rendered)
         self.assertIn("theia.cleanup", rendered)
         self.assertNotIn("No diagnostic details", rendered)
+
+    def test_diagnostics_use_structured_severity_and_secondary_hierarchy(self) -> None:
+        console = Console()
+        info = logging.LogRecord(
+            "theia.runtime",
+            logging.INFO,
+            "runtime.py",
+            1,
+            "ERROR is only part of this info message; healthy",
+            (),
+            None,
+        )
+        warning = logging.LogRecord(
+            "theia.worker",
+            logging.WARNING,
+            "worker.py",
+            2,
+            "Worker degraded (method=worker, duration_ms=12)",
+            (),
+            None,
+        )
+        error = logging.LogRecord(
+            "theia.transport",
+            logging.ERROR,
+            "transport.py",
+            3,
+            "connection lost",
+            (),
+            None,
+        )
+        fatal = logging.LogRecord(
+            "theia.process",
+            logging.CRITICAL,
+            "process.py",
+            4,
+            "process stopped",
+            (),
+            None,
+        )
+
+        rendered = render_lighthouse_diagnostics_rich(
+            _snapshot(), (info, warning, error, fatal), width=100
+        )
+
+        info_offset = rendered.plain.index("ERROR is only")
+        warning_offset = rendered.plain.index("Worker degraded")
+        error_offset = rendered.plain.index("connection lost")
+        fatal_offset = rendered.plain.index("process stopped")
+        self.assertIn(
+            "#a5baff",
+            str(rendered.get_style_at_offset(console, info_offset)).casefold(),
+        )
+        self.assertIn(
+            "#c0e68c",
+            str(rendered.get_style_at_offset(console, warning_offset)).casefold(),
+        )
+        self.assertIn(
+            "#c07178",
+            str(rendered.get_style_at_offset(console, error_offset)).casefold(),
+        )
+        self.assertIn(
+            "bold reverse", str(rendered.get_style_at_offset(console, fatal_offset))
+        )
+        self.assertIn(
+            "#2e304c",
+            str(
+                rendered.get_style_at_offset(console, rendered.plain.index("2026-"))
+            ).casefold(),
+        )
+        self.assertIn(
+            "#a5baff",
+            str(
+                rendered.get_style_at_offset(
+                    console, rendered.plain.index("theia.runtime")
+                )
+            ).casefold(),
+        )
+        self.assertIn(
+            "#2e304c",
+            str(
+                rendered.get_style_at_offset(
+                    console, rendered.plain.index("method=worker")
+                )
+            ).casefold(),
+        )
+
+    def test_diagnostic_event_metadata_is_displayed_as_a_bright_event_title(
+        self,
+    ) -> None:
+        record = logging.LogRecord(
+            "theia.worker", logging.INFO, "worker.py", 1, "accepted", (), None
+        )
+        record.event_name = "Worker completed"
+        rendered = render_lighthouse_diagnostics_rich(_snapshot(), (record,))
+        self.assertIn("Worker completed: accepted", rendered.plain)
+        offset = rendered.plain.index("Worker completed")
+        console = Console()
+        self.assertIn("bold", str(rendered.get_style_at_offset(console, offset)))
+        self.assertIn(
+            "#a5baff", str(rendered.get_style_at_offset(console, offset)).casefold()
+        )
+
+    def test_diagnostic_unknown_level_falls_back_to_info_style(self) -> None:
+        record = logging.LogRecord(
+            "theia.runtime", 0, "runtime.py", 1, "custom level text", (), None
+        )
+        record.levelname = "NOTICE"
+        rendered = render_lighthouse_diagnostics_rich(_snapshot(), (record,))
+        offset = rendered.plain.index("NOTICE")
+        self.assertIn(
+            "#a5baff", str(rendered.get_style_at_offset(Console(), offset)).casefold()
+        )
+
+    def test_responsive_layout_is_bounded_and_keeps_the_footer_visible(self) -> None:
+        snapshot = _snapshot(
+            action="A very long current action that must be truncated in a narrow terminal",
+            events=tuple(
+                {"timestamp": index, "event": "turn_completed"} for index in range(20)
+            ),
+        )
+        for width, height in ((80, 20), (48, 12), (36, 10)):
+            rendered = render_lighthouse(
+                snapshot, width=width, height=height, show_keyboard_hint=True
+            )
+            lines = rendered.splitlines()
+            self.assertLessEqual(len(lines), height)
+            self.assertEqual(lines[-1].strip(), "F1 diagnostics")
+            self.assertTrue(all(len(line) <= max(1, width - 2) for line in lines))
+            self.assertIn("Status", rendered)
+            self.assertIn("Model", rendered)
+            self.assertIn("Character", rendered)
+            self.assertIn("Session", rendered)
+            self.assertIn("Codex", rendered)
+            self.assertIn("Heartbeat", rendered)
+            self.assertIn("Cleanup", rendered)
+        self.assertIn("…", render_lighthouse(snapshot, width=48, height=12))
+
+    def test_live_view_rerenders_when_terminal_dimensions_change(self) -> None:
+        view = LighthouseView(
+            SimpleNamespace(lighthouse_snapshot=Mock(return_value=_snapshot()))
+        )
+        view._text_type = Text
+        view._terminal_dimensions = Mock(side_effect=((120, 40), (48, 12)))
+
+        normal = view._render_current_payload()
+        compact = view._render_current_payload()
+
+        self.assertNotEqual(normal.plain, compact.plain)
+        self.assertEqual(compact.plain.splitlines()[-1].strip(), "F1 diagnostics")
+        self.assertIn("Heartbeat", compact.plain)
+
+    def test_diagnostic_separator_uses_live_width_and_escape_returns(self) -> None:
+        rendered = render_lighthouse_diagnostics(
+            _snapshot(version="2.0.7"), width=44, height=12
+        )
+        self.assertIn("Theia 2.0.7 · Lighthouse Diagnostics", rendered)
+        self.assertTrue(all(len(line) <= 42 for line in rendered.splitlines()))
+        self.assertEqual(rendered.splitlines()[-1].strip(), "ESC go back")
 
     def test_empty_workspace_and_missing_subsystems_are_truthful(self) -> None:
         stale_goal = "stale demo objective"
@@ -611,9 +776,14 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
         view._handle_keyboard_text("11~")
         self.assertTrue(view._diagnostic_mode)
         self.assertTrue(live.update.called)
-        self.assertIn("Lighthouse diagnostic details", live.update.call_args.args[0])
+        self.assertIn(
+            "Theia 2.0.0 · Lighthouse Diagnostics", live.update.call_args.args[0]
+        )
 
         view._handle_keyboard_text("\x1bOP")
+        self.assertFalse(view._diagnostic_mode)
+        view._diagnostic_mode = True
+        view._handle_keyboard_text("\x1b")
         self.assertFalse(view._diagnostic_mode)
 
     async def test_heartbeat_uses_account_probe_without_a_turn(self) -> None:

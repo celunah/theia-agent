@@ -11,114 +11,29 @@ import contextlib
 import logging
 import math
 import os
-import re
+import shutil
 import sys
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, cast
 
-from ..colors import rich_style
 from ..core import (
     DEFAULT_CODEX_MODEL,
     THEIA_VERSION,
     _env_bool,
     _safe_intermediate_text,
 )
+from .lighthouse_render import (
+    LIGHTHOUSE_DIAGNOSTIC_LIMIT,
+    render_lighthouse,
+    render_lighthouse_diagnostics,
+    render_lighthouse_rich,
+)
 
 LIGHTHOUSE_ENABLED_ENV = "THEIA_LIGHTHOUSE_ENABLED"
 LIGHTHOUSE_REFRESH_INTERVAL = 1.0
 LIGHTHOUSE_HEARTBEAT_INTERVAL = 5.0
-LIGHTHOUSE_EVENT_LIMIT = 12
-LIGHTHOUSE_DIAGNOSTIC_LIMIT = 256
-
-_EVENT_LABELS = {
-    "listening_state_entered": "Listening state entered",
-    "speaking_state_entered": "Speaking state entered",
-    "attention_changed": "Attention changed",
-    "workspace_updated": "Workspace updated",
-    "turn_started": "Codex turn started",
-    "turn_completed": "Codex turn completed",
-    "turn_timed_out": "Codex turn timed out",
-    "turn_cancelled": "Codex turn stopped",
-    "cleanup_failed": "Cleanup failed",
-    "turn_failed": "Codex turn failed",
-    "log_warning": "Warning",
-    "log_error": "Error",
-    "character_loaded": "Character overlay loaded",
-    "model_changed": "Model changed",
-    "worker_started": "Worker started",
-    "worker_completed": "Worker completed",
-    "worker_failed": "Worker degraded",
-    "approval_requested": "Approval requested",
-    "approval_resolved": "Approval resolved",
-    "session_created": "Session created",
-    "session_resumed": "Session resumed",
-    "session_selected": "Session selected",
-    "session_reset": "Session reset",
-    "session_degraded": "Session degraded",
-    "codex_starting": "Codex starting",
-    "codex_start_failed": "Codex start failed",
-    "codex_stopped": "Codex stopped",
-    "codex_connected": "Codex connected",
-    "codex_recovered": "Codex recovered",
-    "codex_restarted": "Codex restarted",
-    "presence_updated": "Presence updated",
-}
-
-_EVENT_WARNING_NAMES = frozenset(
-    {
-        "cleanup_failed",
-        "turn_failed",
-        "turn_timed_out",
-        "worker_failed",
-        "session_degraded",
-        "codex_start_failed",
-    }
-)
-
-
-def _stable_log_event_name(detail: Any) -> str | None:
-    """Map known log messages to stable titles without displaying their detail."""
-    text = str(detail or "").casefold()
-    if "cleanup" in text and "failed" in text:
-        return "cleanup_failed"
-    if "internal worker" in text and ("failed" in text or "timed out" in text):
-        return "worker_failed"
-    if "turn timed out" in text:
-        return "turn_timed_out"
-    if "turn failed" in text:
-        return "turn_failed"
-    return None
-
-
-def _event_title(event_name: str, detail: Any = None) -> str:
-    """Return a stable, operator-facing title for one runtime event."""
-    if event_name in {"log_warning", "log_error"}:
-        event_name = _stable_log_event_name(detail) or event_name
-    return _EVENT_LABELS.get(event_name, "Runtime state changed")
-
-
-def _event_severity(event_name: str, detail: Any = None) -> str:
-    """Return the compact severity displayed beside a stable event title."""
-    if event_name in {"fatal", "critical", "log_critical"}:
-        return "FATAL"
-    if event_name == "log_error":
-        return "ERROR"
-    if event_name == "log_warning":
-        event_name = _stable_log_event_name(detail) or event_name
-    if event_name in _EVENT_WARNING_NAMES:
-        return "WARNING"
-    return "INFO"
-
-
-_MODEL_LABELS = {
-    "gpt-5.6-luna": "GPT-5.6 Luna",
-    "gpt-5.6-terra": "GPT-5.6 Terra",
-    "gpt-5.6-sol": "GPT-5.6 Sol",
-    "gpt-6-astra": "GPT-6 Astra",
-}
 
 logger = logging.getLogger("theia.codex")
 
@@ -491,368 +406,6 @@ class CodexLighthouseMixin:
         return snapshot
 
 
-def _dashboard_text(value: Any, limit: int = 160) -> str:
-    """Keep terminal values bounded and free of control sequences or paths."""
-    text = _safe_intermediate_text(value, limit)
-    text = re.sub(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", text)
-    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
-    return text[:limit].strip()
-
-
-def _dashboard_session_label(value: Any) -> str:
-    """Reject opaque session labels so an accidental raw key cannot be shown."""
-    text = _dashboard_text(value, 100)
-    if re.search(
-        r"\b(?:guild|server|channel|user|session)(?:[_ -]?id)?\s*[:=]\s*\d+",
-        text,
-        re.IGNORECASE,
-    ):
-        return "unknown"
-    return text or "unknown"
-
-
-def _render_session_lines(value: Any) -> list[str]:
-    """Render only the current session state supplied by the harness."""
-    if isinstance(value, dict):
-        try:
-            active_count = max(0, int(value.get("active_count", 0)))
-        except (TypeError, ValueError):
-            active_count = 0
-        if active_count == 0:
-            return ["Session      No active session"]
-        current = _dashboard_session_label(value.get("current"))
-        if current == "unknown":
-            current = "Active session"
-        if active_count == 1:
-            return [f"Session      {current}"]
-        return [
-            f"Session      {active_count} active sessions",
-            f"Current      {current}",
-        ]
-    if isinstance(value, str) and value.strip():
-        return [f"Session      {_dashboard_session_label(value)}"]
-    return ["Session      No active session"]
-
-
-def _model_label(value: Any) -> str:
-    model = _dashboard_text(value, 80).casefold()
-    return _MODEL_LABELS.get(model, model or "unknown")
-
-
-def _format_rss(value: Any) -> str:
-    if not isinstance(value, int) or value < 0:
-        return "unknown"
-    if value >= 1024**3:
-        return f"{value / 1024**3:.1f} GB"
-    if value >= 1024**2:
-        return f"{value / 1024**2:.0f} MB"
-    return f"{value / 1024:.0f} KB"
-
-
-def _format_event_time(value: Any) -> str:
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        return "---- --:--"
-    try:
-        return datetime.fromtimestamp(float(value), tz=timezone.utc).strftime(
-            "%Y-%m-%d %H:%M"
-        )
-    except (OverflowError, OSError, ValueError):
-        return "---- --:--"
-
-
-def _render_presence(snapshot: dict[str, Any]) -> str:
-    status = _dashboard_text(snapshot.get("status"), 24) or "unknown"
-    line = _dashboard_text(snapshot.get("line"), 128)
-    if line and line.casefold() != "none":
-        return f"{status} · {line}"
-    return status
-
-
-def _voice_label(snapshot: dict[str, Any]) -> str:
-    providers = snapshot.get("providers")
-    provider = (
-        providers[0] if isinstance(providers, (list, tuple)) and providers else None
-    )
-    names = {
-        "qwen": "Qwen Audio Agent",
-        "codex-realtime": "Codex Realtime",
-        "custom": "Custom backend",
-    }
-    if not provider:
-        return "disabled"
-    label = names.get(str(provider), "unavailable")
-    state = _dashboard_text(snapshot.get("state"), 24) or "idle"
-    if state == "disabled":
-        return "disabled"
-    return f"{label} · {state}"
-
-
-def render_lighthouse(snapshot: dict[str, Any]) -> str:
-    """Render a sanitized Lighthouse View snapshot as compact terminal text."""
-    character = snapshot.get("character")
-    character = character if isinstance(character, dict) else {}
-    name = _dashboard_text(character.get("name"), 80) or "none"
-    source = _dashboard_text(character.get("source"), 48) or "unknown"
-    character_reason = _dashboard_text(character.get("reason"), 96)
-    mood = snapshot.get("mood")
-    mood = mood if isinstance(mood, dict) else {}
-    mood_label = _dashboard_text(mood.get("label"), 32).title() or "Unknown"
-    mood_traits = _dashboard_text(mood.get("traits"), 80)
-    try:
-        mood_strength = max(0.0, min(1.0, float(mood.get("strength", 0.5))))
-    except (TypeError, ValueError):
-        mood_strength = 0.5
-    mood_line = f"{mood_label} ({mood_strength:.0%})"
-    if mood_traits and mood_traits.casefold() != "unknown":
-        mood_line += f" · {mood_traits}"
-    attention = snapshot.get("attention")
-    attention = attention if isinstance(attention, dict) else {}
-    attention_line = _dashboard_text(attention.get("active"), 100) or "none"
-    workspace = snapshot.get("workspace")
-    workspace = workspace if isinstance(workspace, dict) else {}
-    workspace_source = _dashboard_text(workspace.get("source"), 40).casefold()
-    entries = workspace.get("entries")
-    entries = (
-        entries
-        if workspace_source == "session workspace"
-        and isinstance(entries, (list, tuple))
-        else ()
-    )
-    runtime = snapshot.get("runtime")
-    runtime = runtime if isinstance(runtime, dict) else {}
-    heartbeat = runtime.get("heartbeat")
-    heartbeat = heartbeat if isinstance(heartbeat, dict) else {}
-    cleanup = runtime.get("cleanup")
-    cleanup = cleanup if isinstance(cleanup, dict) else {}
-    heartbeat_state = _dashboard_text(heartbeat.get("state"), 24) or "unknown"
-    latency = heartbeat.get("latency_ms")
-    latency_text = (
-        f"{float(latency):.0f} ms"
-        if isinstance(latency, (int, float)) and not isinstance(latency, bool)
-        else "unknown"
-    )
-    failures = heartbeat.get("consecutive_failures", 0)
-    try:
-        failures = max(0, int(failures))
-    except (TypeError, ValueError):
-        failures = 0
-    active_turns = runtime.get("active_turns", 0)
-    workers = runtime.get("workers", 0)
-    approvals = runtime.get("approvals", 0)
-    memory_entries = runtime.get("memory_entries", 0)
-    cleanup_status = _dashboard_text(cleanup.get("status"), 24) or "unknown"
-    cleanup_reason = _dashboard_text(cleanup.get("reason"), 120)
-    cleanup_line = f"{cleanup_status}"
-    if cleanup_reason:
-        cleanup_line += f" · {cleanup_reason}"
-    presence = snapshot.get("presence")
-    presence = presence if isinstance(presence, dict) else {}
-    session_objective = _dashboard_text(snapshot.get("session_objective"), 180)
-    session = snapshot.get("session")
-    session = session if isinstance(session, dict) else {}
-    session_reason = _dashboard_text(session.get("reason"), 96)
-    lines = [
-        f"Theia {_dashboard_text(snapshot.get('version'), 24) or 'unknown'} · Lighthouse View",
-        "────────────────────────────────────────",
-        f"Status       {_dashboard_text(snapshot.get('action'), 80) or 'Unknown'}",
-        f"Mode         {_dashboard_text(snapshot.get('mode'), 24).title() or 'Unknown'}",
-        (
-            f"Model        {_model_label(snapshot.get('model'))} · "
-            f"{_dashboard_text(snapshot.get('reasoning_mode'), 24) or 'unknown'}"
-        ),
-        f"Reasoning    {_dashboard_text(snapshot.get('reasoning'), 40) or 'unknown'}",
-        (
-            f"Character    {name} · loaded from {source}"
-            + (f" · {character_reason}" if character_reason else "")
-        ),
-        f"Presence     {_render_presence(presence)}",
-        f"Voice        {_voice_label(snapshot.get('voice') if isinstance(snapshot.get('voice'), dict) else {})}",
-        f"Attention    {attention_line}",
-        f"Mood         {mood_line}",
-    ]
-    lines.extend(_render_session_lines(snapshot.get("session")))
-    if session_reason:
-        lines.append(
-            "Session state "
-            f"{_dashboard_text(session.get('status'), 24) or 'degraded'} · "
-            f"{session_reason}"
-        )
-    if session_objective:
-        # A separately named objective is not part of the workspace and must
-        # never be presented as a workspace goal.
-        lines.append(f"Session objective {session_objective}")
-    try:
-        workspace_count = int(workspace.get("entry_count", len(entries)))
-    except (TypeError, ValueError):
-        workspace_count = len(entries)
-    workspace_count = max(0, workspace_count)
-    recent_workspace_text = "No active workspace entries"
-    if entries and isinstance(entries[0], dict):
-        recent_workspace_text = (
-            _dashboard_text(entries[0].get("text"), 180) or recent_workspace_text
-        )
-    entry_label = "entry" if workspace_count == 1 else "entries"
-    lines.extend(
-        [
-            "────────────────────────────────────────",
-            f"Workspace      {workspace_count} {entry_label}",
-            f"Recent         {recent_workspace_text}",
-        ]
-    )
-    lines.extend(
-        [
-            "────────────────────────────────────────",
-            "Runtime",
-            (
-                f"  Codex        {_dashboard_text(runtime.get('codex_version'), 32) or 'unknown'} · "
-                f"{_dashboard_text(runtime.get('codex'), 24) or 'unknown'}"
-            ),
-            f"  RSS          {_format_rss(runtime.get('rss_bytes'))}",
-            f"  Active turns {_dashboard_text(active_turns, 12) or '0'}",
-            f"  Workers      {_dashboard_text(workers, 12) or '0'}",
-            f"  Approvals    {_dashboard_text(approvals, 12) or '0'}",
-            f"  Memory       {_dashboard_text(memory_entries, 12) or '0'} entries",
-            f"  Watchdog     {_dashboard_text(runtime.get('watchdog'), 24) or 'unknown'}",
-            f"  Recovery     {'active' if runtime.get('recovery') else 'inactive'}",
-            f"  Heartbeat    {heartbeat_state} · {latency_text} · {failures} failures",
-            f"  Codex update {_dashboard_text(runtime.get('update'), 24) or 'unknown'}",
-            f"  Cleanup      {cleanup_line}",
-            "────────────────────────────────────────",
-            "Recent events",
-        ]
-    )
-    events = snapshot.get("events")
-    events = events if isinstance(events, (list, tuple)) else ()
-    if not events:
-        lines.append("  No recent events")
-    else:
-        for event in list(events)[-LIGHTHOUSE_EVENT_LIMIT:][::-1]:
-            if not isinstance(event, dict):
-                continue
-            event_name = str(event.get("event") or "").casefold()
-            label = _event_title(event_name, event.get("detail"))
-            severity = _event_severity(event_name, event.get("detail"))
-            lines.append(
-                f"  [{_format_event_time(event.get('timestamp'))}] "
-                f"{severity:<8} {label}"
-            )
-    return "\n".join(lines)
-
-
-def render_lighthouse_rich(
-    snapshot: dict[str, Any],
-    *,
-    records: Any = (),
-    diagnostic_mode: bool = False,
-) -> Any:
-    """Render Lighthouse text with Theia's shared terminal status palette."""
-    from rich.text import Text
-
-    plain = (
-        render_lighthouse_diagnostics(snapshot, records)
-        if diagnostic_mode
-        else render_lighthouse(snapshot)
-    )
-    rendered = Text(plain)
-    offset = 0
-    status_styles = {
-        "INFO": rich_style("INFO"),
-        "WARNING": rich_style("WARNING"),
-        "ERROR": rich_style("ERROR"),
-        "FATAL": rich_style("FATAL", emphasis=True),
-        "CONNECTED": rich_style("CONNECTED"),
-        "HEALTHY": rich_style("HEALTHY"),
-        "DEGRADED": rich_style("DEGRADED"),
-        "DISABLED": rich_style("DISABLED"),
-    }
-    for line in plain.splitlines(keepends=True):
-        body = line.rstrip("\r\n")
-        if body.startswith(("Theia ", "Workspace", "Runtime", "Recent events")):
-            rendered.stylize(status_styles["INFO"], offset, offset + len(body))
-        if body.startswith("─"):
-            rendered.stylize(status_styles["INFO"], offset, offset + len(body))
-        for match in re.finditer(
-            r"\b(INFO|WARNING|ERROR|FATAL|CONNECTED|HEALTHY|DEGRADED|DISABLED)\b",
-            body,
-            re.IGNORECASE,
-        ):
-            name = match.group(1).upper()
-            rendered.stylize(
-                status_styles[name],
-                offset + match.start(),
-                offset + match.end(),
-            )
-        offset += len(line)
-    return rendered
-
-
-def _diagnostic_message(record: Any) -> str:
-    """Return a bounded diagnostic message without exposing unsafe payloads."""
-    try:
-        message = record.getMessage()
-    except Exception:  # noqa: BLE001 - diagnostics must never affect the view
-        return ""
-    return _dashboard_text(message, 700)
-
-
-def _diagnostic_exception(record: Any) -> str:
-    """Return safe exception metadata while keeping traceback paths private."""
-    exc_info = getattr(record, "exc_info", None)
-    if not exc_info or len(exc_info) < 2:
-        return ""
-    exception = exc_info[1]
-    name = _dashboard_text(getattr(exc_info[0], "__name__", "Exception"), 80)
-    message = _dashboard_text(exception, 240)
-    return f" · {name}: {message}" if message else f" · {name}"
-
-
-def render_lighthouse_diagnostics(
-    snapshot: dict[str, Any],
-    records: Any = (),
-) -> str:
-    """Render technical event details for an explicit operator detail view."""
-    lines = [
-        "Lighthouse diagnostic details",
-        "────────────────────────────────────────",
-    ]
-    events = snapshot.get("events")
-    events = events if isinstance(events, (list, tuple)) else ()
-    shown = False
-    for event in list(events)[-LIGHTHOUSE_EVENT_LIMIT:][::-1]:
-        if not isinstance(event, dict):
-            continue
-        event_name = str(event.get("event") or "").casefold()
-        if event_name in {"log_warning", "log_error"}:
-            # The corresponding LogRecord below is the detailed source. Do not
-            # render it twice as both a runtime event and a diagnostic record.
-            continue
-        detail = _dashboard_text(event.get("detail"), 180)
-        if not detail:
-            continue
-        shown = True
-        lines.append(
-            f"  [{_format_event_time(event.get('timestamp'))}] "
-            f"{_event_severity(event_name, detail):<8} {detail}"
-        )
-    if shown:
-        lines.append("────────────────────────────────────────")
-    for record in list(records)[-LIGHTHOUSE_DIAGNOSTIC_LIMIT:][::-1]:
-        detail = _diagnostic_message(record)
-        if not detail:
-            continue
-        created = getattr(record, "created", None)
-        level = _dashboard_text(getattr(record, "levelname", "INFO"), 12).upper()
-        logger_name = _dashboard_text(getattr(record, "name", "root"), 48) or "root"
-        traceback = _diagnostic_exception(record)
-        lines.append(
-            f"  [{_format_event_time(created)}] {level:<8} "
-            f"{logger_name}: {detail}{traceback}"
-        )
-    if len(lines) == 2:
-        lines.append("  No diagnostic details")
-    return "\n".join(lines)
-
-
 class _LighthouseTerminalFilter(logging.Filter):
     """Keep all logging records out of a terminal owned by Lighthouse."""
 
@@ -985,19 +538,41 @@ class LighthouseView:
         """Return the explicit technical detail view without creating work."""
         return render_lighthouse_diagnostics(self.snapshot(), self._diagnostics)
 
+    def _terminal_dimensions(self) -> tuple[int, int]:
+        """Read the current terminal size without depending on a real file object."""
+        try:
+            fileno = self.output.fileno()
+            size = os.get_terminal_size(fileno)
+            return max(1, size.columns), max(1, size.lines)
+        except (AttributeError, OSError, TypeError, ValueError):
+            try:
+                size = shutil.get_terminal_size(fallback=(80, 24))
+                return max(1, size.columns), max(1, size.lines)
+            except (AttributeError, OSError, TypeError, ValueError):
+                return 80, 24
+
     def _render_current_view(self) -> str:
+        width, height = self._terminal_dimensions()
         if self._diagnostic_mode:
-            return render_lighthouse_diagnostics(self.snapshot(), self._diagnostics)
-        return render_lighthouse(self.snapshot())
+            return render_lighthouse_diagnostics(
+                self.snapshot(), self._diagnostics, width=width, height=height
+            )
+        return render_lighthouse(
+            self.snapshot(), width=width, height=height, show_keyboard_hint=True
+        )
 
     def _render_current_payload(self) -> Any:
         """Use styled Rich output only after Rich has been selected by ``start``."""
         text_type = self._text_type
         if getattr(text_type, "__module__", "") == "rich.text":
+            width, height = self._terminal_dimensions()
             return render_lighthouse_rich(
                 self.snapshot(),
                 records=self._diagnostics,
                 diagnostic_mode=self._diagnostic_mode,
+                width=width,
+                height=height,
+                show_keyboard_hint=True,
             )
         return (
             text_type(self._render_current_view())
@@ -1018,7 +593,12 @@ class LighthouseView:
     def _handle_keyboard_text(self, text: str) -> None:
         """Recognize F1 escape sequences without interpreting other input."""
         self._keyboard_buffer = (self._keyboard_buffer + text)[-16:]
-        if "\x1b[11~" in self._keyboard_buffer or "\x1bOP" in self._keyboard_buffer:
+        if (
+            "\x1b[11~" in self._keyboard_buffer
+            or "\x1bOP" in self._keyboard_buffer
+            or self._diagnostic_mode
+            and text == "\x1b"
+        ):
             self._keyboard_buffer = ""
             self._toggle_diagnostics()
 
@@ -1139,6 +719,10 @@ class LighthouseView:
                 log.addHandler(diagnostic_handler)
                 self._diagnostic_handlers.append((log, diagnostic_handler))
             console = Console(file=self.output, force_terminal=True)
+            # Clear the previous terminal contents before the first dashboard
+            # frame is rendered. Live(screen=True) then owns the alternate
+            # screen until close() restores it.
+            console.clear()
             self._live = Live(
                 self._render_current_payload(),
                 console=console,
@@ -1150,7 +734,6 @@ class LighthouseView:
                 redirect_stderr=False,
             )
             self._live.start(refresh=False)
-            console.clear()
             self._live.refresh()
             self._start_keyboard_input()
             self._task = asyncio.create_task(self._run())
