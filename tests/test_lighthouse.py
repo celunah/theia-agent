@@ -1147,6 +1147,7 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn('THEIA_UID: "${THEIA_UID:-1000}"', compose)
         self.assertIn('THEIA_GID: "${THEIA_GID:-1000}"', compose)
+        self.assertEqual(compose.count("create_host_path: false"), 2)
         self.assertNotIn("userns_mode:", compose)
 
         dockerfile = Path("Dockerfile").read_text(encoding="utf-8")

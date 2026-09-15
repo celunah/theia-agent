@@ -22,9 +22,13 @@ services:
       - type: bind
         source: ${HOME}/.theia
         target: /data
+        bind:
+          create_host_path: false
       - type: bind
         source: ${HOME}/theia-workspace
         target: /workspace
+        bind:
+          create_host_path: false
     stdin_open: true
     tty: true
     restart: unless-stopped
