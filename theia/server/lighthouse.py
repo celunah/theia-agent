@@ -41,6 +41,8 @@ _EVENT_LABELS = {
     "turn_completed": "Codex turn completed",
     "turn_timed_out": "Codex turn timed out",
     "turn_cancelled": "Codex turn stopped",
+    "cleanup_failed": "Cleanup failed",
+    "turn_failed": "Codex turn failed",
     "log_warning": "Warning",
     "log_error": "Error",
     "character_loaded": "Character overlay loaded",
@@ -56,11 +58,57 @@ _EVENT_LABELS = {
     "session_reset": "Session reset",
     "session_degraded": "Session degraded",
     "codex_starting": "Codex starting",
+    "codex_start_failed": "Codex start failed",
+    "codex_stopped": "Codex stopped",
     "codex_connected": "Codex connected",
     "codex_recovered": "Codex recovered",
     "codex_restarted": "Codex restarted",
     "presence_updated": "Presence updated",
 }
+
+_EVENT_WARNING_NAMES = frozenset(
+    {
+        "cleanup_failed",
+        "turn_failed",
+        "turn_timed_out",
+        "worker_failed",
+        "session_degraded",
+        "codex_start_failed",
+    }
+)
+
+
+def _stable_log_event_name(detail: Any) -> str | None:
+    """Map known log messages to stable titles without displaying their detail."""
+    text = str(detail or "").casefold()
+    if "cleanup" in text and "failed" in text:
+        return "cleanup_failed"
+    if "internal worker" in text and ("failed" in text or "timed out" in text):
+        return "worker_failed"
+    if "turn timed out" in text:
+        return "turn_timed_out"
+    if "turn failed" in text:
+        return "turn_failed"
+    return None
+
+
+def _event_title(event_name: str, detail: Any = None) -> str:
+    """Return a stable, operator-facing title for one runtime event."""
+    if event_name in {"log_warning", "log_error"}:
+        event_name = _stable_log_event_name(detail) or event_name
+    return _EVENT_LABELS.get(event_name, "Runtime state changed")
+
+
+def _event_severity(event_name: str, detail: Any = None) -> str:
+    """Return the compact severity displayed beside a stable event title."""
+    if event_name == "log_error":
+        return "ERROR"
+    if event_name == "log_warning":
+        event_name = _stable_log_event_name(detail) or event_name
+    if event_name in _EVENT_WARNING_NAMES:
+        return "WARNING"
+    return "INFO"
+
 
 _MODEL_LABELS = {
     "gpt-5.6-luna": "GPT-5.6 Luna",
@@ -480,13 +528,13 @@ def _format_rss(value: Any) -> str:
 
 def _format_event_time(value: Any) -> str:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
-        return "--:--:--"
+        return "---- --:--"
     try:
         return datetime.fromtimestamp(float(value), tz=timezone.utc).strftime(
-            "%H:%M:%S"
+            "%Y-%m-%d %H:%M"
         )
     except (OverflowError, OSError, ValueError):
-        return "--:--:--"
+        return "---- --:--"
 
 
 def _render_presence(snapshot: dict[str, Any]) -> str:
@@ -661,12 +709,59 @@ def render_lighthouse(snapshot: dict[str, Any]) -> str:
             if not isinstance(event, dict):
                 continue
             event_name = str(event.get("event") or "").casefold()
-            label = _EVENT_LABELS.get(event_name, "Runtime state changed")
-            detail = _dashboard_text(event.get("detail"), 100)
-            event_text = f"{label}: {detail}" if detail else label
+            label = _event_title(event_name, event.get("detail"))
+            severity = _event_severity(event_name, event.get("detail"))
             lines.append(
-                f"  [{_format_event_time(event.get('timestamp'))}] {event_text}"
+                f"  [{_format_event_time(event.get('timestamp'))}] "
+                f"{severity:<8} {label}"
             )
+    return "\n".join(lines)
+
+
+def _diagnostic_message(record: Any) -> str:
+    """Return a bounded diagnostic message without exposing unsafe payloads."""
+    try:
+        message = record.getMessage()
+    except Exception:  # noqa: BLE001 - diagnostics must never affect the view
+        return ""
+    return _dashboard_text(message, 240)
+
+
+def render_lighthouse_diagnostics(
+    snapshot: dict[str, Any],
+    records: Any = (),
+) -> str:
+    """Render technical event details for an explicit operator detail view."""
+    lines = [
+        "Lighthouse diagnostic details",
+        "────────────────────────────────────────",
+    ]
+    events = snapshot.get("events")
+    events = events if isinstance(events, (list, tuple)) else ()
+    shown = False
+    for event in list(events)[-LIGHTHOUSE_EVENT_LIMIT:][::-1]:
+        if not isinstance(event, dict):
+            continue
+        detail = _dashboard_text(event.get("detail"), 180)
+        if not detail:
+            continue
+        shown = True
+        event_name = str(event.get("event") or "").casefold()
+        lines.append(
+            f"  [{_format_event_time(event.get('timestamp'))}] "
+            f"{_event_severity(event_name, detail):<8} {detail}"
+        )
+    if shown:
+        lines.append("────────────────────────────────────────")
+    for record in list(records)[-LIGHTHOUSE_DIAGNOSTIC_LIMIT:][::-1]:
+        detail = _diagnostic_message(record)
+        if not detail:
+            continue
+        created = getattr(record, "created", None)
+        level = _dashboard_text(getattr(record, "levelname", "INFO"), 12).upper()
+        lines.append(f"  [{_format_event_time(created)}] {level:<8} {detail}")
+    if len(lines) == 2:
+        lines.append("  No diagnostic details")
     return "\n".join(lines)
 
 
@@ -789,6 +884,10 @@ class LighthouseView:
             with contextlib.suppress(Exception):
                 snapshot["voice"] = self.voice.snapshot()
         return snapshot
+
+    def diagnostic_view(self) -> str:
+        """Return the explicit technical detail view without creating work."""
+        return render_lighthouse_diagnostics(self.snapshot(), self._diagnostics)
 
     async def start(self) -> bool:
         """Start the live dashboard; non-TTY output keeps normal logging intact."""

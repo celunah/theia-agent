@@ -3,7 +3,11 @@ import io
 
 from tests.test_support import *
 
-from theia.server.lighthouse import LighthouseView, render_lighthouse
+from theia.server.lighthouse import (
+    LighthouseView,
+    render_lighthouse,
+    render_lighthouse_diagnostics,
+)
 
 
 def _snapshot(**overrides: Any) -> dict[str, Any]:
@@ -266,23 +270,74 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("Session state degraded", rendered)
 
-    def test_render_preserves_complete_cleanup_protocol_method(self) -> None:
-        rendered = render_lighthouse(
-            _snapshot(
-                events=(
-                    {
-                        "timestamp": 0,
-                        "event": "log_warning",
-                        "detail": (
-                            "Expired Codex session cleanup failed "
-                            "(method=thread/delete, code=-32600)"
-                        ),
-                    },
-                )
+    def test_recent_events_use_stable_titles_and_hide_technical_details(self) -> None:
+        cleanup_timestamp = datetime(
+            2026, 9, 15, 6, 51, tzinfo=timezone.utc
+        ).timestamp()
+        worker_timestamp = datetime(2026, 9, 15, 3, 11, tzinfo=timezone.utc).timestamp()
+        completed_timestamp = datetime(
+            2026, 9, 14, 19, 54, tzinfo=timezone.utc
+        ).timestamp()
+        snapshot = _snapshot(
+            events=(
+                {
+                    "timestamp": cleanup_timestamp,
+                    "event": "log_warning",
+                    "detail": (
+                        "Expired Codex session cleanup failed "
+                        "(method=thread/delete, code=-32600, reason=invalidThreadId)"
+                    ),
+                },
+                {
+                    "timestamp": worker_timestamp,
+                    "event": "worker_failed",
+                    "detail": "Selected model is at capacity; serverOverloaded",
+                },
+                {
+                    "timestamp": completed_timestamp,
+                    "event": "turn_completed",
+                    "detail": "internal protocol detail",
+                },
             )
         )
 
+        rendered = render_lighthouse(snapshot)
+
+        self.assertIn(
+            "[2026-09-15 06:51] WARNING  Cleanup failed",
+            rendered,
+        )
+        self.assertIn(
+            "[2026-09-15 03:11] WARNING  Worker degraded",
+            rendered,
+        )
+        self.assertIn(
+            "[2026-09-14 19:54] INFO     Codex turn completed",
+            rendered,
+        )
+        self.assertNotIn("thread/delete", rendered)
+        self.assertNotIn("serverOverloaded", rendered)
+        self.assertNotIn("internal protocol detail", rendered)
+
+    def test_diagnostic_detail_view_retains_technical_event_details(self) -> None:
+        snapshot = _snapshot(
+            events=(
+                {
+                    "timestamp": 0,
+                    "event": "log_warning",
+                    "detail": (
+                        "Expired Codex session cleanup failed "
+                        "(method=thread/delete, code=-32600)"
+                    ),
+                },
+            )
+        )
+
+        rendered = render_lighthouse_diagnostics(snapshot)
+
         self.assertIn("method=thread/delete", rendered)
+        self.assertIn("code=-32600", rendered)
+        self.assertNotIn("No diagnostic details", rendered)
 
     def test_empty_workspace_and_missing_subsystems_are_truthful(self) -> None:
         stale_goal = "stale demo objective"
@@ -403,6 +458,7 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("ERROR", output.value)
             self.assertTrue(any(record.exc_info for record in view._diagnostics))
             self.assertIn(("log_error", "preserved failure"), events)
+            self.assertIn("preserved failure", view.diagnostic_view())
             self.assertEqual(list(handler.filters), [])
             self.assertEqual(view._diagnostic_handlers, [])
             logger.info("logging restored")

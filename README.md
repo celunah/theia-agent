@@ -40,6 +40,9 @@ administrators can inspect the current server, and Super Admins can inspect
 broader scopes. The full capability inventory is in
 [`THEIA_FEATURES.md`](THEIA_FEATURES.md).
 
+Its Recent events feed shows bounded timestamps, severity, and stable event
+titles. Technical event details remain available through its diagnostic view.
+
 Leave the `/btw` prompt blank to enter it in a Discord modal. Generated images
 and their response are delivered together with an owner-only `Follow up` control;
 follow-ups update that same message.
