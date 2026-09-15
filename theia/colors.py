@@ -10,6 +10,10 @@ THEIA_COLORS: dict[str, str] = {
     "WARNING": "#C0E68C",
     "ERROR": "#C07178",
     "FATAL": "#C07178",
+    # Generated from the existing Celune-derived palette for states that need
+    # a distinct semantic color in the Lighthouse View.
+    "ACTIVE": "#8CCFA3",
+    "FATAL_DARK": "#9A5A60",
     "CONNECTED": "#A5BAFF",
     "HEALTHY": "#A5BAFF",
     "DEGRADED": "#C0E68C",

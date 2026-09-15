@@ -88,6 +88,8 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
                 "WARNING": "#C0E68C",
                 "ERROR": "#C07178",
                 "FATAL": "#C07178",
+                "ACTIVE": "#8CCFA3",
+                "FATAL_DARK": "#9A5A60",
                 "CONNECTED": "#A5BAFF",
                 "HEALTHY": "#A5BAFF",
                 "DEGRADED": "#C0E68C",
@@ -117,10 +119,64 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(
             any(
-                "bold reverse" in str(span.style) and "#C07178" in str(span.style)
+                "bold reverse" in str(span.style) and "#9A5A60" in str(span.style)
                 for span in fatal.spans
             )
         )
+
+    def test_lighthouse_colors_runtime_values_by_semantics(self) -> None:
+        def style_for(snapshot: dict[str, Any], value: str) -> str:
+            rendered = render_lighthouse_rich(snapshot, width=120, height=40)
+            offset = rendered.plain.index(value)
+            return str(rendered.get_style_at_offset(Console(), offset)).casefold()
+
+        self.assertIn("#8ccfa3", style_for(_snapshot(), "online"))
+        self.assertIn(
+            "#c0e68c", style_for(_snapshot(presence={"status": "idle"}), "idle")
+        )
+        self.assertIn(
+            "#c07178",
+            style_for(_snapshot(presence={"status": "offline"}), "offline"),
+        )
+        self.assertIn("#a5baff", style_for(_snapshot(), "adaptive"))
+        self.assertIn("#a5baff", style_for(_snapshot(), "connected"))
+        self.assertIn("#a5baff", style_for(_snapshot(), "watching"))
+
+        degraded = _snapshot(
+            runtime={
+                **_snapshot()["runtime"],
+                "cleanup": {"status": "degraded", "reason": "timeout"},
+            }
+        )
+        self.assertIn("#c07178", style_for(degraded, "degraded"))
+        self.assertIn("#c07178", style_for(degraded, "timeout"))
+
+        neutral = _snapshot(
+            runtime={
+                **_snapshot()["runtime"],
+                "update": "not configured",
+                "heartbeat": {"state": "unknown"},
+            },
+            attention={"active": "none"},
+        )
+        self.assertIn("#2e304c", style_for(neutral, "not configured"))
+        self.assertIn("#2e304c", style_for(neutral, "none"))
+
+    def test_diagnostic_fatal_uses_the_darker_red(self) -> None:
+        record = logging.LogRecord(
+            "theia.process",
+            logging.CRITICAL,
+            "process.py",
+            1,
+            "process stopped",
+            (),
+            None,
+        )
+        rendered = render_lighthouse_diagnostics_rich(_snapshot(), (record,))
+        offset = rendered.plain.index("process stopped")
+        style = str(rendered.get_style_at_offset(Console(), offset)).casefold()
+        self.assertIn("#9a5a60", style)
+        self.assertIn("bold reverse", style)
 
     async def test_lighthouse_uses_the_latest_adaptive_assessment(self) -> None:
         server = main.CodexAppServer()

@@ -70,6 +70,29 @@ _EVENT_WARNING_NAMES = frozenset(
     }
 )
 
+_POSITIVE_STATUS_TERMS = (
+    "adaptive",
+    "connected",
+    "enabled",
+    "watching",
+    "completed",
+    "accepted",
+    "healthy",
+)
+_NEUTRAL_STATUS_TERMS = (
+    "not configured",
+    "unknown",
+    "none",
+    "disabled",
+    "inactive",
+)
+_DEGRADED_STATUS_TERMS = (
+    "failed worker",
+    "degraded",
+    "timeout",
+    "unavailable",
+)
+
 
 def _stable_log_event_name(detail: Any) -> str | None:
     """Map known log messages to stable titles without displaying their detail."""
@@ -103,6 +126,159 @@ def _event_severity(event_name: str, detail: Any = None) -> str:
     if event_name in _EVENT_WARNING_NAMES:
         return "WARNING"
     return "INFO"
+
+
+def _severity_style(severity: str, *, emphasis: bool = False) -> str:
+    """Return the Lighthouse style for a structured severity."""
+    name = "FATAL_DARK" if severity == "FATAL" else severity
+    return rich_style(name, emphasis=emphasis)
+
+
+def _stylize_terms(
+    rendered: Any,
+    line_offset: int,
+    value_start: int,
+    value: str,
+    terms: tuple[str, ...],
+    style: str,
+) -> None:
+    """Apply a semantic style to exact terms in a known field value."""
+    if not value or not terms:
+        return
+    pattern = (
+        r"(?<![\w-])(?:"
+        + "|".join(re.escape(term) for term in sorted(terms, key=len, reverse=True))
+        + r")(?![\w-])"
+    )
+    for match in re.finditer(pattern, value, re.IGNORECASE):
+        rendered.stylize(
+            style,
+            line_offset + value_start + match.start(),
+            line_offset + value_start + match.end(),
+        )
+
+
+def _style_dashboard_value(
+    rendered: Any,
+    line_offset: int,
+    body: str,
+    prefix: str,
+    *,
+    presence: bool = False,
+) -> None:
+    """Color a dashboard field after its stable, known label."""
+    if not body.startswith(prefix):
+        return
+    value_start = len(prefix)
+    value = body[value_start:]
+    if presence:
+        status = value.split(" · ", 1)[0].strip().casefold()
+        if status in {"online", "active"}:
+            style = rich_style("ACTIVE")
+        elif status in {"idle", "away"}:
+            style = rich_style("WARNING")
+        elif status in {"offline", "unavailable"}:
+            style = rich_style("ERROR")
+        else:
+            style = rich_style("DISABLED")
+        status_start = value_start + len(value) - len(value.lstrip())
+        _stylize_terms(rendered, line_offset, status_start, status, (status,), style)
+        return
+    _stylize_terms(
+        rendered,
+        line_offset,
+        value_start,
+        value,
+        _DEGRADED_STATUS_TERMS,
+        rich_style("ERROR"),
+    )
+    _stylize_terms(
+        rendered,
+        line_offset,
+        value_start,
+        value,
+        _NEUTRAL_STATUS_TERMS,
+        rich_style("DISABLED"),
+    )
+    _stylize_terms(
+        rendered,
+        line_offset,
+        value_start,
+        value,
+        _POSITIVE_STATUS_TERMS,
+        rich_style("INFO"),
+    )
+
+
+def _style_dashboard_line(rendered: Any, body: str, line_offset: int) -> None:
+    """Apply semantic colors to known Lighthouse fields and event rows."""
+    field_prefixes = (
+        ("Presence     ", True),
+        ("Presence ", True),
+        ("Voice        ", False),
+        ("Voice ", False),
+        ("Model        ", False),
+        ("Reasoning    ", False),
+        ("Attention    ", False),
+        ("Attention ", False),
+        ("Mood         ", False),
+        ("Mood ", False),
+        ("Session state ", False),
+        ("  Codex        ", False),
+        ("Codex       ", False),
+        ("Codex ", False),
+        ("  Watchdog     ", False),
+        ("Watchdog ", False),
+        ("  Recovery     ", False),
+        ("Recovery ", False),
+        ("  Heartbeat    ", False),
+        ("Heartbeat ", False),
+        ("  Codex update ", False),
+        ("Codex update ", False),
+        ("  Cleanup      ", False),
+        ("Cleanup ", False),
+        ("Runtime Codex ", False),
+    )
+    for prefix, is_presence in field_prefixes:
+        if body.startswith(prefix):
+            _style_dashboard_value(
+                rendered,
+                line_offset,
+                body,
+                prefix,
+                presence=is_presence,
+            )
+            return
+    if not (body.startswith("  [") and "] " in body):
+        return
+    marker_end = body.find("] ") + 2
+    severity = body[marker_end:].split(maxsplit=1)[0].upper()
+    if severity not in {"INFO", "WARNING", "ERROR", "FATAL"}:
+        return
+    severity_start = marker_end
+    rendered.stylize(
+        _severity_style(severity, emphasis=severity == "FATAL"),
+        line_offset + severity_start,
+        line_offset + severity_start + len(severity),
+    )
+    title_start = marker_end + 9
+    title = body[title_start:]
+    _stylize_terms(
+        rendered,
+        line_offset,
+        title_start,
+        title,
+        _DEGRADED_STATUS_TERMS,
+        rich_style("ERROR"),
+    )
+    _stylize_terms(
+        rendered,
+        line_offset,
+        title_start,
+        title,
+        _POSITIVE_STATUS_TERMS,
+        rich_style("INFO"),
+    )
 
 
 def _dashboard_text(value: Any, limit: int = 160) -> str:
@@ -767,7 +943,8 @@ def _styled_diagnostic_line(record: Any) -> Any:
     line.append(timestamp, style=rich_style("DISABLED"))
     line.append("] ")
     line.append(
-        f"{level_name:<8}", style=rich_style(severity, emphasis=severity == "FATAL")
+        f"{level_name:<8}",
+        style=_severity_style(severity, emphasis=severity == "FATAL"),
     )
     line.append(" ")
     line.append(logger_label, style=rich_style("INFO"))
@@ -776,9 +953,11 @@ def _styled_diagnostic_line(record: Any) -> Any:
         line.append(explicit_event, style=f"bold {rich_style('INFO')}")
         line.append(": ")
     message_start = len(line.plain)
-    line.append(message, style=rich_style(severity, emphasis=severity == "FATAL"))
+    line.append(message, style=_severity_style(severity, emphasis=severity == "FATAL"))
     if exception:
-        line.append(exception, style=rich_style(severity, emphasis=severity == "FATAL"))
+        line.append(
+            exception, style=_severity_style(severity, emphasis=severity == "FATAL")
+        )
     content = line.plain[message_start:]
     prefix = _diagnostic_event_prefix(message, record) if not explicit_event else ""
     if prefix and content.startswith(prefix):
@@ -796,7 +975,9 @@ def _styled_diagnostic_line(record: Any) -> Any:
             message_start + match.end(),
         )
     for match in re.finditer(
-        r"\b(?:connected|completed|accepted|healthy)\b", content, re.IGNORECASE
+        r"(?<![\w-])(?:adaptive|connected|enabled|watching|completed|accepted|healthy)(?![\w-])",
+        content,
+        re.IGNORECASE,
     ):
         line.stylize(
             rich_style("INFO"),
@@ -804,7 +985,19 @@ def _styled_diagnostic_line(record: Any) -> Any:
             message_start + match.end(),
         )
     for match in re.finditer(
-        r"\b(?:disabled|inactive|none|unknown)\b", content, re.IGNORECASE
+        r"(?<![\w-])(?:failed\s+worker|degraded|timeout|unavailable)(?![\w-])",
+        content,
+        re.IGNORECASE,
+    ):
+        line.stylize(
+            rich_style("ERROR"),
+            message_start + match.start(),
+            message_start + match.end(),
+        )
+    for match in re.finditer(
+        r"(?<![\w-])(?:not\s+configured|disabled|inactive|none|unknown)(?![\w-])",
+        content,
+        re.IGNORECASE,
     ):
         line.stylize(
             rich_style("DISABLED"),
@@ -826,14 +1019,57 @@ def _styled_diagnostic_event(event: dict[str, Any]) -> Any:
     )
     line.append("] ")
     line.append(
-        f"{severity:<8}", style=rich_style(severity, emphasis=severity == "FATAL")
+        f"{severity:<8}",
+        style=_severity_style(severity, emphasis=severity == "FATAL"),
     )
     line.append(" ")
+    label_start = len(line.plain)
     line.append(label, style=f"bold {rich_style('INFO')}")
+    _stylize_terms(
+        line,
+        0,
+        label_start,
+        label,
+        _DEGRADED_STATUS_TERMS,
+        rich_style("ERROR"),
+    )
+    _stylize_terms(
+        line,
+        0,
+        label_start,
+        label,
+        _POSITIVE_STATUS_TERMS,
+        rich_style("INFO"),
+    )
     detail = _dashboard_text(event.get("detail"), 180)
     if detail and name not in {"log_warning", "log_error"}:
         line.append(": ")
-        line.append(detail, style=rich_style(severity))
+        detail_start = len(line.plain)
+        line.append(detail, style=_severity_style(severity))
+        _stylize_terms(
+            line,
+            0,
+            detail_start,
+            detail,
+            _DEGRADED_STATUS_TERMS,
+            rich_style("ERROR"),
+        )
+        _stylize_terms(
+            line,
+            0,
+            detail_start,
+            detail,
+            _NEUTRAL_STATUS_TERMS,
+            rich_style("DISABLED"),
+        )
+        _stylize_terms(
+            line,
+            0,
+            detail_start,
+            detail,
+            _POSITIVE_STATUS_TERMS,
+            rich_style("INFO"),
+        )
     return line
 
 
@@ -929,7 +1165,7 @@ def render_lighthouse_rich(
         "INFO": rich_style("INFO"),
         "WARNING": rich_style("WARNING"),
         "ERROR": rich_style("ERROR"),
-        "FATAL": rich_style("FATAL", emphasis=True),
+        "FATAL": _severity_style("FATAL", emphasis=True),
         "CONNECTED": rich_style("CONNECTED"),
         "HEALTHY": rich_style("HEALTHY"),
         "DEGRADED": rich_style("DEGRADED"),
@@ -950,5 +1186,6 @@ def render_lighthouse_rich(
                     offset + marker_end,
                     offset + marker_end + len(name),
                 )
+        _style_dashboard_line(rendered, body, offset)
         offset += len(line)
     return rendered
