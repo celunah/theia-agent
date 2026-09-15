@@ -550,7 +550,10 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
         self, error: CodexAppServerError, *, method: str = "thread/delete"
     ) -> dict[str, Any]:
         """Return safe protocol metadata for the Lighthouse cleanup panel."""
-        protocol_method = getattr(error, "protocol_method", None) or method
+        # This helper is called from the expired-thread cleanup boundary, so
+        # the complete operation is known even if an older exception instance
+        # only carried the namespace prefix ``thread``.
+        protocol_method = method or getattr(error, "protocol_method", None)
         protocol_message = getattr(error, "protocol_message", None)
         message = protocol_message or _safe_error_reason(error, 240)
         metadata: dict[str, Any] = {

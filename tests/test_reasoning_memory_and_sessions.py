@@ -213,6 +213,39 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
             "thread/delete", {"threadId": "thread"}
         )
 
+    async def test_invalid_thread_id_is_removed_without_retrying(self) -> None:
+        server = main.CodexAppServer()
+        server._ensure_running = AsyncMock()
+        server._persist_state = lambda: None
+        server._request = AsyncMock(
+            side_effect=main.CodexAppServerError(
+                "Codex thread/delete failed: invalidThreadId: invalid character",
+                protocol_method="thread/delete",
+                protocol_code=-32600,
+                protocol_message="invalidThreadId: invalid character",
+                protocol_data={"field": "threadId"},
+            )
+        )
+        now = 1_000_000.0
+        session = server._session("invalid-expired-session")
+        session.thread_id = "invalid-thread"
+        session.last_activity_at = now - main.SESSION_DELETE_AFTER - 1
+        server._sessions = {session.key: session}
+
+        with patch("theia.server.requests.logger.warning") as warning:
+            first = await server.enforce_retention(now=now)
+            second = await server.enforce_retention(now=now)
+
+        self.assertEqual(first, {"archived": 0, "deleted": 1})
+        self.assertEqual(second, {"archived": 0, "deleted": 0})
+        self.assertIsNone(session.thread_id)
+        self.assertEqual(server._request.await_count, 1)
+        self.assertEqual(
+            server.cleanup_snapshot()["reason"],
+            "invalid expired thread reference removed locally",
+        )
+        warning.assert_not_called()
+
     async def test_cleanup_deduplicates_same_failure_in_one_cycle(self) -> None:
         server = main.CodexAppServer()
         server._ensure_running = AsyncMock()

@@ -521,6 +521,18 @@ def _is_missing_codex_thread_error(value: Any) -> bool:
     )
 
 
+def _is_invalid_codex_thread_id_error(value: Any) -> bool:
+    """Return whether Codex rejected the identifier's format."""
+    code = getattr(value, "protocol_code", None)
+    if code is not None and str(code).strip() != "-32600":
+        return False
+    normalized = re.sub(r"[^a-z0-9]", "", _error_message(value).casefold())
+    return any(
+        marker in normalized
+        for marker in ("invalidthreadid", "invalidthreadidentifier", "invaliduuid")
+    )
+
+
 def _is_unsupported_codex_method_error(value: Any) -> bool:
     """Return whether the App Server rejected a method as unsupported."""
     code = getattr(value, "protocol_code", None)
@@ -627,6 +639,19 @@ def _safe_intermediate_text(value: Any, limit: int = 700) -> str:
     text = str(value or "").strip()
     if not text or text.startswith(("{", "[")) or "```" in text:
         return ""
+    protocol_method_refs: dict[str, str] = {}
+
+    def preserve_protocol_method(match: re.Match[str]) -> str:
+        token = f"THEIA_PROTOCOL_METHOD_{len(protocol_method_refs)}"
+        protocol_method_refs[token] = match.group(0)
+        return token
+
+    text = re.sub(
+        r"\bthread/(?:delete|archive|unarchive|resume|started|closed)\b",
+        preserve_protocol_method,
+        text,
+        flags=re.IGNORECASE,
+    )
     text = re.sub(r"`[^`\n]*`", "", text)
     text = _redact_private_paths(text)
     text = re.sub(r"(?:file://)?/[A-Za-z0-9._~:/@%+\-]+", "", text)
@@ -641,6 +666,9 @@ def _safe_intermediate_text(value: Any, limit: int = 700) -> str:
     # character.
     if not text or not any(character.isalnum() for character in text):
         return ""
+    text = _truncate(text, limit)
+    for token, method in protocol_method_refs.items():
+        text = text.replace(token, method)
     return _truncate(text, limit)
 
 

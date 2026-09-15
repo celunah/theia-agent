@@ -26,6 +26,7 @@ from ..core import (
     _TurnState,
     _codex_logger,
     _is_missing_codex_thread_error,
+    _is_invalid_codex_thread_id_error,
     _is_unsupported_codex_method_error,
     _safe_log_label,
 )
@@ -253,6 +254,16 @@ class CodexRequestMixin:
                         protocol_message="request timed out",
                     )
                 except CodexAppServerError as exc:
+                    if _is_invalid_codex_thread_id_error(exc):
+                        self._forget_thread(thread_id)
+                        self._thread_delete_supported = True
+                        if not self._cleanup_cycle_issue_seen:
+                            self._set_cleanup_health(
+                                "healthy",
+                                "invalid expired thread reference removed locally",
+                                error=exc,
+                            )
+                        return
                     if _is_missing_codex_thread_error(exc):
                         self._forget_thread(thread_id)
                         self._thread_delete_supported = True

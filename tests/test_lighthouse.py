@@ -266,6 +266,24 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("Session state degraded", rendered)
 
+    def test_render_preserves_complete_cleanup_protocol_method(self) -> None:
+        rendered = render_lighthouse(
+            _snapshot(
+                events=(
+                    {
+                        "timestamp": 0,
+                        "event": "log_warning",
+                        "detail": (
+                            "Expired Codex session cleanup failed "
+                            "(method=thread/delete, code=-32600)"
+                        ),
+                    },
+                )
+            )
+        )
+
+        self.assertIn("method=thread/delete", rendered)
+
     def test_empty_workspace_and_missing_subsystems_are_truthful(self) -> None:
         stale_goal = "stale demo objective"
         rendered = render_lighthouse(
