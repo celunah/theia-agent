@@ -21,6 +21,8 @@ from .core import (
     _truncate,
 )
 from .customization import CustomizationError
+from .delivery_text import _format_thought_duration, _split_pages
+from .delivery_thinking import GenericThinkingStatus
 from .ui import (
     _PersistentViewMixin,
     _PromptModal,
@@ -36,39 +38,6 @@ ImageAction = Callable[
 ViewRegistrar = Callable[[discord.ui.View, Any], Awaitable[None]]
 INTERMEDIATE_STATUS_LIMIT = 1990
 logger = _codex_logger()
-
-
-def _split_pages(text: str, limit: int = 1900) -> list[str]:
-    text = text or ""
-    if not text:
-        return [""]
-    pages: list[str] = []
-    remaining = text
-    while len(remaining) > limit:
-        split_at = remaining.rfind("\n\n", 0, limit + 1)
-        if split_at < limit // 2:
-            split_at = remaining.rfind("\n", 0, limit + 1)
-        if split_at < limit // 2:
-            split_at = remaining.rfind(" ", 0, limit + 1)
-        if split_at <= 0:
-            split_at = limit
-        pages.append(remaining[:split_at])
-        remaining = remaining[split_at:]
-    pages.append(remaining)
-    return pages
-
-
-def _format_thought_duration(seconds: float) -> str:
-    elapsed = max(0, int(seconds))
-    if elapsed < 60:
-        unit = "second" if elapsed == 1 else "seconds"
-        return f"Thought for {elapsed} {unit}"
-    minutes, remainder = divmod(elapsed, 60)
-    minute_unit = "minute" if minutes == 1 else "minutes"
-    if remainder == 0:
-        return f"Thought for {minutes} {minute_unit}"
-    second_unit = "second" if remainder == 1 else "seconds"
-    return f"Thought for {minutes} {minute_unit} and {remainder} {second_unit}"
 
 
 class _PaginatorView(_PersistentViewMixin, discord.ui.View):
@@ -951,6 +920,7 @@ class _ResponseDelivery:
         self.last_edit = 0.0
         self.thought_started_at: float | None = None
         self.thinking_summary: str | None = None
+        self._generic_thinking = GenericThinkingStatus(self)
         self.lock = asyncio.Lock()
 
     @property
@@ -1023,6 +993,10 @@ class _ResponseDelivery:
                     and self.thought_started_at is None
                 ):
                     return
+                if summary == "Thinking":
+                    self._generic_thinking.schedule()
+                    return
+                self._generic_thinking.cancel()
                 await self._set_status("Thinking", summary, force=force)
                 return
             if event == "item_completed":
@@ -1142,6 +1116,7 @@ class _ResponseDelivery:
         on_image_action: ImageAction | None = None,
     ) -> None:
         async with self.lock:
+            self._generic_thinking.cancel()
             if self.status_message is not None and self.thought_started_at is not None:
                 thought = _format_thought_duration(
                     time.monotonic() - self.thought_started_at

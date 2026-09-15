@@ -571,13 +571,10 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
                 guild_id=42,
             )
             await delivery.on_event("tool_activity", {})
-            self.assertEqual(calls[0]["content"], "-# Working (Thinking)")
+            self.assertEqual(calls, [])
             await delivery.on_event("item_started", {"type": "webSearch"})
             assert delivery.status_message is not None
-            self.assertEqual(
-                cast(Any, delivery.status_message).edits[-1]["content"],
-                "-# Working (Searching the web)",
-            )
+            self.assertEqual(calls[0]["content"], "-# Working (Searching the web)")
             await delivery.on_event(
                 "item_completed",
                 {

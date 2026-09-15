@@ -300,7 +300,9 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
             status_message.edits[-1]["content"], "-# Preparing the final answer"
         )
 
-    async def test_thinking_status_ignores_unsafe_details_and_falls_back(self) -> None:
+    async def test_generic_thinking_status_is_skipped_without_a_specific_step(
+        self,
+    ) -> None:
         calls: list[dict] = []
 
         async def send(**kwargs):
@@ -316,9 +318,25 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
                 "summary": "Read the user's private prompt",
             },
         )
-        self.assertEqual(calls[-1]["content"], "-# Thinking")
-        self.assertNotIn("secret", calls[-1]["content"])
-        self.assertNotIn("private", calls[-1]["content"])
+        self.assertEqual(calls, [])
+        await delivery.finalize("The complete response.")
+        self.assertEqual(calls[-1]["content"], "The complete response.")
+
+    async def test_generic_thinking_status_is_available_after_the_delay(self) -> None:
+        calls: list[dict] = []
+
+        async def send(**kwargs):
+            calls.append(kwargs)
+            return _Message()
+
+        delivery = main._ResponseDelivery(send, {}, owner_id=7)
+        delivery._generic_thinking.delay = 0.0
+        await delivery.on_event("tool_activity", {})
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        self.assertEqual(calls[0]["content"], "-# Thinking")
+        await delivery.finalize("The complete response.")
 
     async def test_intermediates_are_not_streamed_before_item_completion(self) -> None:
         calls: list[dict] = []
@@ -446,12 +464,10 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
                 user_id=7,
             )
 
-        self.assertEqual(calls[0]["content"], "-# Thinking")
-        self.assertNotIn("embed", calls[0])
         self.assertEqual(
-            status_message.edits[-1]["content"],
-            "-# Request stopped\nReason: interrupted",
+            calls[0]["content"], "-# Stopped thinking\nReason: interrupted"
         )
+        self.assertNotIn("embed", calls[0])
 
     async def test_timeout_remains_a_failure_with_a_specific_reason(self) -> None:
         calls: list[dict] = []

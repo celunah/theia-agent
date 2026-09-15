@@ -70,13 +70,16 @@ async def _finish_cancelled_delivery(
     reason: str | None,
 ) -> None:
     """Close an existing thinking status without presenting cancellation as failure."""
+    delivery._generic_thinking.cancel()
     status_message = delivery.status_message
-    if status_message is None:
-        return
     safe_reason = _safe_error_reason(reason, 120) if reason else ""
-    content = "Request stopped"
+    content = "Stopped thinking"
     if safe_reason:
         content += f"\nReason: {safe_reason}"
+    if status_message is None:
+        with contextlib.suppress(discord.DiscordException, AttributeError):
+            await delivery._set_status("Intermediate", content, force=True)
+        return
     with contextlib.suppress(discord.DiscordException, AttributeError):
         await status_message.edit(content=_subtext(content))
 
