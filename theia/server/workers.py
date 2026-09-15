@@ -168,17 +168,12 @@ class CodexWorkerMixin:
                 },
                 timeout=request_timeout,
             )
-            turn_id = str((turn_result.get("turn") or {}).get("id") or "")
-            if not turn_id:
-                return None
-            session.thread_id = thread_id
-            session.turn_id = turn_id
-            state = _TurnState(
-                thread_id=thread_id,
-                session=session,
-                allow_tools=False,
+            registered = self._register_internal_usage_turn(
+                session, thread_id, turn_result, effort="low"
             )
-            self._turns[turn_id] = state
+            if registered is None:
+                return None
+            turn_id, state = registered
             response = await self._wait_for_turn(
                 session_id,
                 session,
@@ -282,17 +277,12 @@ class CodexWorkerMixin:
                 },
                 timeout=request_timeout,
             )
-            turn_id = str((turn_result.get("turn") or {}).get("id") or "")
-            if not turn_id:
-                return None
-            session.thread_id = thread_id
-            session.turn_id = turn_id
-            state = _TurnState(
-                thread_id=thread_id,
-                session=session,
-                allow_tools=False,
+            registered = self._register_internal_usage_turn(
+                session, thread_id, turn_result, effort="low"
             )
-            self._turns[turn_id] = state
+            if registered is None:
+                return None
+            turn_id, state = registered
             response = await self._wait_for_turn(
                 session_id,
                 session,
@@ -475,17 +465,12 @@ class CodexWorkerMixin:
                 },
                 timeout=request_timeout,
             )
-            turn_id = str((turn_result.get("turn") or {}).get("id") or "")
-            if not turn_id:
-                return None
-            session.thread_id = thread_id
-            session.turn_id = turn_id
-            state = _TurnState(
-                thread_id=thread_id,
-                session=session,
-                allow_tools=False,
+            registered = self._register_internal_usage_turn(
+                session, thread_id, turn_result, effort="low"
             )
-            self._turns[turn_id] = state
+            if registered is None:
+                return None
+            turn_id, state = registered
             response = await self._wait_for_turn(
                 session_id,
                 session,
@@ -660,14 +645,12 @@ class CodexWorkerMixin:
             if self._model is not None:
                 turn_params["model"] = self._model
             turn_result = await self._request("turn/start", turn_params)
-            turn_id = str((turn_result.get("turn") or {}).get("id") or "")
-            if not turn_id:
+            registered = self._register_internal_usage_turn(
+                session, thread_id, turn_result, effort=effort
+            )
+            if registered is None:
                 raise CodexAppServerError("Codex did not return an assessment turn id.")
-
-            session.thread_id = thread_id
-            session.turn_id = turn_id
-            state = _TurnState(thread_id=thread_id, session=session)
-            self._turns[turn_id] = state
+            turn_id, state = registered
             text = await self._wait_for_turn(
                 key,
                 session,

@@ -32,21 +32,90 @@ PROMPT_CATEGORIES = (
 
 @dataclass(frozen=True)
 class ModelPricing:
-    """Central API estimate in USD per million tokens."""
+    """Canonical model pricing in USD per million tokens."""
 
     input_miss: float
     input_hit: float
     output: float
     reasoning: float
+    canonical_id: str = ""
+    display_name: str = ""
+    reasoning_token_pricing: str = "output_rate"
+    pricing_source: str = ""
+    pricing_version: str = ""
+    effective_date: str = ""
+    fast_mode_multiplier: float = 1.5
+
+    @property
+    def cache_miss_input_per_million(self) -> float:
+        return self.input_miss
+
+    @property
+    def cache_hit_input_per_million(self) -> float:
+        return self.input_hit
+
+    @property
+    def output_per_million(self) -> float:
+        return self.output
 
 
 # Codex does not expose subscription billing. These are centralized,
 # replaceable API pricing rates used only for a clearly labelled estimate.
-MODEL_PRICING: dict[str, ModelPricing] = {
-    "gpt-5.6-luna": ModelPricing(1.25, 0.125, 10.0, 10.0),
-    "gpt-5.6-terra": ModelPricing(2.0, 0.2, 15.0, 15.0),
-    "gpt-5.6-sol": ModelPricing(0.25, 0.025, 2.0, 2.0),
-    "gpt-6-astra": ModelPricing(5.0, 0.5, 30.0, 30.0),
+PRICING_REGISTRY: dict[str, ModelPricing] = {
+    "gpt-5.6-luna": ModelPricing(
+        0.20,
+        0.02,
+        1.20,
+        1.20,
+        "gpt-5.6-luna",
+        "GPT-5.6 Luna",
+        "output_rate",
+        "user-provided Theia pricing",
+        "1.0",
+        "2026-09-15",
+    ),
+    "gpt-5.6-terra": ModelPricing(
+        2.00,
+        0.20,
+        12.00,
+        12.00,
+        "gpt-5.6-terra",
+        "GPT-5.6 Terra",
+        "output_rate",
+        "user-provided Theia pricing",
+        "1.0",
+        "2026-09-15",
+    ),
+    "gpt-5.6-sol": ModelPricing(
+        4.00,
+        0.40,
+        20.00,
+        20.00,
+        "gpt-5.6-sol",
+        "GPT-5.6 Sol",
+        "output_rate",
+        "user-provided Theia pricing",
+        "1.0",
+        "2026-09-15",
+    ),
+    "gpt-6-astra": ModelPricing(
+        10.00,
+        1.00,
+        50.00,
+        50.00,
+        "gpt-6-astra",
+        "GPT-6 Astra",
+        "output_rate",
+        "user-provided Theia pricing",
+        "1.0",
+        "2026-09-15",
+    ),
+}
+# Keep the historical name available to callers that imported the registry.
+MODEL_PRICING = PRICING_REGISTRY
+MODEL_IDS_BY_DISPLAY_NAME = {
+    pricing.display_name.casefold(): model_id
+    for model_id, pricing in PRICING_REGISTRY.items()
 }
 EFFORT_MULTIPLIERS = {
     "low": 0.75,
@@ -78,6 +147,9 @@ def estimated_tokens(text: Any) -> int:
 
 def model_label(model: Any) -> str:
     """Return a short safe display name for a model identifier."""
+    canonical = _canonical_model_id(model)
+    if canonical is not None:
+        return PRICING_REGISTRY[canonical].display_name
     value = re.sub(r"[^A-Za-z0-9_.-]+", "", str(model or "unknown"))[:80]
     if not value:
         return "Unknown model"
@@ -90,13 +162,22 @@ def model_label(model: Any) -> str:
 
 
 def _pricing_for(model: Any) -> ModelPricing | None:
-    return MODEL_PRICING.get(str(model or "").strip().casefold())
+    canonical = _canonical_model_id(model)
+    return PRICING_REGISTRY.get(canonical) if canonical else None
+
+
+def _canonical_model_id(model: Any) -> str | None:
+    value = str(model or "").strip().casefold()
+    if value in PRICING_REGISTRY:
+        return value
+    return MODEL_IDS_BY_DISPLAY_NAME.get(value)
 
 
 def estimate_api_cost(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
     """Estimate API cost in USD from provider-reported per-turn usage."""
     by_model: dict[str, float] = {}
     unavailable_models: set[str] = set()
+    incomplete_records: set[str] = set()
     observed_usage = False
     for record in records:
         if not isinstance(record, dict):
@@ -105,6 +186,12 @@ def estimate_api_cost(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
         if not tokens:
             continue
         observed_usage = True
+        if not any(
+            key in tokens
+            for key in ("inputTokens", "cachedInputTokens", "outputTokens")
+        ):
+            incomplete_records.add(model_label(record.get("model")))
+            continue
         pricing = _pricing_for(record.get("model"))
         if pricing is None:
             unavailable_models.add(model_label(record.get("model")))
@@ -119,12 +206,17 @@ def estimate_api_cost(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
         reasoning = tokens.get("reasoningOutputTokens", 0)
         if reasoning:
             value += reasoning * pricing.reasoning * effort_multiplier / 1_000_000
-        elif tokens.get("outputTokens", 0):
-            value *= effort_multiplier
+        if (
+            record.get("fastMode") is True
+            or str(record.get("mode") or "").casefold() == "fast"
+            or str(record.get("speed") or "").casefold() == "fast"
+            or effort == "fast"
+        ):
+            value *= pricing.fast_mode_multiplier
         label = model_label(record.get("model"))
         by_model[label] = by_model.get(label, 0.0) + value
     total = sum(by_model.values())
-    pricing_available = not unavailable_models
+    pricing_available = not unavailable_models and not incomplete_records
     return {
         "estimated": True,
         "currency": "USD",
@@ -138,6 +230,7 @@ def estimate_api_cost(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
         ),
         "byModel": {key: round(value, 8) for key, value in by_model.items()},
         "unavailableModels": sorted(unavailable_models),
+        "incompleteRecords": sorted(incomplete_records),
     }
 
 

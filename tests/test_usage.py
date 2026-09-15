@@ -2,7 +2,11 @@
 from tests.test_support import *
 
 from theia.server.policy import _TOKEN_USAGE_KEYS
-from theia.server.usage import estimate_api_cost, estimate_api_value
+from theia.server.usage import (
+    PRICING_REGISTRY,
+    estimate_api_cost,
+    estimate_api_value,
+)
 
 
 class UsageAccountingTests(unittest.TestCase):
@@ -13,11 +17,14 @@ class UsageAccountingTests(unittest.TestCase):
         server._usage_daily.clear()
         server._usage_daily_breakdown.clear()
         server._usage_turns.clear()
+        server._usage_internal_turns.clear()
         server._usage_failed_daily.clear()
         server._usage_retries_daily.clear()
         server._usage_api_calls_daily.clear()
         server._usage_subagent_turns_daily.clear()
         server._usage_long_running_turns_daily.clear()
+        server._usage_api_calls = 0
+        server._usage_subagent_turns = 0
         return server
 
     def test_cache_miss_hit_output_and_model_effort_are_preserved(self) -> None:
@@ -96,6 +103,136 @@ class UsageAccountingTests(unittest.TestCase):
         self.assertFalse(estimate["available"])
         self.assertIsNone(estimate["total"])
         self.assertEqual(estimate["unavailableModels"], ["Future Model"])
+
+    def test_cost_is_unavailable_when_only_provider_total_is_reported(self) -> None:
+        estimate = estimate_api_cost(
+            [{"model": "gpt-5.6-luna", "tokens": {"totalTokens": 100}}]
+        )
+        self.assertFalse(estimate["available"])
+        self.assertIsNone(estimate["total"])
+        self.assertEqual(estimate["incompleteRecords"], ["GPT-5.6 Luna"])
+
+    def test_pricing_registry_has_canonical_model_specific_rates(self) -> None:
+        self.assertEqual(
+            set(PRICING_REGISTRY),
+            {"gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra"},
+        )
+        self.assertEqual(
+            (
+                PRICING_REGISTRY["gpt-5.6-luna"].input_miss,
+                PRICING_REGISTRY["gpt-5.6-luna"].input_hit,
+                PRICING_REGISTRY["gpt-5.6-luna"].output,
+            ),
+            (0.20, 0.02, 1.20),
+        )
+        self.assertEqual(
+            (
+                PRICING_REGISTRY["gpt-6-astra"].input_miss,
+                PRICING_REGISTRY["gpt-6-astra"].input_hit,
+                PRICING_REGISTRY["gpt-6-astra"].output,
+            ),
+            (10.00, 1.00, 50.00),
+        )
+        self.assertEqual(
+            PRICING_REGISTRY["gpt-5.6-sol"].reasoning_token_pricing, "output_rate"
+        )
+
+    def test_fast_mode_uses_the_centralized_multiplier(self) -> None:
+        normal = estimate_api_cost(
+            [{"model": "gpt-5.6-luna", "tokens": {"outputTokens": 100}}]
+        )
+        fast = estimate_api_cost(
+            [
+                {
+                    "model": "gpt-5.6-luna",
+                    "fastMode": True,
+                    "tokens": {"outputTokens": 100},
+                }
+            ]
+        )
+        self.assertAlmostEqual(fast["total"], normal["total"] * 1.5)
+
+    def test_main_and_subagent_tokens_and_cost_are_combined(self) -> None:
+        server = self._server()
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        server._usage_threads["main-thread"] = {
+            "inputTokens": 1000,
+            "cachedInputTokens": 0,
+            "outputTokens": 5,
+            "totalTokens": 1005,
+        }
+        server._usage_thread_fields["main-thread"] = {
+            "inputTokens",
+            "cachedInputTokens",
+            "outputTokens",
+            "totalTokens",
+        }
+        server._usage_daily[day] = 1005
+        server._usage_daily_breakdown[day] = dict(server._usage_threads["main-thread"])
+        server._usage_turns["main-thread:turn"] = {
+            "day": day,
+            "recorded_at": time.time(),
+            "model": "gpt-5.6-luna",
+            "effort": "medium",
+            "tokens": {
+                "inputTokens": 1000,
+                "cachedInputTokens": 0,
+                "outputTokens": 5,
+                "totalTokens": 1005,
+            },
+        }
+        server._usage_internal_turns["worker:turn"] = {
+            "day": day,
+            "recorded_at": time.time(),
+            "model": "gpt-5.6-luna",
+            "effort": "medium",
+            "tokens": {
+                "inputTokens": 10,
+                "cachedInputTokens": 2,
+                "outputTokens": 3,
+                "totalTokens": 15,
+            },
+        }
+        usage = server.theia_usage()
+        self.assertEqual(usage["exact"]["mainAgentTokens"], 1005)
+        self.assertEqual(usage["exact"]["subagentTokens"], 15)
+        self.assertEqual(usage["exact"]["totalProcessedTokens"], 1020)
+        self.assertAlmostEqual(usage["estimate"]["total"], 0.00021164)
+
+    def test_internal_turn_metadata_drives_subagent_usage_and_pricing(self) -> None:
+        server = self._server()
+        session = main._Session(key="__attention__:test")
+        server._turns["worker-turn"] = cast(
+            Any,
+            SimpleNamespace(
+                session=session,
+                model="gpt-5.6-terra",
+                effort="low",
+            ),
+        )
+        server._record_usage_api_call(session)
+        server._handle_notification(
+            {
+                "method": "thread/tokenUsage/updated",
+                "params": {
+                    "threadId": "worker-thread",
+                    "turnId": "worker-turn",
+                    "tokenUsage": {
+                        "last": {
+                            "inputTokens": 10,
+                            "cachedInputTokens": 2,
+                            "outputTokens": 3,
+                            "totalTokens": 15,
+                        }
+                    },
+                },
+            }
+        )
+        usage = server.theia_usage()
+        self.assertEqual(usage["detailed"]["subagentTurns"], 1)
+        self.assertEqual(usage["exact"]["subagentTokens"], 15)
+        self.assertIn("GPT-5.6 Terra", usage["estimate"]["byModel"])
+        self.assertEqual(usage["estimate"]["unavailableModels"], [])
 
     def test_activity_metrics_are_separate_from_token_counts(self) -> None:
         server = self._server()
@@ -297,8 +434,8 @@ class UsageViewTests(unittest.TestCase):
         )
         self.assertEqual(embed.description, "Usage statistics for 2026-09-14")
         fields = {field.name: field.value for field in embed.fields}
-        self.assertEqual(fields["Input tokens"], "Cache miss: 20\nCache hit: 5")
-        self.assertEqual(fields["Output tokens"], "8")
+        self.assertEqual(fields["Main-agent tokens"], "33")
+        self.assertEqual(fields["Subagent tokens"], "0")
         self.assertEqual(fields["Total processed tokens"], "33")
         self.assertEqual(fields["Estimated API cost"], "$0.0034 USD")
         self.assertEqual(fields["Longest running turn"], "13 seconds")
@@ -316,6 +453,34 @@ class UsageViewTests(unittest.TestCase):
         )
         fields = {field.name: field.value for field in embed.fields}
         self.assertEqual(fields["Total cumulative tokens"], "42")
+
+    def test_details_show_model_specific_pricing_and_combined_cost(self) -> None:
+        embed = main._usage_details_embed(
+            {
+                "date": "2026-09-14",
+                "estimate": {
+                    "available": True,
+                    "total": 0.30,
+                    "byModel": {
+                        "GPT-5.6 Luna": 0.10,
+                        "GPT-5.6 Terra": 0.20,
+                    },
+                },
+                "detailed": {"categories": {}},
+            }
+        )
+        pricing_field = next(
+            field
+            for field in embed.fields
+            if field.name == "Model-specific API pricing"
+        )
+        pricing_text = (
+            pricing_field.value if isinstance(pricing_field.value, str) else ""
+        )
+        self.assertIn("GPT-5.6 Luna: $0.10", pricing_text)
+        self.assertIn("GPT-5.6 Terra: $0.20", pricing_text)
+        self.assertIn("GPT-6 Astra: $0.00", pricing_text)
+        self.assertIn("Combined: $0.30", pricing_text)
 
     def test_state_restores_usage_activity_counters(self) -> None:
         with (

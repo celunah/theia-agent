@@ -578,17 +578,12 @@ class CodexWorkspaceMixin:
                 },
                 timeout=request_timeout,
             )
-            turn_id = str((turn_result.get("turn") or {}).get("id") or "")
-            if not turn_id:
-                return
-            worker_session.thread_id = thread_id
-            worker_session.turn_id = turn_id
-            state = _TurnState(
-                thread_id=thread_id,
-                session=worker_session,
-                allow_tools=False,
+            registered = self._register_internal_usage_turn(
+                worker_session, thread_id, turn_result, effort="low"
             )
-            self._turns[turn_id] = state
+            if registered is None:
+                return
+            turn_id, state = registered
             review_response = await self._wait_for_turn(
                 session_id,
                 worker_session,

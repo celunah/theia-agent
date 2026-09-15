@@ -19,6 +19,7 @@ from .support import (
     _frontend_label,
 )
 from ..core import THEIA_VERSION, _safe_intermediate_text, _truncate
+from ..server.usage import PRICING_REGISTRY
 
 
 def _format_count(value: Any) -> str:
@@ -102,18 +103,29 @@ def _usage_cost_value(result: dict[str, Any]) -> str:
         # those values as USD when restoring a view after an upgrade.
         available = estimate.get("currency") == "USD"
     value = _format_usd(estimate.get("total"), available=available)
+    return value
+
+
+def _usage_cost_breakdown(result: dict[str, Any]) -> str:
+    """Render routed-model costs only in the detailed view."""
+    estimate = result.get("estimate") if isinstance(result, dict) else None
+    if not isinstance(estimate, dict) or not estimate.get("available", False):
+        return "Pricing unavailable"
     by_model = estimate.get("byModel")
-    if (
-        value == "Pricing unavailable"
-        or not isinstance(by_model, dict)
-        or len(by_model) <= 1
-    ):
-        return value
-    lines = [value]
-    for model, amount in list(by_model.items())[:4]:
+    if not isinstance(by_model, dict) or len(by_model) <= 1:
+        return "Unavailable"
+    lines: list[str] = []
+    amounts = {
+        pricing.display_name: by_model.get(pricing.display_name, 0.0)
+        for pricing in PRICING_REGISTRY.values()
+    }
+    for model, amount in amounts.items():
+        rendered = _format_usd(amount)
         lines.append(
-            f"{_safe_intermediate_text(str(model), 80)}: {_format_usd(amount)}"
+            f"{_safe_intermediate_text(model, 80)}: {rendered.removesuffix(' USD')}"
         )
+    combined = _format_usd(estimate.get("total"))
+    lines.append(f"Combined: {combined.removesuffix(' USD')}")
     return "\n".join(lines)
 
 
@@ -161,21 +173,24 @@ def _usage_embed(
     embed.add_field(name="Today", value="\u200b", inline=False)
     embed.add_field(
         name=_frontend_label(
-            "label:usage_input_tokens", "Input tokens", channel=channel, user=user
+            "label:usage_main_agent_tokens",
+            "Main-agent tokens",
+            channel=channel,
+            user=user,
         ),
-        value=(
-            f"{_frontend_label('label:usage_input_cache_miss', 'Cache miss', channel=channel, user=user)}: "
-            f"{_format_count(exact.get('inputTokens'))}\n"
-            f"{_frontend_label('label:usage_input_cache_hit', 'Cache hit', channel=channel, user=user)}: "
-            f"{_format_count(exact.get('cachedInputTokens'))}"
+        value=_format_count(
+            exact.get("mainAgentTokens", exact.get("totalProcessedTokens"))
         ),
-        inline=False,
+        inline=True,
     )
     embed.add_field(
         name=_frontend_label(
-            "label:usage_output_tokens", "Output tokens", channel=channel, user=user
+            "label:usage_subagent_tokens",
+            "Subagent tokens",
+            channel=channel,
+            user=user,
         ),
-        value=_format_count(exact.get("outputTokens")),
+        value=_format_count(exact.get("subagentTokens", 0)),
         inline=True,
     )
     embed.add_field(
@@ -185,7 +200,12 @@ def _usage_embed(
             channel=channel,
             user=user,
         ),
-        value=_format_count(exact.get("totalProcessedTokens")),
+        value=_format_count(
+            exact.get(
+                "totalProcessedTokens",
+                exact.get("mainAgentTokens", exact.get("totalTokens")),
+            )
+        ),
         inline=True,
     )
     embed.add_field(
@@ -320,6 +340,19 @@ def _usage_details_embed(
         value=_usage_detail_value(detailed.get("reasoningTokens")),
         inline=True,
     )
+    estimate = result.get("estimate") if isinstance(result, dict) else None
+    by_model = estimate.get("byModel") if isinstance(estimate, dict) else None
+    if isinstance(by_model, dict) and len(by_model) > 1:
+        embed.add_field(
+            name=_frontend_label(
+                "label:usage_detail_model_pricing",
+                "Model-specific API pricing",
+                channel=channel,
+                user=user,
+            ),
+            value=_usage_cost_breakdown(result),
+            inline=False,
+        )
     for target, default_label, key in (
         ("usage_detail_retries", "Retries", "retries"),
         ("usage_detail_failed_turns", "Failed turns", "failedTurns"),

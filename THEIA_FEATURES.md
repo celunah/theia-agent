@@ -52,10 +52,11 @@ revision used to produce them.
 threads, including the total cumulative tokens across those threads. It does not
 display the authenticated account's lifetime Codex activity, and its longest-turn
 duration is rounded to whole seconds. Its compact view shows the selected day's
-cache-miss, cache-hit, output, processed total, and estimated API cost; `Show
-Details` reveals bounded prompt-category estimates and separate activity counts
-in the same ephemeral response. Provider-reported token totals remain separate
-from local category estimates, and the cost estimate is not subscription billing.
+main-agent tokens, subagent tokens, combined processed total, and estimated API
+cost; `Show Details` reveals bounded prompt-category estimates, separate
+activity counts, and model-specific pricing for routed usage in the same
+ephemeral response. Provider-reported token totals remain separate from local
+category estimates, and the cost estimate is not subscription billing.
 
 The Lighthouse View is a read-only Rich terminal dashboard of live harness
 state. It shows Codex health, active work, character, presence, voice,

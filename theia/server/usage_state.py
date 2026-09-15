@@ -15,7 +15,7 @@ from .usage import (
     USAGE_TURN_LIMIT,
     normalize_tokens,
 )
-from ..core import _Session
+from ..core import _Session, _TurnState
 
 LONG_RUNNING_TURN_SECONDS = 60.0
 
@@ -86,6 +86,32 @@ class CodexUsageStateMixin:  # pylint: disable=no-member
         if self._usage_tracked_since is None:
             self._usage_tracked_since = time.time()
 
+    def _register_internal_usage_turn(
+        self,
+        session: _Session,
+        thread_id: str,
+        turn_result: dict[str, Any],
+        *,
+        effort: str,
+    ) -> tuple[str, _TurnState] | None:
+        """Register a hidden turn before its token notifications arrive."""
+        turn = turn_result.get("turn") or {}
+        turn_id = str(turn.get("id") or "")
+        if not turn_id:
+            return None
+        self._record_usage_api_call(session)
+        session.thread_id = thread_id
+        session.turn_id = turn_id
+        state = _TurnState(
+            thread_id=thread_id,
+            session=session,
+            allow_tools=False,
+            model=turn.get("model") or getattr(self, "_model", None),
+            effort=effort,
+        )
+        self._turns[turn_id] = state
+        return turn_id, state
+
     def _record_token_usage(self, params: dict[str, Any]) -> None:
         thread_id = params.get("threadId")
         if not isinstance(thread_id, str) or not thread_id:
@@ -151,6 +177,9 @@ class CodexUsageStateMixin:  # pylint: disable=no-member
                 "recorded_at": time.time(),
                 "model": str(model)[:120] if model else None,
                 "effort": str(effort)[:32] if effort else None,
+                "fastMode": params.get("fastMode") is True
+                or token_usage.get("fastMode") is True
+                or str(params.get("mode") or "").casefold() == "fast",
                 "tokens": last,
                 "attribution": {
                     category: max(0, int(attribution.get(category, 0)))
@@ -194,6 +223,9 @@ class CodexUsageStateMixin:  # pylint: disable=no-member
             "recorded_at": time.time(),
             "model": str(model)[:120] if model else None,
             "effort": str(effort)[:32] if effort else None,
+            "fastMode": params.get("fastMode") is True
+            or token_usage.get("fastMode") is True
+            or str(params.get("mode") or "").casefold() == "fast",
             "tokens": tokens,
         }
         self._usage_internal_turns = dict(
@@ -350,22 +382,11 @@ class CodexUsageStateMixin:  # pylint: disable=no-member
                 sum(value for value in known_input if isinstance(value, int))
                 - sum(category_values),
             )
-        estimate = estimate_api_cost(turn_records)
         internal_records = [
             record
             for record in self._usage_internal_turns.values()
             if isinstance(record, dict) and record.get("day") == selected_day
         ]
-        internal_totals = [
-            normalize_tokens(record.get("tokens")).get("totalTokens")
-            for record in internal_records
-        ]
-        internal_tokens = sum(value for value in internal_totals if value is not None)
-        internal_usage: int | None = (
-            internal_tokens
-            if internal_records and all(value is not None for value in internal_totals)
-            else None
-        )
         daily_total = self._usage_daily.get(selected_day, 0)
         if "totalTokens" in daily_breakdown:
             daily_total_value: int | None = daily_breakdown["totalTokens"]
@@ -384,6 +405,28 @@ class CodexUsageStateMixin:  # pylint: disable=no-member
         processed_tokens = self._processed_tokens(
             daily_input, daily_cached, daily_output
         )
+        main_processed = processed_tokens
+        internal_processed_values = [
+            self._processed_tokens(
+                normalize_tokens(record.get("tokens")).get("inputTokens"),
+                normalize_tokens(record.get("tokens")).get("cachedInputTokens"),
+                normalize_tokens(record.get("tokens")).get("outputTokens"),
+            )
+            for record in internal_records
+        ]
+        subagent_processed = (
+            0
+            if not internal_records
+            else sum(value for value in internal_processed_values if value is not None)
+            if all(value is not None for value in internal_processed_values)
+            else None
+        )
+        combined_processed = (
+            main_processed + subagent_processed
+            if main_processed is not None and subagent_processed is not None
+            else None
+        )
+        estimate = estimate_api_cost([*turn_records, *internal_records])
         cumulative_processed_values = [
             self._processed_snapshot(thread_id, snapshot)
             for thread_id, snapshot in self._usage_threads.items()
@@ -414,7 +457,9 @@ class CodexUsageStateMixin:  # pylint: disable=no-member
             "outputTokens": daily_output,
             "reasoningOutputTokens": daily_breakdown.get("reasoningOutputTokens"),
             "totalTokens": daily_total_value,
-            "totalProcessedTokens": processed_tokens,
+            "mainAgentTokens": main_processed,
+            "subagentTokens": subagent_processed,
+            "totalProcessedTokens": combined_processed,
         }
         return {
             "scope": "theia",
@@ -424,13 +469,15 @@ class CodexUsageStateMixin:  # pylint: disable=no-member
             "rateLimits": getattr(self, "_rate_limits", None),
             "detailed": {
                 "categories": categories,
+                "mainAgentTokens": main_processed,
+                "subagentTokens": subagent_processed,
                 "reasoningTokens": exact["reasoningOutputTokens"],
                 "retries": self._usage_retries_daily.get(selected_day, 0),
                 "failedTurns": self._usage_failed_daily.get(selected_day, 0),
                 "apiCalls": api_calls,
                 "subagentTurns": subagent_turns,
                 "longRunningTurns": long_running_turns,
-                "subagentUsage": internal_usage,
+                "subagentUsage": subagent_processed,
                 "unattributedOverhead": {
                     "value": unattributed,
                     "estimated": unattributed is not None,
@@ -564,6 +611,7 @@ class CodexUsageStateMixin:  # pylint: disable=no-member
                     else None,
                     "tokens": tokens,
                     "attribution": safe_attribution,
+                    "fastMode": record.get("fastMode") is True,
                 }
                 duration = record.get("durationSec")
                 if (
@@ -606,6 +654,7 @@ class CodexUsageStateMixin:  # pylint: disable=no-member
                     if record.get("effort")
                     else None,
                     "tokens": tokens,
+                    "fastMode": record.get("fastMode") is True,
                 }
             self._usage_internal_turns = dict(
                 sorted(
@@ -684,6 +733,7 @@ class CodexUsageStateMixin:  # pylint: disable=no-member
                     "tokens": dict(record.get("tokens", {})),
                     "attribution": dict(record.get("attribution", {})),
                     "durationSec": record.get("durationSec"),
+                    "fastMode": record.get("fastMode") is True,
                 }
                 for key, record in self._usage_turns.items()
             },
@@ -694,6 +744,7 @@ class CodexUsageStateMixin:  # pylint: disable=no-member
                     "model": record.get("model"),
                     "effort": record.get("effort"),
                     "tokens": dict(record.get("tokens", {})),
+                    "fastMode": record.get("fastMode") is True,
                 }
                 for key, record in self._usage_internal_turns.items()
             },

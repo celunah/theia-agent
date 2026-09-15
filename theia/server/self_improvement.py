@@ -204,17 +204,12 @@ class CodexSelfImprovementMixin:
                     },
                     timeout=request_timeout,
                 )
-                review_turn_id = str((turn_result.get("turn") or {}).get("id") or "")
-                if not review_turn_id:
-                    return 0
-                review_session.thread_id = thread_id
-                review_session.turn_id = review_turn_id
-                review_state = _TurnState(
-                    thread_id=thread_id,
-                    session=review_session,
-                    allow_tools=False,
+                registered = self._register_internal_usage_turn(
+                    review_session, thread_id, turn_result, effort="low"
                 )
-                self._turns[review_turn_id] = review_state
+                if registered is None:
+                    return 0
+                review_turn_id, review_state = registered
                 review_response = await self._wait_for_turn(
                     review_key,
                     review_session,
