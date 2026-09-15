@@ -565,7 +565,7 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
                 snapshot, width=width, height=height, show_keyboard_hint=True
             )
             lines = rendered.splitlines()
-            self.assertLessEqual(len(lines), height)
+            self.assertEqual(len(lines), height)
             self.assertEqual(lines[-1].strip(), "F1 diagnostics")
             self.assertTrue(all(len(line) <= max(1, width - 2) for line in lines))
             self.assertIn("Status", rendered)
@@ -576,6 +576,60 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Heartbeat", rendered)
             self.assertIn("Cleanup", rendered)
         self.assertIn("…", render_lighthouse(snapshot, width=48, height=12))
+
+    def test_short_full_width_view_degrades_progressively_before_emergency(
+        self,
+    ) -> None:
+        rendered = render_lighthouse(
+            _snapshot(), width=120, height=20, show_keyboard_hint=True
+        )
+        lines = rendered.splitlines()
+
+        self.assertNotIn("Latest      ", rendered)
+        self.assertNotIn("", lines[:-1])
+        for label in (
+            "Status",
+            "Model",
+            "Reasoning",
+            "Character",
+            "Session",
+            "Presence",
+            "Voice",
+            "Attention",
+            "Mood",
+            "Workspace",
+            "Runtime",
+            "Heartbeat",
+            "Recent events",
+        ):
+            self.assertIn(label, rendered)
+
+    def test_tight_compact_layout_keeps_secondary_state_and_footer_anchored(
+        self,
+    ) -> None:
+        rendered = render_lighthouse(
+            _snapshot(), width=48, height=12, show_keyboard_hint=True
+        )
+        lines = rendered.splitlines()
+
+        self.assertEqual(len(lines), 12)
+        self.assertIn("Presence", rendered)
+        self.assertIn("Voice", rendered)
+        self.assertIn("Attention", rendered)
+        self.assertIn("Mood", rendered)
+        self.assertIn("Workspace", rendered)
+        self.assertIn("Heartbeat", rendered)
+        self.assertIn("Recent events 1", rendered)
+        self.assertEqual(lines[-1].strip(), "F1 diagnostics")
+        self.assertTrue(lines[-2].strip())
+
+    def test_footer_never_renders_below_a_one_row_terminal(self) -> None:
+        rendered = render_lighthouse(
+            _snapshot(), width=80, height=1, show_keyboard_hint=True
+        )
+
+        self.assertEqual(rendered.splitlines()[-1].strip(), "F1 diagnostics")
+        self.assertEqual(len(rendered.splitlines()), 1)
 
     def test_live_view_rerenders_when_terminal_dimensions_change(self) -> None:
         view = LighthouseView(

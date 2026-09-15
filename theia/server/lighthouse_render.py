@@ -422,94 +422,159 @@ def _normal_lines(snapshot: dict[str, Any], *, width: int) -> list[str]:
     return lines
 
 
-def _compact_lines(snapshot: dict[str, Any], *, width: int) -> list[str]:
+def _compact_parts(snapshot: dict[str, Any], *, width: int) -> dict[str, list[str]]:
+    """Build compact sections in the dashboard's stated priority order."""
     base, runtime = _base_lines(snapshot, width=width)
-    # Keep the critical identity and health fields, then summarize the three
-    # potentially unbounded sections instead of dropping them silently.
-    status = next(
-        (line for line in base if line.startswith("Status       ")),
-        "Status       Unknown",
-    )
-    model = next(
-        (line for line in base if line.startswith("Model        ")),
-        "Model        unknown",
-    )
-    reasoning = next(
-        (line for line in base if line.startswith("Reasoning    ")),
-        "Reasoning    unknown",
-    )
-    character = next(
-        (line for line in base if line.startswith("Character    ")), "Character    none"
-    )
+    core = [
+        next(
+            (line for line in base if line.startswith("Status       ")),
+            "Status       Unknown",
+        ),
+        next(
+            (line for line in base if line.startswith("Model        ")),
+            "Model        unknown",
+        ),
+        next(
+            (line for line in base if line.startswith("Reasoning    ")),
+            "Reasoning    unknown",
+        ),
+        next(
+            (line for line in base if line.startswith("Character    ")),
+            "Character    none",
+        ),
+    ]
     session = [
         line for line in base if line.startswith(("Session      ", "Current      "))
+    ] or ["Session      No active session"]
+    secondary = [
+        next(
+            (line for line in base if line.startswith("Presence     ")),
+            "Presence     unknown",
+        ),
+        next(
+            (line for line in base if line.startswith("Voice        ")),
+            "Voice        disabled",
+        ),
+        next(
+            (line for line in base if line.startswith("Attention    ")),
+            "Attention    none",
+        ),
+        next(
+            (line for line in base if line.startswith("Mood         ")),
+            "Mood         unknown",
+        ),
     ]
     workspace = snapshot.get("workspace")
     workspace = workspace if isinstance(workspace, dict) else {}
     workspace_lines = _workspace_lines(workspace)
-    events = snapshot.get("events")
-    event_count = len(events) if isinstance(events, (list, tuple)) else 0
-    recent_event = _event_lines(snapshot)[0].strip()
-    lines = [
-        base[0],
-        _separator(width),
-        status,
-        f"{model} · {reasoning.removeprefix('Reasoning    ')}",
-        character,
-    ]
-    lines.extend(session or ["Session      No active session"])
-    lines.extend(
-        [
-            _separator(width),
-            workspace_lines[0],
-            workspace_lines[1],
-            f"Runtime       Codex {runtime['codex']} · Heartbeat {runtime['heartbeat']}",
-            f"Cleanup      {runtime['cleanup']}",
-            f"Recent events {event_count} · {recent_event}",
-        ]
-    )
-    problem = _latest_problem(snapshot)
-    if problem != "none":
-        lines.append(f"Active error  {problem}")
-    lines.append(_separator(width))
-    return lines
-
-
-def _emergency_lines(snapshot: dict[str, Any], *, width: int) -> list[str]:
-    base, runtime = _base_lines(snapshot, width=width)
-    status = next(
-        (line for line in base if line.startswith("Status       ")),
-        "Status       Unknown",
-    )
-    model = next(
-        (line for line in base if line.startswith("Model        ")),
-        "Model        unknown",
-    )
-    reasoning = next(
-        (line for line in base if line.startswith("Reasoning    ")),
-        "Reasoning    unknown",
-    )
-    character = next(
-        (line for line in base if line.startswith("Character    ")), "Character    none"
-    )
-    session = next(
-        (line for line in base if line.startswith("Session      ")),
-        "Session      No active session",
-    )
-    problem = _latest_problem(snapshot)
-    return [
-        base[0],
-        _separator(width),
-        status,
-        f"{model} · {reasoning.removeprefix('Reasoning    ')}",
-        character,
-        session,
+    runtime_lines = [
         f"Codex       {runtime['codex']}",
         f"Heartbeat   {runtime['heartbeat']}",
         f"Cleanup     {runtime['cleanup']}",
-        f"Latest      {problem}",
-        _separator(width),
     ]
+    events = _event_lines(snapshot)
+    problem = _latest_problem(snapshot)
+    errors = [f"Active error  {problem}"] if problem != "none" else []
+    return {
+        "header": [base[0], _separator(width)],
+        "core": core + session,
+        "secondary": secondary,
+        "workspace": workspace_lines,
+        "runtime": runtime_lines,
+        "errors": errors,
+        "events": ["Recent events", *events],
+        "separator": [_separator(width)],
+    }
+
+
+def _compact_event_label(snapshot: dict[str, Any]) -> str:
+    """Return one bounded event title for the tight layout."""
+    events = snapshot.get("events")
+    events = events if isinstance(events, (list, tuple)) else ()
+    for event in reversed(events):
+        if not isinstance(event, dict):
+            continue
+        name = str(event.get("event") or "").casefold()
+        return _event_title(name, event.get("detail"))
+    return "none"
+
+
+def _tight_compact_lines(snapshot: dict[str, Any], *, width: int) -> list[str]:
+    """Keep every compact category visible in a short but usable terminal."""
+    parts = _compact_parts(snapshot, width=width)
+    secondary = parts["secondary"]
+    workspace = parts["workspace"]
+    runtime = parts["runtime"]
+    events = snapshot.get("events")
+    event_count = len(events) if isinstance(events, (list, tuple)) else 0
+    event_label = _compact_event_label(snapshot)
+    event_label = event_label.removeprefix("Codex ")
+    event_text = f"Recent events {event_count} · {event_label}"
+    if parts["errors"]:
+        event_text = "Error " + _latest_problem(snapshot)
+    presence_state = secondary[0].removeprefix("Presence     ").split(" · ")[0]
+    voice_value = secondary[1].removeprefix("Voice        ")
+    voice_name, _, voice_state = voice_value.partition(" · ")
+    voice_name = {
+        "Qwen Audio Agent": "Qwen",
+        "Codex Realtime": "Realtime",
+        "Custom backend": "Custom",
+    }.get(voice_name, voice_name)
+    attention_value = secondary[2].removeprefix("Attention    ")
+    mood_value = secondary[3].removeprefix("Mood         ").split(" · ")[0]
+    codex_state = runtime[0].rsplit(" · ", maxsplit=1)[-1]
+    heartbeat_state = runtime[1].removeprefix("Heartbeat   ").split(" · ")[0]
+    cleanup_state = runtime[2].removeprefix("Cleanup     ").split(" · ")[0]
+    core = parts["core"]
+    model = core[1]
+    reasoning = core[2].removeprefix("Reasoning    ")
+    return [
+        *parts["header"],
+        core[0],
+        f"{model} · Reasoning {reasoning}",
+        *core[3:],
+        f"Presence {presence_state} · Voice {voice_name or 'disabled'}"
+        + (f" · {voice_state}" if voice_state else ""),
+        f"Attention {_dashboard_text(attention_value, 18)} · Mood {mood_value}",
+        f"{workspace[0]} · {workspace[1].removeprefix('Recent         ')}",
+        f"Runtime Codex {codex_state} · Heartbeat {heartbeat_state}",
+        f"Cleanup {cleanup_state} · {event_text}",
+    ]
+
+
+def _progressive_lines(
+    snapshot: dict[str, Any], *, width: int, body_budget: int
+) -> list[str]:
+    """Use the available height continuously before resorting to emergency."""
+    parts = _compact_parts(snapshot, width=width)
+    tight = _tight_compact_lines(snapshot, width=width)
+    expanded = [
+        *parts["header"],
+        *parts["core"],
+        *parts["secondary"],
+        *parts["workspace"],
+        "Runtime",
+        *parts["runtime"],
+        *parts["errors"],
+        *parts["events"],
+        *parts["separator"],
+    ]
+    if body_budget == len(expanded) - 1:
+        # The final separator is lower priority than a populated row when the
+        # viewport is exactly one line short of the expanded compact layout.
+        return expanded[:body_budget]
+    if body_budget < len(expanded):
+        lines = tight[:body_budget]
+        older_events = parts["events"][2:]
+        lines.extend(older_events[: body_budget - len(lines)])
+        return lines[:body_budget]
+
+    lines: list[str] = []
+    for line in expanded:
+        if len(lines) >= body_budget:
+            break
+        lines.append(line)
+    return lines[:body_budget]
 
 
 def _ultra_emergency_lines(snapshot: dict[str, Any], *, width: int) -> list[str]:
@@ -541,44 +606,53 @@ def _ultra_emergency_lines(snapshot: dict[str, Any], *, width: int) -> list[str]
         _separator(width),
         status,
         f"{model} · {reasoning.removeprefix('Reasoning    ')}",
-        f"{character} · {session.removeprefix('Session      ')}",
-        f"Codex {runtime['codex']} · Heartbeat {runtime['heartbeat']}",
+        character,
+        session,
+        f"Codex {runtime['codex']}",
+        f"Heartbeat {runtime['heartbeat']}",
         f"Cleanup {runtime['cleanup']} · Latest {problem}",
+    ]
+
+
+def _micro_emergency_lines(snapshot: dict[str, Any], *, width: int) -> list[str]:
+    """Retain the essential fields when even the emergency view is cramped."""
+    base, runtime = _base_lines(snapshot, width=width)
+    status = next(
+        (line for line in base if line.startswith("Status       ")),
+        "Status       Unknown",
+    )
+    model = next(
+        (line for line in base if line.startswith("Model        ")),
+        "Model        unknown",
+    )
+    reasoning = next(
+        (line for line in base if line.startswith("Reasoning    ")),
+        "Reasoning    unknown",
+    )
+    character = next(
+        (line for line in base if line.startswith("Character    ")), "Character    none"
+    )
+    session = next(
+        (line for line in base if line.startswith("Session      ")),
+        "Session      No active session",
+    )
+    return [
+        base[0],
+        _separator(width),
+        status,
+        f"{model} · {reasoning.removeprefix('Reasoning    ')}",
+        f"{character} · {session.removeprefix('Session      ')}",
+        f"Codex {runtime['codex']} · Heartbeat {runtime['heartbeat']} · Cleanup {runtime['cleanup']}",
     ]
 
 
 def _fit_dashboard(lines: list[str], *, width: int, height: int, hint: str) -> str:
     usable = _usable_width(width)
-    # The footer is reserved before content is clipped, so it cannot be hidden
-    # by a short terminal.  Preserve the most recent state lines at the end.
-    body_limit = max(1, height - (1 if hint else 0))
-    if len(lines) > body_limit:
-        keep = max(1, body_limit)
-        important = [
-            line
-            for line in lines
-            if line.startswith(
-                (
-                    "Status",
-                    "Model",
-                    "Reasoning",
-                    "Character",
-                    "Session",
-                    "Current",
-                    "Codex",
-                    "Heartbeat",
-                    "Cleanup",
-                    "Latest",
-                    "Active error",
-                )
-            )
-        ]
-        # Keep the title and preserve important rows in their original order.
-        # This prevents clipping from moving the title below state or hiding
-        # the footer behind an overlong event feed.
-        lines = (lines[:1] + important)[:keep]
+    body_limit = max(0 if hint else 1, height - (1 if hint else 0))
+    lines = lines[:body_limit]
     rendered = [_fit_line(line, usable) for line in lines]
     if hint:
+        rendered.extend([""] * max(0, body_limit - len(rendered)))
         rendered.append(_footer(width, hint))
     return "\n".join(rendered)
 
@@ -592,16 +666,23 @@ def render_lighthouse(
 ) -> str:
     """Render a bounded, dimension-aware Lighthouse View as terminal text."""
     width, height = _dimensions(width, height)
-    if width < 60 or height < 14:
+    body_budget = max(
+        0 if show_keyboard_hint else 1,
+        height - (1 if show_keyboard_hint else 0),
+    )
+    full_lines = _normal_lines(snapshot, width=width)
+    tight_lines = _tight_compact_lines(snapshot, width=width)
+    if width >= 64 and len(full_lines) <= body_budget:
+        lines = full_lines
+    elif width < 36 or body_budget < len(tight_lines):
+        emergency = _ultra_emergency_lines(snapshot, width=width)
         lines = (
-            _ultra_emergency_lines(snapshot, width=width)
-            if height < 10
-            else _emergency_lines(snapshot, width=width)
+            _micro_emergency_lines(snapshot, width=width)
+            if body_budget < len(emergency)
+            else emergency
         )
-    elif width < 100 or height < 24:
-        lines = _compact_lines(snapshot, width=width)
     else:
-        lines = _normal_lines(snapshot, width=width)
+        lines = _progressive_lines(snapshot, width=width, body_budget=body_budget)
     hint = "F1 diagnostics" if show_keyboard_hint else ""
     return _fit_dashboard(lines, width=width, height=height, hint=hint)
 
