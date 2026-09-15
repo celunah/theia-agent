@@ -16,7 +16,8 @@ def _snapshot(**overrides: Any) -> dict[str, Any]:
         "action": "Processing request",
         "mode": "text",
         "model": "gpt-5.6-luna",
-        "reasoning": "adaptive",
+        "reasoning": "high",
+        "reasoning_mode": "adaptive",
         "character": {"name": "Cel", "source": "user overlay"},
         "presence": {"status": "online", "line": "reviewing the request"},
         "voice": {"providers": ("qwen",), "state": "listening"},
@@ -73,6 +74,42 @@ class _TTYBuffer:
 
 
 class LighthouseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_lighthouse_uses_the_latest_adaptive_assessment(self) -> None:
+        server = main.CodexAppServer()
+        server.available_models = AsyncMock(
+            return_value=(
+                {
+                    "id": "test-model",
+                    "isDefault": True,
+                    "supportedReasoningEfforts": [
+                        {"reasoningEffort": effort}
+                        for effort in ("low", "medium", "high")
+                    ],
+                },
+            )
+        )
+        server._assess_request = AsyncMock(
+            return_value={"complexity": "complex", "requires_tool": True}
+        )
+
+        self.assertEqual(
+            await server._select_reasoning_effort("inspect this", ()), "high"
+        )
+        snapshot = server.lighthouse_snapshot()
+
+        self.assertEqual(snapshot["reasoning"], "high")
+        self.assertEqual(snapshot["reasoning_mode"], "adaptive")
+        rendered = render_lighthouse(snapshot)
+        self.assertIn("Model        GPT-5.6 Luna · adaptive", rendered)
+        self.assertIn("Reasoning    high", rendered)
+
+    def test_lighthouse_does_not_invent_reasoning_without_an_assessment(self) -> None:
+        server = main.CodexAppServer()
+        snapshot = server.lighthouse_snapshot()
+
+        self.assertIsNone(snapshot["reasoning"])
+        self.assertIn("Reasoning    unknown", render_lighthouse(snapshot))
+
     async def test_explicit_session_selection_updates_character_and_dashboard_state(
         self,
     ) -> None:

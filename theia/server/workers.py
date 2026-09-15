@@ -576,6 +576,9 @@ class CodexWorkerMixin:
             return DEFAULT_REASONING_EFFORT
         if not assessment["requires_tool"]:
             selected = self._supported_effort("low", models)
+            remember = getattr(self, "_remember_lighthouse_reasoning", None)
+            if callable(remember):
+                remember(selected)
             logger.debug("Pre-assessment selected %s for a no-tool request", selected)
             return selected
 
@@ -586,6 +589,9 @@ class CodexWorkerMixin:
             "very_complex": "max",
         }[assessment["complexity"]]
         selected = self._supported_effort(requested, models)
+        remember = getattr(self, "_remember_lighthouse_reasoning", None)
+        if callable(remember):
+            remember(selected)
         logger.debug(
             "Pre-assessment selected %s for a %s tool-backed request",
             selected,

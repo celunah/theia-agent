@@ -59,7 +59,8 @@ category estimates, and the estimate is not subscription billing.
 
 The Lighthouse View is a read-only Rich terminal dashboard of live harness
 state. It shows Codex health, active work, character, presence, voice,
-attention, mood, workspace, approvals, memory counts, watchdog recovery, and
+attention, mood, the latest assessed reasoning effort, workspace, approvals,
+memory counts, watchdog recovery, and
 bounded recent events. Its Workspace section is limited to current
 harness-backed session entries; separately supplied session objectives are
 labelled outside that section. It uses normal Python logging when no

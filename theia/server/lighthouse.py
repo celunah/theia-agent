@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, Any, cast
 
 from ..core import (
     DEFAULT_CODEX_MODEL,
-    DEFAULT_REASONING_EFFORT,
     THEIA_VERSION,
     _env_bool,
     _safe_intermediate_text,
@@ -128,6 +127,11 @@ class CodexLighthouseMixin:
 
     def __getattr__(self, name: str) -> Any:
         raise AttributeError(name)
+
+    def _remember_lighthouse_reasoning(self, effort: Any) -> None:
+        """Keep the latest successful adaptive assessment for the live view."""
+        if isinstance(effort, str) and effort.strip():
+            self._lighthouse_last_adaptive_reasoning = effort.strip()[:32]
 
     def _lighthouse_active_sessions(
         self,
@@ -433,10 +437,13 @@ class CodexLighthouseMixin:
         codex_version = getattr(self, "_codex_version", None) or managed_version
         if not isinstance(codex_version, str) or not codex_version:
             codex_version = "unknown"
-        effort = getattr(turn, "effort", None) or (
-            DEFAULT_REASONING_EFFORT
-            if getattr(self, "_adaptive_reasoning", False)
-            else "standard"
+        effort = getattr(turn, "effort", None)
+        if not isinstance(effort, str) or not effort.strip():
+            effort = getattr(self, "_lighthouse_last_adaptive_reasoning", None)
+        if not isinstance(effort, str) or not effort.strip():
+            effort = None
+        reasoning_mode = (
+            "adaptive" if getattr(self, "_adaptive_reasoning", False) else "fixed"
         )
         snapshot = {
             "version": THEIA_VERSION,
@@ -446,6 +453,7 @@ class CodexLighthouseMixin:
             or getattr(self, "_model", None)
             or DEFAULT_CODEX_MODEL,
             "reasoning": effort,
+            "reasoning_mode": reasoning_mode,
             "character": self._lighthouse_character(session),
             "presence": {},
             "voice": {},
@@ -646,8 +654,9 @@ def render_lighthouse(snapshot: dict[str, Any]) -> str:
         f"Mode         {_dashboard_text(snapshot.get('mode'), 24).title() or 'Unknown'}",
         (
             f"Model        {_model_label(snapshot.get('model'))} · "
-            f"{_dashboard_text(snapshot.get('reasoning'), 40) or 'unknown'} reasoning"
+            f"{_dashboard_text(snapshot.get('reasoning_mode'), 24) or 'unknown'}"
         ),
+        f"Reasoning    {_dashboard_text(snapshot.get('reasoning'), 40) or 'unknown'}",
         (
             f"Character    {name} · loaded from {source}"
             + (f" · {character_reason}" if character_reason else "")
