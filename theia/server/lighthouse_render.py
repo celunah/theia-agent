@@ -38,6 +38,7 @@ _EVENT_LABELS = {
     "turn_failed": "Codex turn failed",
     "log_warning": "Warning",
     "log_error": "Error",
+    "gateway_reconnecting": "Discord gateway reconnecting",
     "character_loaded": "Character overlay loaded",
     "model_changed": "Model changed",
     "worker_started": "Worker started",
@@ -67,6 +68,7 @@ _EVENT_WARNING_NAMES = frozenset(
         "worker_failed",
         "session_degraded",
         "codex_start_failed",
+        "gateway_reconnecting",
     }
 )
 
@@ -105,6 +107,15 @@ def _stable_log_event_name(detail: Any) -> str | None:
         return "turn_timed_out"
     if "turn failed" in text:
         return "turn_failed"
+    if (
+        "attempting a reconnect" in text
+        and (
+            "wssserverhandshakeerror" in text
+            or "invalid response status" in text
+            or "gateway" in text
+        )
+    ) or ("session has been invalidated" in text and "shard" in text):
+        return "gateway_reconnecting"
     return None
 
 
@@ -128,10 +139,10 @@ def _event_severity(event_name: str, detail: Any = None) -> str:
     """Return the compact severity displayed beside a stable event title."""
     if event_name in {"fatal", "critical", "log_critical"}:
         return "FATAL"
+    if event_name in {"log_warning", "log_error"}:
+        event_name = _stable_log_event_name(detail) or event_name
     if event_name == "log_error":
         return "ERROR"
-    if event_name == "log_warning":
-        event_name = _stable_log_event_name(detail) or event_name
     if event_name in _EVENT_WARNING_NAMES:
         return "WARNING"
     return "INFO"
@@ -302,6 +313,19 @@ def _dashboard_text(value: Any, limit: int = 160) -> str:
     return text
 
 
+def _dashboard_personality_path(value: Any, limit: int = 120) -> str:
+    """Allow only logical Theia personality paths in the operator dashboard."""
+    text = str(value or "").strip().replace("\\", "/")
+    if not re.fullmatch(
+        r"(?:~/.theia|\$THEIA_HOME)/personalities/[A-Za-z0-9._%~-]+",
+        text,
+    ):
+        return ""
+    if len(text) > limit:
+        return text[: max(1, limit - 1)].rstrip() + "…"
+    return text
+
+
 def _dashboard_session_label(value: Any) -> str:
     """Reject opaque session labels so an accidental raw key cannot be shown."""
     text = _dashboard_text(value, 100)
@@ -433,6 +457,34 @@ def _footer(width: int, hint: str) -> str:
     return " " * max(0, usable - len(hint)) + hint
 
 
+def _diagnostic_footer(width: int) -> str:
+    """Keep the return action anchored while exposing diagnostic navigation."""
+    back = "ESC go back"
+    navigation = "↑/↓ scroll"
+    usable = _usable_width(width)
+    if len(navigation) + len(back) + 1 > usable:
+        return _footer(width, back)
+    return " " * (usable - len(navigation) - len(back) - 1) + navigation + " " + back
+
+
+def _styled_diagnostic_footer(width: int) -> Any:
+    """Right-align the footer and keep both interaction hints white."""
+    from rich.text import Text
+
+    plain = _diagnostic_footer(width)
+    navigation = "↑/↓ scroll"
+    navigation_start = plain.find(navigation)
+    if navigation_start < 0:
+        return Text(plain, style=rich_style("INFO"))
+    back = "ESC go back"
+    back_start = plain.rfind(back)
+    footer = Text(plain[:navigation_start], style=rich_style("INFO"))
+    footer.append(navigation, style="white")
+    footer.append(plain[navigation_start + len(navigation) : back_start])
+    footer.append(back, style="white")
+    return footer
+
+
 def _workspace_lines(workspace: dict[str, Any]) -> list[str]:
     source = _dashboard_text(workspace.get("source"), 40).casefold()
     entries = workspace.get("entries")
@@ -511,7 +563,7 @@ def _event_lines(snapshot: dict[str, Any]) -> list[str]:
     return lines or ["  No recent events"]
 
 
-def _latest_problem(snapshot: dict[str, Any]) -> str:
+def _latest_problem_details(snapshot: dict[str, Any]) -> tuple[str, str]:
     events = snapshot.get("events")
     events = events if isinstance(events, (list, tuple)) else ()
     for event in reversed(events):
@@ -520,9 +572,15 @@ def _latest_problem(snapshot: dict[str, Any]) -> str:
         name = str(event.get("event") or "").casefold()
         if _is_internal_worker_event(name, event.get("detail")):
             continue
-        if _event_severity(name, event.get("detail")) in {"WARNING", "ERROR", "FATAL"}:
-            return _event_title(name, event.get("detail"))
-    return "none"
+        severity = _event_severity(name, event.get("detail"))
+        if severity in {"WARNING", "ERROR", "FATAL"}:
+            return _event_title(name, event.get("detail")), severity
+    return "none", "INFO"
+
+
+def _latest_problem(snapshot: dict[str, Any]) -> str:
+    """Return the latest visible warning or error title."""
+    return _latest_problem_details(snapshot)[0]
 
 
 def _base_lines(
@@ -531,7 +589,12 @@ def _base_lines(
     character = snapshot.get("character")
     character = character if isinstance(character, dict) else {}
     name = _dashboard_text(character.get("name"), 80) or "none"
-    source = _dashboard_text(character.get("source"), 48) or "unknown"
+    source_label = _dashboard_text(character.get("source"), 32)
+    path = _dashboard_personality_path(character.get("path"))
+    if path and source_label in {"user override", "server override"}:
+        source = f"{source_label}: {path}"
+    else:
+        source = path or source_label or "unknown"
     reason = _dashboard_text(character.get("reason"), 96)
     mood = snapshot.get("mood")
     mood = mood if isinstance(mood, dict) else {}
@@ -564,8 +627,7 @@ def _base_lines(
             f"{_dashboard_text(snapshot.get('reasoning_mode'), 24) or 'unknown'}"
         ),
         f"Reasoning    {_dashboard_text(snapshot.get('reasoning'), 40) or 'unknown'}",
-        f"Character    {name} · loaded from {source}"
-        + (f" · {reason}" if reason else ""),
+        f"Character    {name} · {source}" + (f" · {reason}" if reason else ""),
         f"Presence     {_render_presence(presence)}",
         f"Voice        {_voice_label(snapshot.get('voice') if isinstance(snapshot.get('voice'), dict) else {})}",
         f"Attention    {attention_line}",
@@ -662,8 +724,9 @@ def _compact_parts(snapshot: dict[str, Any], *, width: int) -> dict[str, list[st
         f"Cleanup     {runtime['cleanup']}",
     ]
     events = _event_lines(snapshot)
-    problem = _latest_problem(snapshot)
-    errors = [f"Active error  {problem}"] if problem != "none" else []
+    problem, severity = _latest_problem_details(snapshot)
+    issue_label = "Active warning" if severity == "WARNING" else "Active error"
+    errors = [f"{issue_label}  {problem}"] if problem != "none" else []
     return {
         "header": [base[0], _separator(width)],
         "core": core + session,
@@ -715,7 +778,8 @@ def _tight_compact_lines(snapshot: dict[str, Any], *, width: int) -> list[str]:
     if event_count:
         event_text += f" · {event_label}"
     if parts["errors"]:
-        event_text = "Error " + _latest_problem(snapshot)
+        problem, severity = _latest_problem_details(snapshot)
+        event_text = ("Warning" if severity == "WARNING" else "Error") + " " + problem
     presence_state = secondary[0].removeprefix("Presence     ").split(" · ")[0]
     voice_value = secondary[1].removeprefix("Voice        ")
     voice_name, _, voice_state = voice_value.partition(" · ")
@@ -952,17 +1016,6 @@ def _diagnostic_source_label(record: Any) -> str:
     return source
 
 
-def _diagnostic_event_prefix(message: str, record: Any) -> str:
-    """Find an event title from structured metadata or the message prefix."""
-    explicit = getattr(record, "event_name", None) or getattr(record, "event", None)
-    if isinstance(explicit, str) and explicit.strip():
-        return _dashboard_text(explicit, 120)
-    # A plain message is not an event field. Never infer a title by matching
-    # words in it, because that would make severity or hierarchy ambiguous.
-    del message
-    return ""
-
-
 def _styled_diagnostic_line(record: Any) -> Any:
     from rich.text import Text
 
@@ -981,70 +1034,36 @@ def _styled_diagnostic_line(record: Any) -> Any:
         else ""
     )
     line = Text()
-    line.append("  [", style=rich_style("DISABLED"))
-    line.append(timestamp, style=rich_style("DISABLED"))
+    line.append("  [")
+    line.append(timestamp)
     line.append("] ")
-    line.append(
-        f"{level_name:<8}",
-        style=_severity_style(severity, emphasis=severity == "FATAL"),
-    )
+    severity_start = len(line.plain)
+    line.append(f"{level_name:<8}")
     line.append(" ")
-    line.append(source_label, style=rich_style("INFO"))
+    line.append(source_label)
     line.append(": ")
     if explicit_event:
-        line.append(explicit_event, style=f"bold {rich_style('INFO')}")
+        line.append(explicit_event)
         line.append(": ")
-    message_start = len(line.plain)
-    line.append(message, style=_severity_style(severity, emphasis=severity == "FATAL"))
+    line.append(message)
     if exception:
-        line.append(
-            exception, style=_severity_style(severity, emphasis=severity == "FATAL")
-        )
-    content = line.plain[message_start:]
-    prefix = _diagnostic_event_prefix(message, record) if not explicit_event else ""
-    if prefix and content.startswith(prefix):
+        line.append(exception)
+    _style_dashboard_line(line, line.plain, 0)
+    if level_name not in {"INFO", "WARNING", "ERROR", "FATAL"}:
         line.stylize(
-            f"bold {rich_style('INFO')}",
-            message_start,
-            message_start + len(prefix),
+            _severity_style(severity, emphasis=severity == "FATAL"),
+            severity_start,
+            severity_start + len(level_name),
         )
+    content = line.plain[severity_start + 9 :]
+    content_start = severity_start + 9
     for match in re.finditer(
         r"\b(?:method|status|duration(?:_ms)?|error_type|code)=[^, )]+", content
     ):
         line.stylize(
             rich_style("DISABLED"),
-            message_start + match.start(),
-            message_start + match.end(),
-        )
-    for match in re.finditer(
-        r"(?<![\w-])(?:adaptive|connected|enabled|watching|completed|accepted|healthy)(?![\w-])",
-        content,
-        re.IGNORECASE,
-    ):
-        line.stylize(
-            rich_style("INFO"),
-            message_start + match.start(),
-            message_start + match.end(),
-        )
-    for match in re.finditer(
-        r"(?<![\w-])(?:failed\s+worker|degraded|timeout|unavailable)(?![\w-])",
-        content,
-        re.IGNORECASE,
-    ):
-        line.stylize(
-            rich_style("ERROR"),
-            message_start + match.start(),
-            message_start + match.end(),
-        )
-    for match in re.finditer(
-        r"(?<![\w-])(?:not\s+configured|disabled|inactive|none|unknown)(?![\w-])",
-        content,
-        re.IGNORECASE,
-    ):
-        line.stylize(
-            rich_style("DISABLED"),
-            message_start + match.start(),
-            message_start + match.end(),
+            content_start + match.start(),
+            content_start + match.end(),
         )
     return line
 
@@ -1055,121 +1074,33 @@ def _styled_diagnostic_event(event: dict[str, Any]) -> Any:
     name = str(event.get("event") or "").casefold()
     severity = _event_severity(name, event.get("detail"))
     label = _event_title(name, event.get("detail"))
-    line = Text("  [", style=rich_style("DISABLED"))
-    line.append(
-        _format_event_time(event.get("timestamp")), style=rich_style("DISABLED")
-    )
+    line = Text("  [")
+    line.append(_format_event_time(event.get("timestamp")))
     line.append("] ")
-    line.append(
-        f"{severity:<8}",
-        style=_severity_style(severity, emphasis=severity == "FATAL"),
-    )
+    line.append(f"{severity:<8}")
     line.append(" ")
-    label_start = len(line.plain)
-    line.append(label, style=f"bold {rich_style('INFO')}")
-    _stylize_terms(
-        line,
-        0,
-        label_start,
-        label,
-        _DEGRADED_STATUS_TERMS,
-        rich_style("ERROR"),
-    )
-    _stylize_terms(
-        line,
-        0,
-        label_start,
-        label,
-        _POSITIVE_STATUS_TERMS,
-        rich_style("INFO"),
-    )
+    line.append(label)
     detail = _dashboard_text(event.get("detail"), 180)
     if detail and name not in {"log_warning", "log_error"}:
         line.append(": ")
-        detail_start = len(line.plain)
-        line.append(detail, style=_severity_style(severity))
-        _stylize_terms(
-            line,
-            0,
-            detail_start,
-            detail,
-            _DEGRADED_STATUS_TERMS,
-            rich_style("ERROR"),
-        )
-        _stylize_terms(
-            line,
-            0,
-            detail_start,
-            detail,
-            _NEUTRAL_STATUS_TERMS,
-            rich_style("DISABLED"),
-        )
-        _stylize_terms(
-            line,
-            0,
-            detail_start,
-            detail,
-            _POSITIVE_STATUS_TERMS,
-            rich_style("INFO"),
-        )
+        line.append(detail)
+    _style_dashboard_line(line, line.plain, 0)
     return line
 
 
-def _wrap_diagnostic_lines(lines: list[Any], *, width: int) -> list[Any]:
-    """Wrap styled diagnostic rows so terminal height calculations stay true."""
-    from rich.console import Console
-
-    console = Console(width=max(1, _usable_width(width)), color_system=None)
-    wrapped: list[Any] = []
-    for line in lines:
-        wrapped.extend(
-            line.wrap(
-                console,
-                width=max(1, _usable_width(width)),
-                overflow="fold",
-                no_wrap=False,
-            )
-            or [line]
-        )
-    return wrapped
-
-
-def _fit_diagnostic_lines(lines: list[Any], *, width: int, height: int) -> list[Any]:
-    """Keep the diagnostic header and footer visible in a short terminal."""
+def _diagnostic_lines(
+    snapshot: dict[str, Any], records: Any, *, width: int
+) -> list[Any]:
+    """Build the styled diagnostic document before viewport positioning."""
     from rich.text import Text
 
-    wrapped = _wrap_diagnostic_lines(lines, width=width)
-    content_budget = max(0, height - 1)
-    if len(wrapped) > content_budget:
-        if content_budget == 0:
-            return []
-        if content_budget == 1:
-            return wrapped[:1]
-        if content_budget == 2:
-            return [wrapped[0], wrapped[-1]]
-        marker = Text("  … diagnostic details truncated", style=rich_style("DISABLED"))
-        tail_count = content_budget - 3
-        return [wrapped[0], marker, *wrapped[-(tail_count + 1) :]]
-    return [*wrapped, *([Text()] * (content_budget - len(wrapped)))]
-
-
-def render_lighthouse_diagnostics_rich(
-    snapshot: dict[str, Any],
-    records: Any = (),
-    *,
-    width: int | None = None,
-    height: int | None = None,
-) -> Any:
-    """Render the complete technical log with structured severity styling."""
-    from rich.text import Text
-
-    width, height = _dimensions(width, height)
     lines: list[Text] = []
     version = _dashboard_text(snapshot.get("version"), 24) or THEIA_VERSION
     lines.append(
         Text(f"Theia {version} · Lighthouse Diagnostics", style=rich_style("INFO"))
     )
     lines.append(Text(_separator(width), style=rich_style("INFO")))
+    lines.append(Text("Recent diagnostics", style=rich_style("INFO")))
     events = snapshot.get("events")
     events = events if isinstance(events, (list, tuple)) else ()
     event_items = [
@@ -1193,12 +1124,93 @@ def render_lighthouse_diagnostics_rich(
     elif not event_items:
         lines.append(Text("  No diagnostic details", style=rich_style("DISABLED")))
     lines.append(Text(_separator(width), style=rich_style("INFO")))
+    return lines
+
+
+def _wrap_diagnostic_lines(lines: list[Any], *, width: int) -> list[Any]:
+    """Wrap styled diagnostic rows so terminal height calculations stay true."""
+    from rich.console import Console
+
+    console = Console(width=max(1, _usable_width(width)), color_system=None)
+    wrapped: list[Any] = []
+    for line in lines:
+        wrapped.extend(
+            line.wrap(
+                console,
+                width=max(1, _usable_width(width)),
+                overflow="fold",
+                no_wrap=False,
+            )
+            or [line]
+        )
+    return wrapped
+
+
+def _fit_diagnostic_lines(
+    lines: list[Any], *, width: int, height: int, scroll_offset: int = 0
+) -> tuple[list[Any], int]:
+    """Fit a scrollable diagnostic body below a fixed header."""
+    wrapped = _wrap_diagnostic_lines(lines, width=width)
+    content_budget = max(0, height - 1)
+    if content_budget == 0:
+        return [], max(0, len(wrapped) - 2)
+
+    header_count = min(2, len(wrapped), content_budget)
+    header = wrapped[:header_count]
+    body = wrapped[header_count:]
+    body_budget = max(0, content_budget - header_count)
+    max_scroll = max(0, len(body) - body_budget)
+    offset = min(max(0, scroll_offset), max_scroll)
+    visible = body[offset : offset + body_budget]
+    from rich.text import Text
+
+    return (
+        [
+            *header,
+            *visible,
+            *([Text()] * (content_budget - header_count - len(visible))),
+        ],
+        max_scroll,
+    )
+
+
+def diagnostic_scroll_limit(
+    snapshot: dict[str, Any],
+    records: Any = (),
+    *,
+    width: int | None = None,
+    height: int | None = None,
+) -> int:
+    """Return the maximum older-history offset for the diagnostics viewport."""
+    width, height = _dimensions(width, height)
+    _, max_scroll = _fit_diagnostic_lines(
+        _diagnostic_lines(snapshot, records, width=width), width=width, height=height
+    )
+    return max_scroll
+
+
+def render_lighthouse_diagnostics_rich(
+    snapshot: dict[str, Any],
+    records: Any = (),
+    *,
+    width: int | None = None,
+    height: int | None = None,
+    scroll_offset: int = 0,
+) -> Any:
+    """Render the complete technical log with structured severity styling."""
+    from rich.text import Text
+
+    width, height = _dimensions(width, height)
+    lines = _diagnostic_lines(snapshot, records, width=width)
 
     rendered = Text()
-    for line in _fit_diagnostic_lines(lines, width=width, height=height):
+    visible_lines, _ = _fit_diagnostic_lines(
+        lines, width=width, height=height, scroll_offset=scroll_offset
+    )
+    for line in visible_lines:
         rendered.append(line)
         rendered.append("\n")
-    rendered.append(_footer(width, "ESC go back"), style=rich_style("INFO"))
+    rendered.append(_styled_diagnostic_footer(width))
     return rendered
 
 
@@ -1208,10 +1220,15 @@ def render_lighthouse_diagnostics(
     *,
     width: int | None = None,
     height: int | None = None,
+    scroll_offset: int = 0,
 ) -> str:
     """Return diagnostic details as plain text for compatibility and tests."""
     return render_lighthouse_diagnostics_rich(
-        snapshot, records, width=width, height=height
+        snapshot,
+        records,
+        width=width,
+        height=height,
+        scroll_offset=scroll_offset,
     ).plain
 
 
@@ -1223,13 +1240,18 @@ def render_lighthouse_rich(
     width: int | None = None,
     height: int | None = None,
     show_keyboard_hint: bool = False,
+    diagnostic_scroll_offset: int = 0,
 ) -> Any:
     """Render a Lighthouse screen with shared semantic terminal colors."""
     from rich.text import Text
 
     if diagnostic_mode:
         return render_lighthouse_diagnostics_rich(
-            snapshot, records, width=width, height=height
+            snapshot,
+            records,
+            width=width,
+            height=height,
+            scroll_offset=diagnostic_scroll_offset,
         )
     plain = render_lighthouse(
         snapshot,

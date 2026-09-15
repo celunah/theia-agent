@@ -24,7 +24,11 @@ def _snapshot(**overrides: Any) -> dict[str, Any]:
         "model": "gpt-5.6-luna",
         "reasoning": "high",
         "reasoning_mode": "adaptive",
-        "character": {"name": "Cel", "source": "user overlay"},
+        "character": {
+            "name": "Cel",
+            "source": "user override",
+            "path": "~/.theia/personalities/cel.md",
+        },
         "presence": {"status": "online", "line": "reviewing the request"},
         "voice": {"providers": ("qwen",), "state": "listening"},
         "attention": {"active": "Lighthouse View", "parked": ("Memory",)},
@@ -85,19 +89,19 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
             THEIA_COLORS,
             {
                 "INFO": "#A5BAFF",
-                "WARNING": "#C0E68C",
-                "ERROR": "#C07178",
-                "FATAL": "#C07178",
-                "ACTIVE": "#8CCFA3",
-                "FATAL_DARK": "#9A5A60",
                 "CONNECTED": "#A5BAFF",
                 "HEALTHY": "#A5BAFF",
-                "DEGRADED": "#C0E68C",
-                "DISABLED": "#8A86A0",
+                "ACTIVE": "#92D886",
+                "WARNING": "#DFD477",
+                "DEGRADED": "#DFD477",
+                "ERROR": "#DD6167",
+                "FATAL": "#DD6167",
+                "FATAL_DARK": "#9C5256",
+                "DISABLED": "#8B78BC",
             },
         )
         self.assertEqual(color_value("INFO"), 0xA5BAFF)
-        self.assertEqual(color_value("DISABLED"), 0x8A86A0)
+        self.assertEqual(color_value("DISABLED"), 0x8B78BC)
 
         formatter = core_module._CodexColorFormatter(use_colors=True)
         info = logging.LogRecord(
@@ -107,7 +111,7 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
         fatal = logging.LogRecord(
             "theia.codex", logging.CRITICAL, "test.py", 1, "fatal", (), None
         )
-        self.assertIn("\x1b[1;7m\x1b[38;2;192;113;120m", formatter.format(fatal))
+        self.assertIn("\x1b[1;7m\x1b[38;2;221;97;103m", formatter.format(fatal))
 
         plain = render_lighthouse(_snapshot())
         styled = render_lighthouse_rich(_snapshot())
@@ -119,7 +123,7 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(
             any(
-                "bold reverse" in str(span.style) and "#9A5A60" in str(span.style)
+                "bold reverse" in str(span.style) and "#9C5256" in str(span.style)
                 for span in fatal.spans
             )
         )
@@ -130,12 +134,12 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
             offset = rendered.plain.index(value)
             return str(rendered.get_style_at_offset(Console(), offset)).casefold()
 
-        self.assertIn("#8ccfa3", style_for(_snapshot(), "online"))
+        self.assertIn("#92d886", style_for(_snapshot(), "online"))
         self.assertIn(
-            "#c0e68c", style_for(_snapshot(presence={"status": "idle"}), "idle")
+            "#dfd477", style_for(_snapshot(presence={"status": "idle"}), "idle")
         )
         self.assertIn(
-            "#c07178",
+            "#dd6167",
             style_for(_snapshot(presence={"status": "offline"}), "offline"),
         )
         self.assertIn("#a5baff", style_for(_snapshot(), "adaptive"))
@@ -148,8 +152,8 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
                 "cleanup": {"status": "degraded", "reason": "timeout"},
             }
         )
-        self.assertIn("#c07178", style_for(degraded, "degraded"))
-        self.assertIn("#c07178", style_for(degraded, "timeout"))
+        self.assertIn("#dd6167", style_for(degraded, "degraded"))
+        self.assertIn("#dd6167", style_for(degraded, "timeout"))
 
         neutral = _snapshot(
             runtime={
@@ -159,10 +163,10 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
             },
             attention={"active": "none"},
         )
-        self.assertIn("#8a86a0", style_for(neutral, "not configured"))
-        self.assertIn("#8a86a0", style_for(neutral, "none"))
+        self.assertIn("#8b78bc", style_for(neutral, "not configured"))
+        self.assertIn("#8b78bc", style_for(neutral, "none"))
 
-    def test_diagnostic_fatal_uses_the_darker_red(self) -> None:
+    def test_diagnostic_fatal_severity_uses_the_darker_red(self) -> None:
         record = logging.LogRecord(
             "theia.process",
             logging.CRITICAL,
@@ -173,9 +177,9 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
             None,
         )
         rendered = render_lighthouse_diagnostics_rich(_snapshot(), (record,))
-        offset = rendered.plain.index("process stopped")
+        offset = rendered.plain.index("CRITICAL")
         style = str(rendered.get_style_at_offset(Console(), offset)).casefold()
-        self.assertIn("#9a5a60", style)
+        self.assertIn("#9c5256", style)
         self.assertIn("bold reverse", style)
 
     async def test_lighthouse_uses_the_latest_adaptive_assessment(self) -> None:
@@ -213,6 +217,56 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(snapshot["reasoning"])
         self.assertIn("Reasoning    unknown", render_lighthouse(snapshot))
+
+    def test_character_line_shows_profile_path_and_override_scope(self) -> None:
+        rendered = render_lighthouse(_snapshot())
+
+        self.assertIn(
+            "Character    Cel · user override: ~/.theia/personalities/cel.md",
+            rendered,
+        )
+
+    def test_lighthouse_character_reports_global_and_override_sources(self) -> None:
+        server = main.CodexAppServer()
+        profile_path = Path.home() / ".theia" / "personalities" / "cel.md"
+        with (
+            patch.object(
+                server._personalities,
+                "summary",
+                return_value=SimpleNamespace(character_name="Cel", identifier="cel"),
+            ),
+            patch.object(
+                server._personalities,
+                "resolve",
+                return_value=SimpleNamespace(path=profile_path),
+            ),
+        ):
+            server._personality_scopes = {
+                "everyone": {"scope": "everyone", "name": "cel"}
+            }
+            global_character = server._lighthouse_character(None)
+            with patch.object(
+                server,
+                "personality_selection",
+                return_value={"scope": "server", "name": "cel"},
+            ):
+                server_character = server._lighthouse_character(
+                    SimpleNamespace(key="guild:42:channel:1:user:7")
+                )
+            with patch.object(
+                server,
+                "personality_selection",
+                return_value={"scope": "me", "name": "cel"},
+            ):
+                user_character = server._lighthouse_character(
+                    SimpleNamespace(key="guild:42:channel:1:user:7")
+                )
+
+        self.assertEqual(global_character["source"], "global")
+        self.assertEqual(server_character["source"], "server override")
+        self.assertEqual(user_character["source"], "user override")
+        for character in (global_character, server_character, user_character):
+            self.assertEqual(character["path"], "~/.theia/personalities/cel.md")
 
     async def test_explicit_session_selection_updates_character_and_dashboard_state(
         self,
@@ -461,6 +515,29 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("serverOverloaded", rendered)
         self.assertNotIn("internal protocol detail", rendered)
 
+    def test_discord_gateway_handshake_errors_are_specific_warnings(self) -> None:
+        rendered = render_lighthouse(
+            _snapshot(
+                events=(
+                    {
+                        "timestamp": 0,
+                        "event": "log_error",
+                        "detail": (
+                            "Attempting a reconnect in 0.90s - "
+                            "WSServerHandshakeError: 503, "
+                            "message='Invalid response status'"
+                        ),
+                    },
+                )
+            ),
+            width=120,
+            height=20,
+        )
+
+        self.assertIn("Discord gateway reconnecting", rendered)
+        self.assertIn("Active warning  Discord gateway reconnecting", rendered)
+        self.assertNotIn("Active error  Error", rendered)
+
     def test_generic_internal_app_server_errors_are_diagnostic_only(self) -> None:
         snapshot = _snapshot(
             events=(
@@ -521,7 +598,7 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("theia.cleanup", rendered)
         self.assertNotIn("No diagnostic details", rendered)
 
-    def test_diagnostics_use_structured_severity_and_secondary_hierarchy(self) -> None:
+    def test_diagnostics_use_main_view_severity_and_secondary_hierarchy(self) -> None:
         console = Console()
         info = logging.LogRecord(
             "theia.runtime",
@@ -564,33 +641,27 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
             _snapshot(), (info, warning, error, fatal), width=100
         )
 
-        info_offset = rendered.plain.index("ERROR is only")
-        warning_offset = rendered.plain.index("Worker degraded")
-        error_offset = rendered.plain.index("connection lost")
-        fatal_offset = rendered.plain.index("process stopped")
+        info_offset = rendered.plain.index("INFO")
+        warning_offset = rendered.plain.index("WARNING")
+        error_offset = rendered.plain.index("ERROR")
+        fatal_offset = rendered.plain.index("CRITICAL")
         self.assertIn(
             "#a5baff",
             str(rendered.get_style_at_offset(console, info_offset)).casefold(),
         )
         self.assertIn(
-            "#c0e68c",
+            "#dfd477",
             str(rendered.get_style_at_offset(console, warning_offset)).casefold(),
         )
         self.assertIn(
-            "#c07178",
+            "#dd6167",
             str(rendered.get_style_at_offset(console, error_offset)).casefold(),
         )
         self.assertIn(
             "bold reverse", str(rendered.get_style_at_offset(console, fatal_offset))
         )
         self.assertIn(
-            "#8a86a0",
-            str(
-                rendered.get_style_at_offset(console, rendered.plain.index("2026-"))
-            ).casefold(),
-        )
-        self.assertIn(
-            "#a5baff",
+            "none",
             str(
                 rendered.get_style_at_offset(
                     console, rendered.plain.index("theia.runtime")
@@ -598,7 +669,7 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
             ).casefold(),
         )
         self.assertIn(
-            "#8a86a0",
+            "#8b78bc",
             str(
                 rendered.get_style_at_offset(
                     console, rendered.plain.index("method=worker")
@@ -606,7 +677,7 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
             ).casefold(),
         )
 
-    def test_diagnostic_event_metadata_is_displayed_as_a_bright_event_title(
+    def test_diagnostic_event_metadata_is_displayed_in_the_log_row(
         self,
     ) -> None:
         record = logging.LogRecord(
@@ -615,11 +686,16 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
         record.event_name = "Worker completed"
         rendered = render_lighthouse_diagnostics_rich(_snapshot(), (record,))
         self.assertIn("Worker completed: accepted", rendered.plain)
-        offset = rendered.plain.index("Worker completed")
         console = Console()
-        self.assertIn("bold", str(rendered.get_style_at_offset(console, offset)))
+        offset = rendered.plain.index("Worker completed")
+        self.assertEqual(
+            "none", str(rendered.get_style_at_offset(console, offset)).casefold()
+        )
         self.assertIn(
-            "#a5baff", str(rendered.get_style_at_offset(console, offset)).casefold()
+            "#a5baff",
+            str(
+                rendered.get_style_at_offset(console, rendered.plain.index("accepted"))
+            ).casefold(),
         )
 
     def test_diagnostic_unknown_level_falls_back_to_info_style(self) -> None:
@@ -732,7 +808,9 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Theia 2.0.7 · Lighthouse Diagnostics", rendered)
         self.assertTrue(all(len(line) <= 42 for line in rendered.splitlines()))
         self.assertEqual(len(rendered.splitlines()), 12)
-        self.assertEqual(rendered.splitlines()[-1].strip(), "ESC go back")
+        footer = rendered.splitlines()[-1].rstrip()
+        self.assertTrue(footer.endswith("ESC go back"))
+        self.assertIn("↑/↓ scroll", footer)
 
     def test_diagnostic_footer_stays_anchored_with_wrapped_details(self) -> None:
         record = logging.LogRecord(
@@ -750,14 +828,71 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
         lines = rendered.splitlines()
 
         self.assertEqual(len(lines), 12)
-        self.assertEqual(lines[-1].strip(), "ESC go back")
+        footer = lines[-1].rstrip()
+        self.assertTrue(footer.endswith("ESC go back"))
+        self.assertIn("↑/↓ scroll", footer)
         self.assertIn("detail that is long enough", rendered)
+
+    def test_diagnostic_footer_exposes_navigation_when_history_fits(self) -> None:
+        rendered = render_lighthouse_diagnostics(_snapshot(), width=80, height=12)
+
+        footer = rendered.splitlines()[-1].rstrip()
+        self.assertIn("↑/↓ scroll", footer)
+        self.assertNotIn("PgUp", footer)
+        self.assertNotIn("Home", footer)
+        self.assertNotIn("End", footer)
+        self.assertTrue(footer.endswith("ESC go back"))
+
+    def test_diagnostic_footer_groups_white_hints_with_return_action(self) -> None:
+        rendered = render_lighthouse_diagnostics_rich(_snapshot(), width=80, height=12)
+        footer_start = rendered.plain.rindex("↑/↓ scroll")
+        back_start = rendered.plain.rindex("ESC go back")
+        console = Console()
+
+        self.assertEqual(back_start, footer_start + len("↑/↓ scroll "))
+        self.assertIn(
+            "white",
+            str(rendered.get_style_at_offset(console, footer_start)).casefold(),
+        )
+        self.assertIn(
+            "white",
+            str(rendered.get_style_at_offset(console, back_start)).casefold(),
+        )
+
+    def test_diagnostic_history_scrolls_without_dropping_retained_records(self) -> None:
+        records = tuple(
+            logging.LogRecord(
+                "theia.codex",
+                logging.INFO,
+                "runtime.py",
+                index,
+                f"diagnostic record {index:02d}",
+                (),
+                None,
+            )
+            for index in range(20)
+        )
+
+        latest = render_lighthouse_diagnostics(
+            _snapshot(), records, width=80, height=10, scroll_offset=0
+        )
+        oldest = render_lighthouse_diagnostics(
+            _snapshot(), records, width=80, height=10, scroll_offset=10_000
+        )
+
+        self.assertIn("Recent diagnostics", latest)
+        self.assertIn("diagnostic record 19", latest)
+        self.assertNotIn("diagnostic record 00", latest)
+        self.assertIn("diagnostic record 00", oldest)
+        self.assertNotIn("diagnostic record 19", oldest)
+        self.assertIn("↑/↓ scroll", latest)
+        self.assertTrue(latest.splitlines()[-1].rstrip().endswith("ESC go back"))
 
     def test_empty_workspace_and_missing_subsystems_are_truthful(self) -> None:
         stale_goal = "stale demo objective"
         rendered = render_lighthouse(
             _snapshot(
-                character={"name": "none", "source": "no overlay"},
+                character={"name": "none", "source": "no character selected"},
                 presence={"status": "unknown", "line": "none"},
                 voice={"providers": (), "state": "disabled"},
                 workspace={
@@ -916,7 +1051,7 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
             logger.propagate = previous_propagate
             logger.setLevel(previous_level)
 
-    def test_f1_toggles_the_read_only_diagnostic_view(self) -> None:
+    async def test_f1_opens_and_esc_leaves_the_read_only_diagnostic_view(self) -> None:
         output = _TTYBuffer()
         codex = SimpleNamespace(
             lighthouse_snapshot=Mock(return_value=_snapshot()),
@@ -935,10 +1070,43 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
         )
 
         view._handle_keyboard_text("\x1bOP")
+        self.assertTrue(view._diagnostic_mode)
+        view._handle_keyboard_text("\x1b")
+        await asyncio.sleep(0.1)
         self.assertFalse(view._diagnostic_mode)
+
         view._diagnostic_mode = True
         view._handle_keyboard_text("\x1b")
+        view._handle_keyboard_text("[A")
+        self.assertTrue(view._diagnostic_mode)
+        self.assertEqual(view._diagnostic_scroll, 1)
+        view._handle_keyboard_text("\x1b[5~")
+        self.assertEqual(view._diagnostic_scroll, 9)
+        view._handle_keyboard_text("\x1b[B")
+        self.assertEqual(view._diagnostic_scroll, 8)
+        view._handle_keyboard_text("\x1b[6~")
+        self.assertEqual(view._diagnostic_scroll, 0)
+
+        view._diagnostic_mode = True
+        view._handle_keyboard_text("x")
+        await asyncio.sleep(0.1)
+        self.assertTrue(view._diagnostic_mode)
+        view._handle_keyboard_text("\x1b")
+        await asyncio.sleep(0.1)
         self.assertFalse(view._diagnostic_mode)
+
+        view._diagnostic_mode = True
+        view._diagnostic_scroll = 0
+        prefix = view._handle_windows_character("\xe0", False)
+        self.assertTrue(prefix)
+        self.assertFalse(view._handle_windows_character("H", prefix))
+        self.assertEqual(view._diagnostic_scroll, 1)
+
+        view._diagnostic_mode = True
+        prefix = view._handle_windows_character("\x00", False)
+        self.assertTrue(prefix)
+        self.assertFalse(view._handle_windows_character(";", prefix))
+        self.assertTrue(view._diagnostic_mode)
 
     async def test_heartbeat_uses_account_probe_without_a_turn(self) -> None:
         server = main.CodexAppServer()
@@ -973,7 +1141,22 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("tty: true", compose)
         self.assertIn("TERM: xterm-256color", compose)
         self.assertIn("COLORTERM: truecolor", compose)
+        self.assertIn(
+            'user: "${THEIA_UID:?Set THEIA_UID to the host UID}:${THEIA_GID:?Set THEIA_GID to the host GID}"',
+            compose,
+        )
+        self.assertIn(
+            'THEIA_UID: "${THEIA_UID:?Set THEIA_UID to the host UID}"', compose
+        )
+        self.assertIn(
+            'THEIA_GID: "${THEIA_GID:?Set THEIA_GID to the host GID}"', compose
+        )
+        self.assertNotIn("userns_mode:", compose)
 
         dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
         self.assertIn("TERM=xterm-256color", dockerfile)
         self.assertIn("COLORTERM=truecolor", dockerfile)
+        self.assertIn("ARG THEIA_UID=1000", dockerfile)
+        self.assertIn("ARG THEIA_GID=1000", dockerfile)
+        self.assertIn('--uid "${THEIA_UID}"', dockerfile)
+        self.assertIn('--gid "${THEIA_GID}"', dockerfile)

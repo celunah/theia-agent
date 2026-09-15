@@ -6,20 +6,18 @@ import discord
 
 
 THEIA_COLORS: dict[str, str] = {
+    # Celune CCS accent-500 with Theia's branding transform: R * 0.8.
     "INFO": "#A5BAFF",
-    "WARNING": "#C0E68C",
-    "ERROR": "#C07178",
-    "FATAL": "#C07178",
-    # Generated from the existing Celune-derived palette for states that need
-    # a distinct semantic color in the Lighthouse View.
-    "ACTIVE": "#8CCFA3",
-    "FATAL_DARK": "#9A5A60",
     "CONNECTED": "#A5BAFF",
     "HEALTHY": "#A5BAFF",
-    "DEGRADED": "#C0E68C",
-    # Keep secondary and unavailable values muted without losing contrast on
-    # the dark terminal background used by the Lighthouse View.
-    "DISABLED": "#8A86A0",
+    # Celune CCS semantic colors with HSL(S * 0.8, L * 0.9).
+    "ACTIVE": "#92D886",  # green-500
+    "WARNING": "#DFD477",  # yellow-500
+    "DEGRADED": "#DFD477",
+    "ERROR": "#DD6167",  # red-500
+    "FATAL": "#DD6167",
+    "FATAL_DARK": "#9C5256",  # red-700
+    "DISABLED": "#8B78BC",  # faded-500 / sleep
 }
 
 

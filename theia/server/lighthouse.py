@@ -16,6 +16,7 @@ import sys
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from ..core import (
@@ -26,6 +27,7 @@ from ..core import (
 )
 from .lighthouse_render import (
     LIGHTHOUSE_DIAGNOSTIC_LIMIT,
+    diagnostic_scroll_limit,
     render_lighthouse,
     render_lighthouse_diagnostics,
     render_lighthouse_rich,
@@ -34,6 +36,8 @@ from .lighthouse_render import (
 LIGHTHOUSE_ENABLED_ENV = "THEIA_LIGHTHOUSE_ENABLED"
 LIGHTHOUSE_REFRESH_INTERVAL = 1.0
 LIGHTHOUSE_HEARTBEAT_INTERVAL = 5.0
+LIGHTHOUSE_DIAGNOSTIC_PAGE = 8
+LIGHTHOUSE_ESCAPE_DELAY = 0.08
 
 logger = logging.getLogger("theia.codex")
 
@@ -154,29 +158,41 @@ class CodexLighthouseMixin:
         return f"User conversation · @{user_name}" if user_name else "User conversation"
 
     def _lighthouse_character(self, session: _Session | None) -> dict[str, Any]:
-        if session is None:
-            return {"name": "none", "source": "no overlay", "status": "inactive"}
         try:
-            selection = self.personality_selection(session.key)
-            name = self.active_personality(session.key)
+            selection = (
+                self.personality_selection(session.key)
+                if session is not None
+                else self._personality_scopes.get("everyone")
+            )
+            selection = dict(selection) if isinstance(selection, dict) else {}
+            name = selection.get("name")
+            name = name if isinstance(name, str) and name else None
             if not name:
                 return {
                     "name": "none",
-                    "source": "no overlay",
+                    "source": "no character selected",
                     "status": "available",
                 }
             summary = self._personalities.summary(name)
+            profile = self._personalities.resolve(name)
+            if profile is None:
+                return {
+                    "name": "unavailable",
+                    "source": "character profile unavailable",
+                    "status": "degraded",
+                    "reason": "character profile unavailable",
+                }
             character = _safe_intermediate_text(summary.character_name, 80) or name
-            scope = selection.get("scope") if isinstance(selection, dict) else None
+            scope = str(selection.get("scope") or "everyone")
             source = {
-                "me": "user overlay",
-                "server": "server overlay",
-                "everyone": "global overlay",
-            }.get(str(scope), "personality overlay")
+                "me": "user override",
+                "server": "server override",
+            }.get(scope, "global")
             return {
                 "name": character,
                 "identifier": _safe_intermediate_text(summary.identifier, 80),
                 "source": source,
+                "path": self._lighthouse_personality_path(profile.path),
                 "status": "available",
             }
         except Exception:  # noqa: BLE001 - the dashboard is best effort
@@ -186,6 +202,19 @@ class CodexLighthouseMixin:
                 "status": "degraded",
                 "reason": "character overlay unavailable",
             }
+
+    def _lighthouse_personality_path(self, path: Path) -> str:
+        """Return a bounded logical path without exposing the host home path."""
+        try:
+            relative = path.resolve().relative_to(self._codex_home.resolve())
+        except (OSError, ValueError):
+            return "configured personality path"
+        runtime_root = (
+            "~/.theia"
+            if self._codex_home == (Path.home() / ".theia").resolve()
+            else "$THEIA_HOME"
+        )
+        return f"{runtime_root}/{relative.as_posix()}"
 
     def _lighthouse_attention(self, session: _Session | None) -> dict[str, Any]:
         if session is None or session.attention is None:
@@ -503,10 +532,12 @@ class LighthouseView:
             maxlen=LIGHTHOUSE_DIAGNOSTIC_LIMIT
         )
         self._diagnostic_mode = False
+        self._diagnostic_scroll = 0
         self._text_type: Any | None = None
         self._keyboard_fd: int | None = None
         self._keyboard_old_attrs: Any | None = None
         self._keyboard_buffer = ""
+        self._escape_handle: asyncio.TimerHandle | None = None
         self._keyboard_task: asyncio.Task[None] | None = None
 
     def _interactive(self) -> bool:
@@ -555,7 +586,11 @@ class LighthouseView:
         width, height = self._terminal_dimensions()
         if self._diagnostic_mode:
             return render_lighthouse_diagnostics(
-                self.snapshot(), self._diagnostics, width=width, height=height
+                self.snapshot(),
+                self._diagnostics,
+                width=width,
+                height=height,
+                scroll_offset=self._diagnostic_scroll,
             )
         return render_lighthouse(
             self.snapshot(), width=width, height=height, show_keyboard_hint=True
@@ -573,6 +608,7 @@ class LighthouseView:
                 width=width,
                 height=height,
                 show_keyboard_hint=True,
+                diagnostic_scroll_offset=self._diagnostic_scroll,
             )
         return (
             text_type(self._render_current_view())
@@ -582,7 +618,68 @@ class LighthouseView:
 
     def _toggle_diagnostics(self) -> None:
         """Toggle the read-only diagnostic screen from the terminal key reader."""
+        self._cancel_pending_escape()
         self._diagnostic_mode = not self._diagnostic_mode
+        if self._diagnostic_mode:
+            self._diagnostic_scroll = 0
+        live = self._live
+        text_type = self._text_type
+        if live is None or text_type is None:
+            return
+        with contextlib.suppress(Exception):
+            live.update(self._render_current_payload(), refresh=True)
+
+    def _cancel_pending_escape(self) -> None:
+        """Cancel a delayed ESC decision while an escape sequence is arriving."""
+        handle, self._escape_handle = self._escape_handle, None
+        if handle is not None:
+            handle.cancel()
+
+    def _complete_pending_escape(self) -> None:
+        """Return to the main view after a standalone ESC keypress."""
+        self._escape_handle = None
+        if self._keyboard_buffer == "\x1b":
+            self._keyboard_buffer = ""
+            self._toggle_diagnostics()
+
+    def _schedule_escape(self) -> None:
+        """Wait briefly so an arrow-key escape sequence is not mistaken for ESC."""
+        self._cancel_pending_escape()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._toggle_diagnostics()
+            return
+        self._escape_handle = loop.call_later(
+            LIGHTHOUSE_ESCAPE_DELAY, self._complete_pending_escape
+        )
+
+    def _adjust_diagnostic_scroll(self, action: str) -> None:
+        """Move through retained diagnostic rows without leaving the live view."""
+        if not self._diagnostic_mode:
+            return
+        if action == "home":
+            width, height = self._terminal_dimensions()
+            self._diagnostic_scroll = diagnostic_scroll_limit(
+                self.snapshot(),
+                self._diagnostics,
+                width=width,
+                height=height,
+            )
+        elif action == "end":
+            self._diagnostic_scroll = 0
+        elif action in {"up", "page_up"}:
+            self._diagnostic_scroll += (
+                LIGHTHOUSE_DIAGNOSTIC_PAGE if action == "page_up" else 1
+            )
+        elif action in {"down", "page_down"}:
+            self._diagnostic_scroll = max(
+                0,
+                self._diagnostic_scroll
+                - (LIGHTHOUSE_DIAGNOSTIC_PAGE if action == "page_down" else 1),
+            )
+        else:
+            return
         live = self._live
         text_type = self._text_type
         if live is None or text_type is None:
@@ -591,16 +688,56 @@ class LighthouseView:
             live.update(self._render_current_payload(), refresh=True)
 
     def _handle_keyboard_text(self, text: str) -> None:
-        """Recognize F1 escape sequences without interpreting other input."""
-        self._keyboard_buffer = (self._keyboard_buffer + text)[-16:]
-        if (
-            "\x1b[11~" in self._keyboard_buffer
-            or "\x1bOP" in self._keyboard_buffer
-            or self._diagnostic_mode
-            and text == "\x1b"
+        """Recognize view switching and diagnostic navigation key sequences."""
+        if self._escape_handle is not None and text != "\x1b":
+            self._cancel_pending_escape()
+        if "\x1b" in text:
+            self._keyboard_buffer = text[text.rfind("\x1b") :][-16:]
+        elif self._keyboard_buffer.startswith("\x1b"):
+            self._keyboard_buffer = (self._keyboard_buffer + text)[-16:]
+        else:
+            self._keyboard_buffer = ""
+        function_sequences = ("\x1b[11~", "\x1bOP")
+        if not self._diagnostic_mode:
+            if any(
+                sequence in self._keyboard_buffer for sequence in function_sequences
+            ):
+                self._cancel_pending_escape()
+                self._keyboard_buffer = ""
+                self._toggle_diagnostics()
+            elif not any(
+                sequence.startswith(self._keyboard_buffer)
+                for sequence in function_sequences
+            ):
+                self._keyboard_buffer = ""
+            return
+        if any(sequence in self._keyboard_buffer for sequence in function_sequences):
+            self._cancel_pending_escape()
+            self._keyboard_buffer = ""
+            return
+        sequences = {
+            "\x1b[A": "up",
+            "\x1b[B": "down",
+            "\x1b[5~": "page_up",
+            "\x1b[6~": "page_down",
+            "\x1b[H": "home",
+            "\x1b[F": "end",
+            "\x1b[1~": "home",
+            "\x1b[4~": "end",
+        }
+        for sequence, action in sequences.items():
+            if sequence in self._keyboard_buffer:
+                self._cancel_pending_escape()
+                self._keyboard_buffer = ""
+                self._adjust_diagnostic_scroll(action)
+                return
+        if text == "\x1b":
+            self._schedule_escape()
+        elif not any(
+            sequence.startswith(self._keyboard_buffer)
+            for sequence in (*function_sequences, *sequences)
         ):
             self._keyboard_buffer = ""
-            self._toggle_diagnostics()
 
     def _read_keyboard(self) -> None:
         """Read available POSIX terminal bytes without blocking the event loop."""
@@ -617,22 +754,37 @@ class LighthouseView:
         with contextlib.suppress(UnicodeDecodeError):
             self._handle_keyboard_text(value.decode(errors="ignore"))
 
+    def _handle_windows_character(self, character: str, function_prefix: bool) -> bool:
+        """Handle one Windows console character and return the prefix state."""
+        if function_prefix:
+            if character == ";" and not self._diagnostic_mode:
+                self._toggle_diagnostics()
+            elif self._diagnostic_mode:
+                actions = {
+                    "H": "up",
+                    "P": "down",
+                    "I": "page_up",
+                    "Q": "page_down",
+                    "G": "home",
+                    "O": "end",
+                }
+                self._adjust_diagnostic_scroll(actions.get(character, ""))
+            return False
+        if character in {"\x00", "\xe0"}:
+            return True
+        self._handle_keyboard_text(character)
+        return False
+
     async def _read_windows_keyboard(self) -> None:
         """Poll Windows console input for F1 without a blocking console read."""
         msvcrt = cast(Any, __import__("msvcrt"))
 
         function_prefix = False
         while True:
-            if msvcrt.kbhit():
-                character = msvcrt.getwch()
-                if function_prefix:
-                    function_prefix = False
-                    if character == ";":
-                        self._toggle_diagnostics()
-                elif character in {"\x00", "\xe0"}:
-                    function_prefix = True
-                else:
-                    self._handle_keyboard_text(character)
+            while msvcrt.kbhit():
+                function_prefix = self._handle_windows_character(
+                    msvcrt.getwch(), function_prefix
+                )
             await asyncio.sleep(0.05)
 
     def _start_keyboard_input(self) -> None:
@@ -679,6 +831,7 @@ class LighthouseView:
         fd, old_attrs = self._keyboard_fd, self._keyboard_old_attrs
         self._keyboard_fd = None
         self._keyboard_old_attrs = None
+        self._cancel_pending_escape()
         self._keyboard_buffer = ""
         if fd is None:
             return
