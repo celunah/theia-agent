@@ -373,11 +373,21 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
         )
+        record = logging.LogRecord(
+            "theia.cleanup",
+            logging.WARNING,
+            "cleanup.py",
+            10,
+            "Expired Codex session cleanup failed (method=thread/delete, code=-32600)",
+            (),
+            None,
+        )
 
-        rendered = render_lighthouse_diagnostics(snapshot)
+        rendered = render_lighthouse_diagnostics(snapshot, (record,))
 
         self.assertIn("method=thread/delete", rendered)
         self.assertIn("code=-32600", rendered)
+        self.assertIn("theia.cleanup", rendered)
         self.assertNotIn("No diagnostic details", rendered)
 
     def test_empty_workspace_and_missing_subsystems_are_truthful(self) -> None:
@@ -510,12 +520,57 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(any(record.exc_info for record in view._diagnostics))
             self.assertIn(("log_error", "preserved failure"), events)
             self.assertIn("preserved failure", view.diagnostic_view())
+            self.assertIn("RuntimeError: diagnostic traceback", view.diagnostic_view())
             self.assertEqual(list(handler.filters), [])
             self.assertEqual(view._diagnostic_handlers, [])
             logger.info("logging restored")
             self.assertIn("logging restored", output.value)
         finally:
             logger.removeHandler(handler)
+
+    async def test_diagnostic_view_collects_records_from_nonterminal_loggers(self):
+        output = _TTYBuffer()
+        logger = logging.getLogger("theia.lighthouse.nonterminal")
+        previous_propagate = logger.propagate
+        previous_level = logger.level
+        logger.propagate = False
+        logger.setLevel(logging.INFO)
+        try:
+            codex = SimpleNamespace(
+                lighthouse_snapshot=Mock(return_value=_snapshot()),
+                heartbeat=AsyncMock(),
+                _record_runtime_event=Mock(),
+            )
+            view = LighthouseView(codex, output=output, refresh_interval=0.1)
+            self.assertTrue(await view.start())
+            logger.warning("nonterminal logger detail")
+            await view.close()
+
+            details = view.diagnostic_view()
+            self.assertIn("theia.lighthouse.nonterminal", details)
+            self.assertIn("nonterminal logger detail", details)
+        finally:
+            logger.propagate = previous_propagate
+            logger.setLevel(previous_level)
+
+    def test_f1_toggles_the_read_only_diagnostic_view(self) -> None:
+        output = _TTYBuffer()
+        codex = SimpleNamespace(
+            lighthouse_snapshot=Mock(return_value=_snapshot()),
+        )
+        view = LighthouseView(codex, output=output)
+        live = Mock()
+        view._live = live
+        view._text_type = lambda value: value
+
+        view._handle_keyboard_text("\x1b[")
+        view._handle_keyboard_text("11~")
+        self.assertTrue(view._diagnostic_mode)
+        self.assertTrue(live.update.called)
+        self.assertIn("Lighthouse diagnostic details", live.update.call_args.args[0])
+
+        view._handle_keyboard_text("\x1bOP")
+        self.assertFalse(view._diagnostic_mode)
 
     async def test_heartbeat_uses_account_probe_without_a_turn(self) -> None:
         server = main.CodexAppServer()

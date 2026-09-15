@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import logging
 import math
+import os
 import re
 import sys
 import time
@@ -741,7 +742,18 @@ def _diagnostic_message(record: Any) -> str:
         message = record.getMessage()
     except Exception:  # noqa: BLE001 - diagnostics must never affect the view
         return ""
-    return _dashboard_text(message, 240)
+    return _dashboard_text(message, 700)
+
+
+def _diagnostic_exception(record: Any) -> str:
+    """Return safe exception metadata while keeping traceback paths private."""
+    exc_info = getattr(record, "exc_info", None)
+    if not exc_info or len(exc_info) < 2:
+        return ""
+    exception = exc_info[1]
+    name = _dashboard_text(getattr(exc_info[0], "__name__", "Exception"), 80)
+    message = _dashboard_text(exception, 240)
+    return f" · {name}: {message}" if message else f" · {name}"
 
 
 def render_lighthouse_diagnostics(
@@ -759,11 +771,15 @@ def render_lighthouse_diagnostics(
     for event in list(events)[-LIGHTHOUSE_EVENT_LIMIT:][::-1]:
         if not isinstance(event, dict):
             continue
+        event_name = str(event.get("event") or "").casefold()
+        if event_name in {"log_warning", "log_error"}:
+            # The corresponding LogRecord below is the detailed source. Do not
+            # render it twice as both a runtime event and a diagnostic record.
+            continue
         detail = _dashboard_text(event.get("detail"), 180)
         if not detail:
             continue
         shown = True
-        event_name = str(event.get("event") or "").casefold()
         lines.append(
             f"  [{_format_event_time(event.get('timestamp'))}] "
             f"{_event_severity(event_name, detail):<8} {detail}"
@@ -776,7 +792,12 @@ def render_lighthouse_diagnostics(
             continue
         created = getattr(record, "created", None)
         level = _dashboard_text(getattr(record, "levelname", "INFO"), 12).upper()
-        lines.append(f"  [{_format_event_time(created)}] {level:<8} {detail}")
+        logger_name = _dashboard_text(getattr(record, "name", "root"), 48) or "root"
+        traceback = _diagnostic_exception(record)
+        lines.append(
+            f"  [{_format_event_time(created)}] {level:<8} "
+            f"{logger_name}: {detail}{traceback}"
+        )
     if len(lines) == 2:
         lines.append("  No diagnostic details")
     return "\n".join(lines)
@@ -854,6 +875,7 @@ class LighthouseView:
         voice: Any | None = None,
         session_key: str | None = None,
         output: Any | None = None,
+        input_stream: Any | None = None,
         refresh_interval: float = LIGHTHOUSE_REFRESH_INTERVAL,
         heartbeat_interval: float = LIGHTHOUSE_HEARTBEAT_INTERVAL,
         enabled: bool | None = None,
@@ -864,6 +886,7 @@ class LighthouseView:
         self.voice = voice
         self.session_key = session_key
         self.output = output if output is not None else sys.stdout
+        self.input_stream = input_stream if input_stream is not None else sys.stdin
         self.refresh_interval = max(0.1, refresh_interval)
         self.heartbeat_interval = max(1.0, heartbeat_interval)
         self.enabled = (
@@ -876,6 +899,12 @@ class LighthouseView:
         self._diagnostics: deque[logging.LogRecord] = deque(
             maxlen=LIGHTHOUSE_DIAGNOSTIC_LIMIT
         )
+        self._diagnostic_mode = False
+        self._text_type: Any | None = None
+        self._keyboard_fd: int | None = None
+        self._keyboard_old_attrs: Any | None = None
+        self._keyboard_buffer = ""
+        self._keyboard_task: asyncio.Task[None] | None = None
 
     def _interactive(self) -> bool:
         if not self.enabled:
@@ -906,6 +935,116 @@ class LighthouseView:
         """Return the explicit technical detail view without creating work."""
         return render_lighthouse_diagnostics(self.snapshot(), self._diagnostics)
 
+    def _render_current_view(self) -> str:
+        if self._diagnostic_mode:
+            return render_lighthouse_diagnostics(self.snapshot(), self._diagnostics)
+        return render_lighthouse(self.snapshot())
+
+    def _toggle_diagnostics(self) -> None:
+        """Toggle the read-only diagnostic screen from the terminal key reader."""
+        self._diagnostic_mode = not self._diagnostic_mode
+        live = self._live
+        text_type = self._text_type
+        if live is None or text_type is None:
+            return
+        with contextlib.suppress(Exception):
+            live.update(text_type(self._render_current_view()), refresh=True)
+
+    def _handle_keyboard_text(self, text: str) -> None:
+        """Recognize F1 escape sequences without interpreting other input."""
+        self._keyboard_buffer = (self._keyboard_buffer + text)[-16:]
+        if "\x1b[11~" in self._keyboard_buffer or "\x1bOP" in self._keyboard_buffer:
+            self._keyboard_buffer = ""
+            self._toggle_diagnostics()
+
+    def _read_keyboard(self) -> None:
+        """Read available POSIX terminal bytes without blocking the event loop."""
+        fd = self._keyboard_fd
+        if fd is None:
+            return
+        try:
+            value = os.read(fd, 64)
+        except (BlockingIOError, OSError):
+            return
+        if not value:
+            self._stop_keyboard_input()
+            return
+        with contextlib.suppress(UnicodeDecodeError):
+            self._handle_keyboard_text(value.decode(errors="ignore"))
+
+    async def _read_windows_keyboard(self) -> None:
+        """Poll Windows console input for F1 without a blocking console read."""
+        msvcrt = cast(Any, __import__("msvcrt"))
+
+        function_prefix = False
+        while True:
+            if msvcrt.kbhit():
+                character = msvcrt.getwch()
+                if function_prefix:
+                    function_prefix = False
+                    if character == ";":
+                        self._toggle_diagnostics()
+                elif character in {"\x00", "\xe0"}:
+                    function_prefix = True
+                else:
+                    self._handle_keyboard_text(character)
+            await asyncio.sleep(0.05)
+
+    def _start_keyboard_input(self) -> None:
+        """Install a best-effort F1 reader and preserve the prior terminal mode."""
+        if os.name == "nt":
+            with contextlib.suppress(Exception):
+                self._keyboard_task = asyncio.create_task(self._read_windows_keyboard())
+            return
+        stream = self.input_stream
+        checker = getattr(stream, "isatty", None)
+        if not callable(checker) or not checker():
+            return
+        fd: int | None = None
+        old_attrs = None
+        changed = False
+        try:
+            fd = int(stream.fileno())
+            import termios
+            import tty
+
+            old_attrs = termios.tcgetattr(fd)
+            tty.setcbreak(fd)
+            changed = True
+            asyncio.get_running_loop().add_reader(fd, self._read_keyboard)
+        except (
+            AttributeError,
+            ImportError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ):
+            if changed and fd is not None and old_attrs is not None:
+                with contextlib.suppress(Exception):
+                    import termios
+
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+            return
+        self._keyboard_fd = fd
+        self._keyboard_old_attrs = old_attrs
+
+    def _stop_keyboard_input(self) -> None:
+        """Remove the F1 reader and restore the terminal's previous input mode."""
+        fd, old_attrs = self._keyboard_fd, self._keyboard_old_attrs
+        self._keyboard_fd = None
+        self._keyboard_old_attrs = None
+        self._keyboard_buffer = ""
+        if fd is None:
+            return
+        with contextlib.suppress(Exception):
+            asyncio.get_running_loop().remove_reader(fd)
+        if old_attrs is not None:
+            with contextlib.suppress(Exception):
+                import termios
+
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+
     async def start(self) -> bool:
         """Start the live dashboard; non-TTY output keeps normal logging intact."""
         if not self._interactive():
@@ -918,6 +1057,7 @@ class LighthouseView:
             logger.warning("Lighthouse View unavailable because Rich is not installed")
             return False
         try:
+            self._text_type = Text
             handlers: list[logging.Handler] = []
             targets = _logging_targets()
             for log in targets:
@@ -931,13 +1071,11 @@ class LighthouseView:
                 self.codex, self._diagnostics
             )
             for log in targets:
-                if not any(handler in handlers for handler in log.handlers):
-                    continue
                 log.addHandler(diagnostic_handler)
                 self._diagnostic_handlers.append((log, diagnostic_handler))
             console = Console(file=self.output, force_terminal=True)
             self._live = Live(
-                Text(render_lighthouse(self.snapshot())),
+                Text(self._render_current_view()),
                 console=console,
                 refresh_per_second=1,
                 screen=True,
@@ -949,10 +1087,13 @@ class LighthouseView:
             self._live.start(refresh=False)
             console.clear()
             self._live.refresh()
+            self._start_keyboard_input()
             self._task = asyncio.create_task(self._run(Text))
             return True
         except Exception:
             self._restore_logging()
+            self._stop_keyboard_input()
+            self._text_type = None
             live, self._live = self._live, None
             if live is not None:
                 with contextlib.suppress(Exception):
@@ -976,12 +1117,14 @@ class LighthouseView:
                     next_heartbeat = now + self.heartbeat_interval
                 if self._live is not None:
                     self._live.update(
-                        text_type(render_lighthouse(self.snapshot())), refresh=True
+                        text_type(self._render_current_view()), refresh=True
                     )
                 await asyncio.sleep(self.refresh_interval)
         except Exception:
             logger.exception("Lighthouse View stopped unexpectedly")
             self._restore_logging()
+            self._stop_keyboard_input()
+            self._text_type = None
             live, self._live = self._live, None
             if live is not None:
                 with contextlib.suppress(Exception):
@@ -1007,8 +1150,15 @@ class LighthouseView:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        keyboard_task, self._keyboard_task = self._keyboard_task, None
+        if keyboard_task is not None:
+            keyboard_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await keyboard_task
+        self._stop_keyboard_input()
         live, self._live = self._live, None
         if live is not None:
             with contextlib.suppress(Exception):
                 live.stop()
         self._restore_logging()
+        self._text_type = None
