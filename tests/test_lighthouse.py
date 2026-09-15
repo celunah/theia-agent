@@ -927,3 +927,9 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
         compose = Path("compose.yaml").read_text(encoding="utf-8")
         self.assertIn("stdin_open: true", compose)
         self.assertIn("tty: true", compose)
+        self.assertIn("TERM: xterm-256color", compose)
+        self.assertIn("COLORTERM: truecolor", compose)
+
+        dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("TERM=xterm-256color", dockerfile)
+        self.assertIn("COLORTERM=truecolor", dockerfile)

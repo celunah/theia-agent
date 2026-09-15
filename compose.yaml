@@ -14,6 +14,8 @@ services:
       THEIA_HOME: /data
       THEIA_STATE: /data/sessions.json
       CODEX_CWD: /workspace
+      TERM: xterm-256color
+      COLORTERM: truecolor
     volumes:
       - type: bind
         source: ${HOME}/.theia

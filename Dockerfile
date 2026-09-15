@@ -21,6 +21,8 @@ LABEL org.opencontainers.image.version="${THEIA_VERSION}"
 
 ENV HOME=/home/theia \
     PATH=/app/.venv/bin:/app/node_modules/.bin:${PATH} \
+    TERM=xterm-256color \
+    COLORTERM=truecolor \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     UV_COMPILE_BYTECODE=1 \
