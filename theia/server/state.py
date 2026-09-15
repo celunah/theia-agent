@@ -31,16 +31,9 @@ from .policy import (
     _MOOD_MAX_CAUSES,
     _MOOD_TRAITS_MAX_CHARACTERS,
     _PERSONALITY_SCOPE_KEY_RE,
-    _TOKEN_USAGE_KEYS,
-    _USAGE_DAILY_LIMIT,
 )
 from .workspace import _restore_workspace_state, _serialize_workspace_state
 from .commitments import restore_commitments, serialize_commitments
-from .usage import (
-    PROMPT_CATEGORIES,
-    USAGE_TURN_LIMIT,
-    normalize_tokens,
-)
 from ..core import (
     DEFAULT_CODEX_MODEL,
     DEFAULT_MODE,
@@ -552,177 +545,7 @@ class CodexStateMixin:
                 for channel_id, message_id in checkpoints.items():
                     if str(channel_id).isdigit() and isinstance(message_id, int):
                         self._channel_checkpoints[int(channel_id)] = message_id
-            usage = data.get("theia_usage")
-            if isinstance(usage, dict):
-                usage_threads = usage.get("threads")
-                if isinstance(usage_threads, dict):
-                    for thread_id, snapshot in usage_threads.items():
-                        if isinstance(thread_id, str) and isinstance(snapshot, dict):
-                            self._usage_threads[thread_id] = (
-                                self._token_usage_breakdown(snapshot)
-                            )
-                            self._usage_thread_fields[thread_id] = {
-                                key
-                                for key, value in self._usage_threads[thread_id].items()
-                                if value > 0
-                            }
-                thread_fields = usage.get("thread_fields")
-                if isinstance(thread_fields, dict):
-                    for thread_id, fields in thread_fields.items():
-                        if not isinstance(thread_id, str) or not isinstance(
-                            fields, list
-                        ):
-                            continue
-                        self._usage_thread_fields[thread_id] = {
-                            field for field in fields if field in _TOKEN_USAGE_KEYS
-                        }
-                usage_daily = usage.get("daily_tokens")
-                if isinstance(usage_daily, dict):
-                    self._usage_daily = {
-                        str(day): value
-                        for day, value in usage_daily.items()
-                        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(day))
-                        and isinstance(value, int)
-                        and not isinstance(value, bool)
-                        and value > 0
-                    }
-                    self._usage_daily = dict(
-                        sorted(self._usage_daily.items())[-_USAGE_DAILY_LIMIT:]
-                    )
-                daily_breakdown = usage.get("daily_breakdown")
-                if isinstance(daily_breakdown, dict):
-                    restored_breakdown: dict[str, dict[str, int]] = {}
-                    for day, values in daily_breakdown.items():
-                        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(day)):
-                            continue
-                        normalized = normalize_tokens(values)
-                        if normalized:
-                            restored_breakdown[str(day)] = normalized
-                    self._usage_daily_breakdown = dict(
-                        sorted(restored_breakdown.items())[-_USAGE_DAILY_LIMIT:]
-                    )
-                usage_turns = usage.get("turns")
-                if isinstance(usage_turns, dict):
-                    restored_turns: dict[str, dict[str, Any]] = {}
-                    for key, record in usage_turns.items():
-                        if not isinstance(key, str) or not isinstance(record, dict):
-                            continue
-                        day = record.get("day")
-                        tokens = normalize_tokens(record.get("tokens"))
-                        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(day)):
-                            continue
-                        if not tokens:
-                            continue
-                        attribution = record.get("attribution")
-                        safe_attribution = {
-                            category: value
-                            for category in PROMPT_CATEGORIES
-                            if isinstance(attribution, dict)
-                            and isinstance(value := attribution.get(category), int)
-                            and not isinstance(value, bool)
-                            and value >= 0
-                        }
-                        recorded_at = record.get("recorded_at", 0.0)
-                        if not isinstance(recorded_at, (int, float)) or isinstance(
-                            recorded_at, bool
-                        ):
-                            recorded_at = 0.0
-                        restored_turns[key] = {
-                            "day": str(day),
-                            "recorded_at": max(0.0, float(recorded_at)),
-                            "model": str(record.get("model"))[:120]
-                            if record.get("model")
-                            else None,
-                            "effort": str(record.get("effort"))[:32]
-                            if record.get("effort")
-                            else None,
-                            "tokens": tokens,
-                            "attribution": safe_attribution,
-                        }
-                    self._usage_turns = dict(
-                        sorted(
-                            restored_turns.items(),
-                            key=lambda item: float(item[1].get("recorded_at", 0)),
-                        )[-USAGE_TURN_LIMIT:]
-                    )
-                internal_turns = usage.get("internal_turns")
-                if isinstance(internal_turns, dict):
-                    restored_internal: dict[str, dict[str, Any]] = {}
-                    for key, record in internal_turns.items():
-                        if not isinstance(key, str) or not isinstance(record, dict):
-                            continue
-                        day = record.get("day")
-                        tokens = normalize_tokens(record.get("tokens"))
-                        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(day)):
-                            continue
-                        if not tokens:
-                            continue
-                        restored_internal[key] = {
-                            "day": str(day),
-                            "recorded_at": max(
-                                0.0,
-                                float(record.get("recorded_at", 0))
-                                if isinstance(
-                                    record.get("recorded_at", 0), (int, float)
-                                )
-                                and not isinstance(record.get("recorded_at", 0), bool)
-                                else 0.0,
-                            ),
-                            "model": str(record.get("model"))[:120]
-                            if record.get("model")
-                            else None,
-                            "effort": str(record.get("effort"))[:32]
-                            if record.get("effort")
-                            else None,
-                            "tokens": tokens,
-                        }
-                    self._usage_internal_turns = dict(
-                        sorted(
-                            restored_internal.items(),
-                            key=lambda item: float(item[1].get("recorded_at", 0)),
-                        )[-USAGE_TURN_LIMIT:]
-                    )
-                failed_turns = usage.get("failed_turns")
-                if isinstance(failed_turns, int) and not isinstance(failed_turns, bool):
-                    self._usage_failed_turns = max(0, failed_turns)
-                failed_daily = usage.get("failed_daily")
-                if isinstance(failed_daily, dict):
-                    self._usage_failed_daily = {
-                        str(day): value
-                        for day, value in failed_daily.items()
-                        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(day))
-                        and isinstance(value, int)
-                        and not isinstance(value, bool)
-                        and value >= 0
-                    }
-                retries = usage.get("retries")
-                if isinstance(retries, int) and not isinstance(retries, bool):
-                    self._usage_retries = max(0, retries)
-                retries_daily = usage.get("retries_daily")
-                if isinstance(retries_daily, dict):
-                    self._usage_retries_daily = {
-                        str(day): value
-                        for day, value in retries_daily.items()
-                        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(day))
-                        and isinstance(value, int)
-                        and not isinstance(value, bool)
-                        and value >= 0
-                    }
-                tracked_since = usage.get("tracked_since")
-                if (
-                    isinstance(tracked_since, (int, float))
-                    and not isinstance(tracked_since, bool)
-                    and math.isfinite(float(tracked_since))
-                    and tracked_since > 0
-                ):
-                    self._usage_tracked_since = float(tracked_since)
-                longest_turn = usage.get("longest_running_turn_sec")
-                if (
-                    isinstance(longest_turn, (int, float))
-                    and not isinstance(longest_turn, bool)
-                    and math.isfinite(float(longest_turn))
-                ):
-                    self._usage_longest_running_turn_sec = max(0.0, float(longest_turn))
+            self._restore_usage_state(data.get("theia_usage"))
 
     def _quarantine_state(self, reason: str) -> None:
         """Preserve an unreadable state file before allowing recovery writes."""
@@ -818,48 +641,7 @@ class CodexStateMixin:
                     reverse=True,
                 )[:CHANNEL_CHECKPOINT_LIMIT]
             ),
-            "theia_usage": {
-                "threads": {
-                    thread_id: dict(snapshot)
-                    for thread_id, snapshot in self._usage_threads.items()
-                },
-                "thread_fields": {
-                    thread_id: sorted(fields)
-                    for thread_id, fields in self._usage_thread_fields.items()
-                },
-                "daily_tokens": dict(self._usage_daily),
-                "daily_breakdown": {
-                    day: dict(values)
-                    for day, values in self._usage_daily_breakdown.items()
-                },
-                "turns": {
-                    key: {
-                        "day": record.get("day"),
-                        "recorded_at": record.get("recorded_at"),
-                        "model": record.get("model"),
-                        "effort": record.get("effort"),
-                        "tokens": dict(record.get("tokens", {})),
-                        "attribution": dict(record.get("attribution", {})),
-                    }
-                    for key, record in self._usage_turns.items()
-                },
-                "internal_turns": {
-                    key: {
-                        "day": record.get("day"),
-                        "recorded_at": record.get("recorded_at"),
-                        "model": record.get("model"),
-                        "effort": record.get("effort"),
-                        "tokens": dict(record.get("tokens", {})),
-                    }
-                    for key, record in self._usage_internal_turns.items()
-                },
-                "failed_turns": self._usage_failed_turns,
-                "failed_daily": dict(self._usage_failed_daily),
-                "retries": self._usage_retries,
-                "retries_daily": dict(self._usage_retries_daily),
-                "tracked_since": self._usage_tracked_since,
-                "longest_running_turn_sec": self._usage_longest_running_turn_sec,
-            },
+            "theia_usage": self._serialize_usage_state(),
         }
         temporary = self._state_path.with_suffix(".tmp")
         try:

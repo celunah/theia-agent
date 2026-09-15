@@ -261,7 +261,7 @@ class _MemoryConfirmationView(_PersistentViewMixin, discord.ui.View):
                         self.record_id,
                         self.replacement,
                     )
-                except Exception:  # noqa: BLE001 - mutation failure is user-safe
+                except Exception:  # noqa: BLE001
                     message = "The memory action failed safely; nothing was changed."
             await interaction.followup.send(message, ephemeral=True)
             for child in self.children:

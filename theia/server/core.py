@@ -70,7 +70,7 @@ from .policy import (
 )
 from .transport import CodexTransportMixin
 from .state import CodexStateMixin
-from .usage_state import CodexUsageStateMixin
+from .usage_state import CodexUsageStateMixin, initialize_usage_state
 from .notifications import CodexNotificationMixin
 from .personality_state import CodexPersonalityStateMixin
 from .conversation import CodexConversationMixin
@@ -469,6 +469,7 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
         self._usage_retries_daily: dict[str, int] = {}
         self._usage_tracked_since: float | None = None
         self._usage_longest_running_turn_sec = 0.0
+        initialize_usage_state(self)
         self._state_dirty = False
         self._state_recovery_blocked = False
         self._state_needs_cleanup = False
@@ -719,7 +720,9 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
                 await asyncio.gather(*state.event_tasks, return_exceptions=True)
             if state.diagnostics is not None:
                 state.diagnostics.record_normal_duration(time.monotonic() - started_at)
-            self._record_usage_turn_duration(time.monotonic() - started_at, session)
+            self._record_usage_turn_duration(
+                time.monotonic() - started_at, session, turn_id
+            )
             if session.thread_id:
                 self._clear_pending_for_turn(session.thread_id, turn_id)
             session.turn_id = None

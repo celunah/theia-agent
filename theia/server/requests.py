@@ -99,6 +99,7 @@ class CodexRequestMixin:
             turn_id = turn.get("id")
             if not turn_id:
                 raise CodexAppServerError("Codex did not return a turn id.")
+            self._record_usage_api_call(session)
             if summary_injected:
                 session.pending_self_improvement_summary = None
                 self._persist_state()

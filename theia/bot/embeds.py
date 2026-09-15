@@ -22,9 +22,14 @@ from ..core import THEIA_VERSION, _safe_intermediate_text, _truncate
 
 
 def _format_count(value: Any) -> str:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or value < 0
+    ):
         return "Unavailable"
-    return f"{value:,}"
+    return f"{value:,.0f}"
 
 
 def _format_whole_seconds(value: Any) -> str:
@@ -69,47 +74,47 @@ def _format_usage_tokens(value: Any, *, estimated: bool = False) -> str:
     )
 
 
-def _usage_token_overview(
-    result: dict[str, Any], *, channel: Any | None = None, user: Any | None = None
-) -> str:
-    exact = result.get("exact") if isinstance(result, dict) else None
-    if not isinstance(exact, dict):
-        return "Usage tracked from Theia's conversation threads."
-    estimate = result.get("estimate")
-    estimate_total = estimate.get("total") if isinstance(estimate, dict) else None
-    estimate_text = (
-        f"~{estimate_total:,.6f} credits (estimate)"
-        if isinstance(estimate_total, (int, float))
-        and not isinstance(estimate_total, bool)
-        else "Unavailable"
-    )
-    day = result.get("date") or "the selected date"
-    model_lines: list[str] = []
-    by_model = estimate.get("byModel") if isinstance(estimate, dict) else None
-    if isinstance(by_model, dict) and len(by_model) > 1:
-        for model, value in list(by_model.items())[:4]:
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                model_lines.append(f"{model}: ~{value:,.6f} credits")
-    model_breakdown = "\n\n" + "\n".join(model_lines) if model_lines else ""
+def _format_usd(value: Any, *, available: bool = True) -> str:
+    if (
+        not available
+        or isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or value < 0
+    ):
+        return "Pricing unavailable"
+    if value == 0:
+        return "$0.00 USD"
+    if value < 0.0001:
+        return "<$0.0001 USD"
+    if value < 0.01:
+        return f"${value:.4f} USD"
+    return f"${value:,.2f} USD"
 
-    def label(target: str, default: str) -> str:
-        return _frontend_label(target, default, channel=channel, user=user)
 
-    return (
-        f"Usage statistics for {day}\n"
-        "────────────────────────────\n\n"
-        f"{label('label:usage_input_cache_miss', 'Input tokens (cache-miss)')}: "
-        f"{_format_count(exact.get('inputTokens'))}\n"
-        f"{label('label:usage_input_cache_hit', 'Input tokens (cache-hit)')}:   "
-        f"{_format_count(exact.get('cachedInputTokens'))}\n"
-        f"{label('label:usage_output_tokens', 'Output tokens')}:              "
-        f"{_format_count(exact.get('outputTokens'))}\n"
-        f"{label('label:usage_total_tokens', 'Total tokens')}:               "
-        f"{_format_count(exact.get('totalTokens'))}\n\n"
-        f"{label('label:usage_api_equivalent', 'API-equivalent value')}:       "
-        f"{estimate_text}{model_breakdown}\n\n"
-        "────────────────────────────"
-    )
+def _usage_cost_value(result: dict[str, Any]) -> str:
+    estimate = result.get("estimate") if isinstance(result, dict) else None
+    if not isinstance(estimate, dict):
+        return "Pricing unavailable"
+    available = bool(estimate.get("available"))
+    if "available" not in estimate:
+        # Older ephemeral view snapshots used credit units. Never reinterpret
+        # those values as USD when restoring a view after an upgrade.
+        available = estimate.get("currency") == "USD"
+    value = _format_usd(estimate.get("total"), available=available)
+    by_model = estimate.get("byModel")
+    if (
+        value == "Pricing unavailable"
+        or not isinstance(by_model, dict)
+        or len(by_model) <= 1
+    ):
+        return value
+    lines = [value]
+    for model, amount in list(by_model.items())[:4]:
+        lines.append(
+            f"{_safe_intermediate_text(str(model), 80)}: {_format_usd(amount)}"
+        )
+    return "\n".join(lines)
 
 
 def _usage_embed(
@@ -140,29 +145,65 @@ def _usage_embed(
     embed = _frontend_embed(
         "command:usage",
         "Usage",
-        _usage_token_overview(result, channel=channel, user=user),
+        f"Usage statistics for {result.get('date') or 'the selected date'}",
         channel=channel,
         user=user,
-        context={
-            "lifetime_tokens": _format_count(summary.get("lifetimeTokens")),
-            "total_cumulative_tokens": _format_count(
-                summary.get("totalCumulativeTokens", summary.get("lifetimeTokens"))
-            ),
-            "peak_daily_tokens": _format_count(summary.get("peakDailyTokens")),
-            "current_streak": _format_count(summary.get("currentStreakDays")),
-            "longest_streak": _format_count(summary.get("longestStreakDays")),
-            "longest_running_turn": _format_whole_seconds(
-                summary.get("longestRunningTurnSec")
-            ),
-        },
     )
-    fields = (
+    exact = result.get("exact") if isinstance(result, dict) else {}
+    exact = exact if isinstance(exact, dict) else {}
+    cumulative_tokens = summary.get("totalCumulativeProcessedTokens")
+    if not isinstance(cumulative_tokens, (int, float)) or isinstance(
+        cumulative_tokens, bool
+    ):
+        cumulative_tokens = summary.get(
+            "totalCumulativeTokens", summary.get("lifetimeTokens")
+        )
+    embed.add_field(name="Today", value="\u200b", inline=False)
+    embed.add_field(
+        name=_frontend_label(
+            "label:usage_input_tokens", "Input tokens", channel=channel, user=user
+        ),
+        value=(
+            f"{_frontend_label('label:usage_input_cache_miss', 'Cache miss', channel=channel, user=user)}: "
+            f"{_format_count(exact.get('inputTokens'))}\n"
+            f"{_frontend_label('label:usage_input_cache_hit', 'Cache hit', channel=channel, user=user)}: "
+            f"{_format_count(exact.get('cachedInputTokens'))}"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name=_frontend_label(
+            "label:usage_output_tokens", "Output tokens", channel=channel, user=user
+        ),
+        value=_format_count(exact.get("outputTokens")),
+        inline=True,
+    )
+    embed.add_field(
+        name=_frontend_label(
+            "label:usage_total_processed_tokens",
+            "Total processed tokens",
+            channel=channel,
+            user=user,
+        ),
+        value=_format_count(exact.get("totalProcessedTokens")),
+        inline=True,
+    )
+    embed.add_field(
+        name=_frontend_label(
+            "label:usage_estimated_api_cost",
+            "Estimated API cost",
+            channel=channel,
+            user=user,
+        ),
+        value=_usage_cost_value(result),
+        inline=True,
+    )
+    embed.add_field(name="Activity", value="\u200b", inline=False)
+    historical_fields = (
         (
             "label:usage_lifetime_tokens",
             "Total cumulative tokens",
-            _format_count(
-                summary.get("totalCumulativeTokens", summary.get("lifetimeTokens"))
-            ),
+            _format_count(cumulative_tokens),
         ),
         (
             "label:usage_peak_daily_tokens",
@@ -182,10 +223,12 @@ def _usage_embed(
         (
             "label:usage_longest_running_turn",
             "Longest running turn",
-            f"{_format_whole_seconds(summary.get('longestRunningTurnSec'))} seconds",
+            _format_whole_seconds(summary.get("longestRunningTurnSec")),
         ),
     )
-    for target, name, value in fields:
+    for target, name, value in historical_fields:
+        if target == "label:usage_longest_running_turn" and value != "Unavailable":
+            value = f"{value} seconds"
         embed.add_field(
             name=_frontend_label(target, name, channel=channel, user=user),
             value=value,
@@ -193,16 +236,6 @@ def _usage_embed(
         )
     rate_limits = result.get("rateLimits")
     if isinstance(rate_limits, dict):
-        provider_credits = rate_limits.get("credits")
-        if (
-            isinstance(provider_credits, dict)
-            and provider_credits.get("balance") is not None
-        ):
-            embed.add_field(
-                name="Provider credits",
-                value=_format_count(provider_credits.get("balance")),
-                inline=True,
-            )
         for key, label in (
             ("primary", "Provider reset"),
             ("secondary", "Provider weekly reset"),
@@ -213,6 +246,9 @@ def _usage_embed(
             used = _format_percent(limit.get("usedPercent"))
             reset = _format_reset(limit.get("resetsAt"))
             embed.add_field(name=label, value=f"{used}; resets {reset}", inline=True)
+    embed.set_footer(
+        text="Estimated using configured API pricing. This is not the user's actual subscription charge."
+    )
     return embed
 
 
@@ -257,8 +293,7 @@ def _usage_details_embed(
     embed = _frontend_embed(
         "command:usage",
         "Detailed usage",
-        f"Usage statistics for {result.get('date') or 'the selected date'}. "
-        "Prompt categories marked with ~ are estimates.",
+        f"Usage statistics for {result.get('date') or 'the selected date'}",
         channel=channel,
         user=user,
     )
@@ -285,21 +320,24 @@ def _usage_details_embed(
         value=_usage_detail_value(detailed.get("reasoningTokens")),
         inline=True,
     )
-    retries = detailed.get("retries", 0)
-    failures = detailed.get("failedTurns", 0)
-    retry_text = (
-        f"{_format_count(retries)} retries / {_format_count(failures)} failed turns"
-    )
-    embed.add_field(
-        name=_frontend_label(
-            "label:usage_detail_retries_failed",
-            "Retries / failed turns",
-            channel=channel,
-            user=user,
+    for target, default_label, key in (
+        ("usage_detail_retries", "Retries", "retries"),
+        ("usage_detail_failed_turns", "Failed turns", "failedTurns"),
+        ("usage_detail_api_calls", "API calls", "apiCalls"),
+        ("usage_detail_subagent_turns", "Subagent turns", "subagentTurns"),
+        (
+            "usage_detail_long_running_turns",
+            "Long-running turns",
+            "longRunningTurns",
         ),
-        value=retry_text,
-        inline=True,
-    )
+    ):
+        embed.add_field(
+            name=_frontend_label(
+                f"label:{target}", default_label, channel=channel, user=user
+            ),
+            value=_format_count(detailed.get(key)),
+            inline=True,
+        )
     overhead = detailed.get("unattributedOverhead")
     if isinstance(overhead, dict):
         overhead_value = _usage_detail_value(

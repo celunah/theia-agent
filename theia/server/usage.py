@@ -32,7 +32,7 @@ PROMPT_CATEGORIES = (
 
 @dataclass(frozen=True)
 class ModelPricing:
-    """Central deployment estimate in credits per million tokens."""
+    """Central API estimate in USD per million tokens."""
 
     input_miss: float
     input_hit: float
@@ -40,8 +40,8 @@ class ModelPricing:
     reasoning: float
 
 
-# Codex does not expose subscription billing. These are one centralized,
-# replaceable API-equivalent estimate rates, deliberately labelled as credits.
+# Codex does not expose subscription billing. These are centralized,
+# replaceable API pricing rates used only for a clearly labelled estimate.
 MODEL_PRICING: dict[str, ModelPricing] = {
     "gpt-5.6-luna": ModelPricing(1.25, 0.125, 10.0, 10.0),
     "gpt-5.6-terra": ModelPricing(2.0, 0.2, 15.0, 15.0),
@@ -93,16 +93,22 @@ def _pricing_for(model: Any) -> ModelPricing | None:
     return MODEL_PRICING.get(str(model or "").strip().casefold())
 
 
-def estimate_api_value(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
-    """Estimate API-equivalent credits from provider-reported per-turn usage."""
+def estimate_api_cost(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    """Estimate API cost in USD from provider-reported per-turn usage."""
     by_model: dict[str, float] = {}
+    unavailable_models: set[str] = set()
+    observed_usage = False
     for record in records:
         if not isinstance(record, dict):
             continue
+        tokens = normalize_tokens(record.get("tokens"))
+        if not tokens:
+            continue
+        observed_usage = True
         pricing = _pricing_for(record.get("model"))
         if pricing is None:
+            unavailable_models.add(model_label(record.get("model")))
             continue
-        tokens = normalize_tokens(record.get("tokens"))
         effort = str(record.get("effort") or "medium").casefold()
         effort_multiplier = EFFORT_MULTIPLIERS.get(effort, 1.0)
         value = (
@@ -118,10 +124,23 @@ def estimate_api_value(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
         label = model_label(record.get("model"))
         by_model[label] = by_model.get(label, 0.0) + value
     total = sum(by_model.values())
+    pricing_available = not unavailable_models
     return {
         "estimated": True,
-        "currency": "credits",
-        "available": bool(by_model),
-        "total": round(total, 6) if by_model else None,
-        "byModel": {key: round(value, 6) for key, value in by_model.items()},
+        "currency": "USD",
+        "available": pricing_available,
+        "total": (
+            round(total, 8)
+            if observed_usage and pricing_available
+            else 0.0
+            if not observed_usage
+            else None
+        ),
+        "byModel": {key: round(value, 8) for key, value in by_model.items()},
+        "unavailableModels": sorted(unavailable_models),
     }
+
+
+def estimate_api_value(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    """Backward-compatible name for the USD API cost estimate."""
+    return estimate_api_cost(records)

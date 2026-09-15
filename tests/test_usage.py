@@ -2,7 +2,7 @@
 from tests.test_support import *
 
 from theia.server.policy import _TOKEN_USAGE_KEYS
-from theia.server.usage import estimate_api_value
+from theia.server.usage import estimate_api_cost, estimate_api_value
 
 
 class UsageAccountingTests(unittest.TestCase):
@@ -15,6 +15,9 @@ class UsageAccountingTests(unittest.TestCase):
         server._usage_turns.clear()
         server._usage_failed_daily.clear()
         server._usage_retries_daily.clear()
+        server._usage_api_calls_daily.clear()
+        server._usage_subagent_turns_daily.clear()
+        server._usage_long_running_turns_daily.clear()
         return server
 
     def test_cache_miss_hit_output_and_model_effort_are_preserved(self) -> None:
@@ -63,6 +66,7 @@ class UsageAccountingTests(unittest.TestCase):
         self.assertEqual(usage["exact"]["cachedInputTokens"], 5)
         self.assertEqual(usage["exact"]["outputTokens"], 8)
         self.assertEqual(usage["exact"]["totalTokens"], 35)
+        self.assertEqual(usage["exact"]["totalProcessedTokens"], 33)
         self.assertEqual(
             usage["detailed"]["categories"]["system_instructions"],
             {"value": 12, "estimated": True},
@@ -83,6 +87,31 @@ class UsageAccountingTests(unittest.TestCase):
             ]
         )
         self.assertEqual(usage["estimate"], expected)
+        self.assertEqual(usage["estimate"]["currency"], "USD")
+
+    def test_cost_is_unavailable_when_a_model_has_no_configured_pricing(self) -> None:
+        estimate = estimate_api_cost(
+            [{"model": "future-model", "tokens": {"outputTokens": 100}}]
+        )
+        self.assertFalse(estimate["available"])
+        self.assertIsNone(estimate["total"])
+        self.assertEqual(estimate["unavailableModels"], ["Future Model"])
+
+    def test_activity_metrics_are_separate_from_token_counts(self) -> None:
+        server = self._server()
+        session = server._session("activity-user")
+        session.thread_id = "activity-thread"
+        server._record_usage_api_call(session)
+        server._record_usage_retry()
+        server._record_failed_usage_turn(SimpleNamespace(session=session), {})
+        server._record_usage_turn_duration(61.0, session, "missing-turn")
+        usage = server.theia_usage()
+        detailed = usage["detailed"]
+        self.assertEqual(detailed["apiCalls"], 1)
+        self.assertEqual(detailed["retries"], 1)
+        self.assertEqual(detailed["failedTurns"], 1)
+        self.assertEqual(detailed["longRunningTurns"], 1)
+        self.assertNotIn("retries", usage["exact"])
 
     def test_multiple_models_and_daily_cumulative_statistics(self) -> None:
         server = self._server()
@@ -236,11 +265,76 @@ class UsageViewTests(unittest.TestCase):
                 "Routing context",
                 "Subagent usage",
                 "Reasoning tokens",
-                "Retries / failed turns",
+                "Retries",
+                "Failed turns",
+                "API calls",
+                "Subagent turns",
+                "Long-running turns",
                 "Unattributed overhead",
             },
         )
         self.assertIn("~3", str(embed.fields[0].value))
+
+    def test_usage_embed_uses_fields_and_processed_token_semantics(self) -> None:
+        embed = main._usage_embed(
+            {
+                "date": "2026-09-14",
+                "summary": {
+                    "totalCumulativeTokens": 500,
+                    "peakDailyTokens": 100,
+                    "currentStreakDays": 1,
+                    "longestStreakDays": 2,
+                    "longestRunningTurnSec": 12.75,
+                },
+                "exact": {
+                    "inputTokens": 20,
+                    "cachedInputTokens": 5,
+                    "outputTokens": 8,
+                    "totalProcessedTokens": 33,
+                },
+                "estimate": {"available": True, "total": 0.0034, "byModel": {}},
+            }
+        )
+        self.assertEqual(embed.description, "Usage statistics for 2026-09-14")
+        fields = {field.name: field.value for field in embed.fields}
+        self.assertEqual(fields["Input tokens"], "Cache miss: 20\nCache hit: 5")
+        self.assertEqual(fields["Output tokens"], "8")
+        self.assertEqual(fields["Total processed tokens"], "33")
+        self.assertEqual(fields["Estimated API cost"], "$0.0034 USD")
+        self.assertEqual(fields["Longest running turn"], "13 seconds")
+        self.assertNotIn("credits", str(embed.to_dict()).casefold())
+
+    def test_usage_embed_falls_back_to_provider_cumulative_total(self) -> None:
+        embed = main._usage_embed(
+            {
+                "summary": {
+                    "totalCumulativeTokens": 42,
+                    "totalCumulativeProcessedTokens": None,
+                    "longestRunningTurnSec": 1,
+                }
+            }
+        )
+        fields = {field.name: field.value for field in embed.fields}
+        self.assertEqual(fields["Total cumulative tokens"], "42")
+
+    def test_state_restores_usage_activity_counters(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(
+                os.environ,
+                {
+                    "THEIA_HOME": str(Path(directory) / "theia"),
+                    "THEIA_STATE": str(Path(directory) / "state.json"),
+                },
+            ),
+        ):
+            server = main.CodexAppServer()
+            session = server._session("restore-activity")
+            server._record_usage_api_call(session)
+            restored = main.CodexAppServer()
+            day = time.strftime("%Y-%m-%d", time.gmtime())
+            self.assertEqual(restored._usage_api_calls, 1)
+            self.assertEqual(restored._usage_api_calls_daily[day], 1)
 
     def test_usage_view_edits_one_ephemeral_message_and_locks_owner(self) -> None:
         result = {
