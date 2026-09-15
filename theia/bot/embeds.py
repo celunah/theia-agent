@@ -254,18 +254,6 @@ def _usage_embed(
             value=value,
             inline=True,
         )
-    rate_limits = result.get("rateLimits")
-    if isinstance(rate_limits, dict):
-        for key, label in (
-            ("primary", "Provider reset"),
-            ("secondary", "Provider weekly reset"),
-        ):
-            limit = rate_limits.get(key)
-            if not isinstance(limit, dict):
-                continue
-            used = _format_percent(limit.get("usedPercent"))
-            reset = _format_reset(limit.get("resetsAt"))
-            embed.add_field(name=label, value=f"{used}; resets {reset}", inline=True)
     embed.set_footer(
         text="Estimated using configured API pricing. This is not the user's actual subscription charge."
     )

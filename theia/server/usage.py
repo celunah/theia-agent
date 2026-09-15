@@ -173,8 +173,10 @@ def _canonical_model_id(model: Any) -> str | None:
     return MODEL_IDS_BY_DISPLAY_NAME.get(value)
 
 
-def estimate_api_cost(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
-    """Estimate API cost in USD from provider-reported per-turn usage."""
+def estimate_api_cost(
+    records: Iterable[dict[str, Any]], *, fallback_model: Any = None
+) -> dict[str, Any]:
+    """Estimate API cost from usage records, using a current-model fallback."""
     by_model: dict[str, float] = {}
     unavailable_models: set[str] = set()
     incomplete_records: set[str] = set()
@@ -192,9 +194,10 @@ def estimate_api_cost(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
         ):
             incomplete_records.add(model_label(record.get("model")))
             continue
-        pricing = _pricing_for(record.get("model"))
+        model = record.get("model") or fallback_model
+        pricing = _pricing_for(model)
         if pricing is None:
-            unavailable_models.add(model_label(record.get("model")))
+            unavailable_models.add(model_label(model))
             continue
         effort = str(record.get("effort") or "medium").casefold()
         effort_multiplier = EFFORT_MULTIPLIERS.get(effort, 1.0)
@@ -213,7 +216,7 @@ def estimate_api_cost(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
             or effort == "fast"
         ):
             value *= pricing.fast_mode_multiplier
-        label = model_label(record.get("model"))
+        label = model_label(model)
         by_model[label] = by_model.get(label, 0.0) + value
     total = sum(by_model.values())
     pricing_available = not unavailable_models and not incomplete_records

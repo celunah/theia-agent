@@ -112,6 +112,15 @@ class UsageAccountingTests(unittest.TestCase):
         self.assertIsNone(estimate["total"])
         self.assertEqual(estimate["incompleteRecords"], ["GPT-5.6 Luna"])
 
+    def test_cost_uses_current_model_for_legacy_records_without_model(self) -> None:
+        estimate = estimate_api_cost(
+            [{"tokens": {"inputTokens": 100, "outputTokens": 20}}],
+            fallback_model="gpt-5.6-luna",
+        )
+
+        self.assertTrue(estimate["available"])
+        self.assertEqual(estimate["byModel"], {"GPT-5.6 Luna": 0.000044})
+
     def test_pricing_registry_has_canonical_model_specific_rates(self) -> None:
         self.assertEqual(
             set(PRICING_REGISTRY),
@@ -439,6 +448,8 @@ class UsageViewTests(unittest.TestCase):
         self.assertEqual(fields["Total processed tokens"], "33")
         self.assertEqual(fields["Estimated API cost"], "$0.0034 USD")
         self.assertEqual(fields["Longest running turn"], "13 seconds")
+        self.assertNotIn("Provider reset", fields)
+        self.assertNotIn("Provider weekly reset", fields)
         self.assertNotIn("credits", str(embed.to_dict()).casefold())
 
     def test_usage_embed_falls_back_to_provider_cumulative_total(self) -> None:

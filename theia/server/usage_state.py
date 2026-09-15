@@ -15,7 +15,7 @@ from .usage import (
     USAGE_TURN_LIMIT,
     normalize_tokens,
 )
-from ..core import _Session, _TurnState
+from ..core import DEFAULT_CODEX_MODEL, _Session, _TurnState
 
 LONG_RUNNING_TURN_SECONDS = 60.0
 
@@ -426,7 +426,10 @@ class CodexUsageStateMixin:  # pylint: disable=no-member
             if main_processed is not None and subagent_processed is not None
             else None
         )
-        estimate = estimate_api_cost([*turn_records, *internal_records])
+        estimate = estimate_api_cost(
+            [*turn_records, *internal_records],
+            fallback_model=getattr(self, "_model", None) or DEFAULT_CODEX_MODEL,
+        )
         cumulative_processed_values = [
             self._processed_snapshot(thread_id, snapshot)
             for thread_id, snapshot in self._usage_threads.items()
@@ -466,7 +469,6 @@ class CodexUsageStateMixin:  # pylint: disable=no-member
             "date": selected_day,
             "exact": exact,
             "estimate": estimate,
-            "rateLimits": getattr(self, "_rate_limits", None),
             "detailed": {
                 "categories": categories,
                 "mainAgentTokens": main_processed,
