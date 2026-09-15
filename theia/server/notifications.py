@@ -9,8 +9,8 @@ from ..colors import discord_color
 from ..core import (
     _TurnState,
     _codex_logger,
-    _error_message,
     _is_tool_item,
+    _safe_error_reason,
     _safe_log_label,
     _verified_change_status,
 )
@@ -249,6 +249,13 @@ class CodexNotificationMixin:
             turn_id = turn.get("id") or params.get("turnId")
             if turn_id:
                 state = self._turns.setdefault(str(turn_id), _TurnState())
+                if (
+                    str(turn.get("status") or "").casefold() == "failed"
+                    and not turn.get("error")
+                    and state.notification_error_reason
+                ):
+                    turn = dict(turn)
+                    turn["error"] = {"message": state.notification_error_reason}
                 state.completed = turn
                 state.thread_id = state.thread_id or params.get("threadId")
                 if isinstance(turn.get("model"), str):
@@ -311,18 +318,18 @@ class CodexNotificationMixin:
                 logger.debug("Ignored unassociated or late Codex error notification")
                 return
             error = params.get("error")
-            if not error:
-                error = {
-                    "message": _error_message(params)
-                    or "Codex error notification without details"
-                }
-            state.completed = {
-                "status": "failed",
-                "error": error,
-            }
-            if not state.done.done():
-                state.done.set_result(None)
-            if state.session is not None and state.session.key.startswith("__"):
-                logger.info("Codex internal worker error notification received")
-            else:
-                logger.warning("Codex turn error notification received")
+            reason = _safe_error_reason(
+                error if error else params,
+                240,
+                fallback="",
+            )
+            if reason:
+                state.notification_error_reason = reason
+            # The app-server's authoritative terminal state is delivered by
+            # turn/completed. Keep this notification as context for a later
+            # failed completion, but never end a live turn from it alone.
+            logger.debug(
+                "Codex error notification observed before terminal turn state "
+                "(has_reason=%s)",
+                bool(reason),
+            )

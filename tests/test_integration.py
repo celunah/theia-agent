@@ -588,6 +588,16 @@ class TestLocalCodexBoundary(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+        ancillary_error = await self._server(scenario="error-then-success")
+        self.assertEqual(
+            await self._ask(
+                ancillary_error,
+                "finish this request",
+                session_key="notice",
+            ),
+            "streamed response",
+        )
+
     async def test_timeout_is_interrupted_and_reported_to_the_caller(self) -> None:
         """Verify a turn that never completes follows the timeout recovery path."""
         server = await self._server(

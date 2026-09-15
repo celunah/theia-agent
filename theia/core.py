@@ -359,6 +359,16 @@ _ERROR_NESTED_KEYS = frozenset(
 _GENERIC_ERROR_MESSAGES = frozenset(
     {"error", "failed", "failure", "request failed", "unknown error"}
 )
+_UNSPECIFIC_ERROR_KEYS = frozenset(
+    {
+        "error",
+        "failed",
+        "failure",
+        "requestfailed",
+        "unknownerror",
+        "therequestfailedforanunspecifiedreason",
+    }
+)
 _PROTOCOL_DATA_KEYS = frozenset(
     {
         "category",
@@ -740,8 +750,13 @@ def _safe_approval_reason(value: Any, limit: int = 700) -> str:
     return _truncate(text, limit) if text else ""
 
 
-def _safe_error_reason(value: Any, limit: int = 1200) -> str:
-    """Return a useful failure reason without exposing protocol or path details."""
+def _safe_error_reason(
+    value: Any,
+    limit: int = 1200,
+    *,
+    fallback: str = "Codex returned an error without details.",
+) -> str:
+    """Sanitize failure text."""
     text = _error_message(value)
     text = re.sub(
         r"^(?:Codex|Theia)\s+[^:]+\s+failed:\s*", "", text, flags=re.IGNORECASE
@@ -781,7 +796,9 @@ def _safe_error_reason(value: Any, limit: int = 1200) -> str:
     )
     for token, command in command_refs.items():
         text = text.replace(token, f"`{command}`")
-    return text or "The request failed for an unspecified reason."
+    if _error_key(text) in _UNSPECIFIC_ERROR_KEYS:
+        text = ""
+    return text or fallback
 
 
 @dataclass
@@ -1040,6 +1057,7 @@ class _TurnState:
         self.discord_thread_opening_sent = False
         self.final_text: str | None = None
         self.completed: dict[str, Any] | None = None
+        self.notification_error_reason: str | None = None
         self.terminal_reason: str | None = None
         self.user_cancel_requested = False
         self.usage_outcome_recorded = False

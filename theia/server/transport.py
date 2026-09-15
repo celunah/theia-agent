@@ -108,7 +108,9 @@ class CodexTransportMixin:
 
         if "error" in response:
             error = response["error"]
-            message = _error_message(error) or "unknown error"
+            message = (
+                _error_message(error) or "Codex returned an error without details."
+            )
             protocol_code = error.get("code") if isinstance(error, dict) else None
             protocol_data = error.get("data") if isinstance(error, dict) else None
             if method == "thread/delete":

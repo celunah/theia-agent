@@ -305,34 +305,6 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         warning.assert_not_called()
         self.assertEqual(server.runtime_events()[-1]["event"], "worker_failed")
 
-    async def test_internal_worker_error_notification_is_not_a_turn_warning(
-        self,
-    ) -> None:
-        server = main.CodexAppServer()
-        session = server._session("__presence__:session")
-        state = main._TurnState(thread_id="thread", session=session)
-        server._turns["turn-1"] = state
-
-        with (
-            patch("theia.server.notifications.logger.warning") as warning,
-            patch("theia.server.notifications.logger.info") as info,
-        ):
-            server._handle_notification(
-                {
-                    "method": "error",
-                    "params": {
-                        "threadId": "thread",
-                        "turnId": "turn-1",
-                        "error": {"message": "worker unavailable"},
-                    },
-                }
-            )
-
-        warning.assert_not_called()
-        info.assert_called_once_with(
-            "Codex internal worker error notification received"
-        )
-
     async def test_expired_thread_delete_failure_during_request_degrades_cleanup_only(
         self,
     ) -> None:
@@ -352,68 +324,6 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         cleanup = server.cleanup_snapshot()
         self.assertEqual(cleanup["status"], "degraded")
         self.assertEqual(cleanup["reason"], "expired session cleanup failed")
-
-    async def test_thread_only_codex_error_cannot_fail_active_turn(self) -> None:
-        server = main.CodexAppServer()
-        session = server._session("active-session")
-        state = main._TurnState(thread_id="thread", session=session)
-        server._turns["turn-1"] = state
-
-        server._handle_notification(
-            {
-                "method": "error",
-                "params": {
-                    "threadId": "thread",
-                    "error": {"message": "a stale server-level error"},
-                },
-            }
-        )
-
-        self.assertIsNone(state.completed)
-        self.assertFalse(state.done.done())
-
-    async def test_exact_live_codex_error_still_fails_active_turn(self) -> None:
-        server = main.CodexAppServer()
-        session = server._session("active-session")
-        state = main._TurnState(thread_id="thread", session=session)
-        server._turns["turn-1"] = state
-
-        server._handle_notification(
-            {
-                "method": "error",
-                "params": {
-                    "threadId": "thread",
-                    "turnId": "turn-1",
-                    "error": {"message": "real turn failure"},
-                },
-            }
-        )
-
-        self.assertEqual(
-            state.completed,
-            {"status": "failed", "error": {"message": "real turn failure"}},
-        )
-        self.assertTrue(state.done.done())
-
-    async def test_codex_error_from_another_thread_cannot_fail_live_turn(self) -> None:
-        server = main.CodexAppServer()
-        session = server._session("active-session")
-        state = main._TurnState(thread_id="thread", session=session)
-        server._turns["turn-1"] = state
-
-        server._handle_notification(
-            {
-                "method": "error",
-                "params": {
-                    "threadId": "another-thread",
-                    "turnId": "turn-1",
-                    "error": {"message": "unrelated failure"},
-                },
-            }
-        )
-
-        self.assertIsNone(state.completed)
-        self.assertFalse(state.done.done())
 
     async def test_non_adaptive_request_skips_assessment(self) -> None:
         with patch.dict(os.environ, {"CODEX_ADAPTIVE_REASONING": "false"}):

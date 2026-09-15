@@ -444,7 +444,22 @@ function startTurn(request: RpcRequest): void {
         turnId: turn.turnId,
         error: { message: "fake app-server failure" },
       });
-      activeTurns.delete(turn.turnId);
+      setTimeout(() => {
+        completeTurn(turn, "failed", "", {
+          message: "fake app-server failure",
+        });
+      }, 10);
+    }, 25);
+    return;
+  }
+  if (scenarioIs("error-then-success")) {
+    setTimeout(() => {
+      notify("error", {
+        threadId,
+        turnId: turn.turnId,
+        error: { message: "temporary app-server notice" },
+      });
+      setTimeout(() => finishNormalTurn(turn), 10);
     }, 25);
     return;
   }

@@ -549,10 +549,7 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
     def _cleanup_error_metadata(
         self, error: CodexAppServerError, *, method: str = "thread/delete"
     ) -> dict[str, Any]:
-        """Return safe protocol metadata for the Lighthouse cleanup panel."""
-        # This helper is called from the expired-thread cleanup boundary, so
-        # the complete operation is known even if an older exception instance
-        # only carried the namespace prefix ``thread``.
+        """Return safe cleanup metadata."""
         protocol_method = method or getattr(error, "protocol_method", None)
         protocol_message = getattr(error, "protocol_message", None)
         message = protocol_message or _safe_error_reason(error, 240)
@@ -624,13 +621,13 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
             if completed.get("status") != "completed":
                 error = completed.get("error") or {}
                 terminal_status = str(completed.get("status") or "").strip()
-                message = _error_message(error)
-                if not message:
-                    message = (
-                        terminal_status
-                        if terminal_status.casefold() not in {"", "failed"}
-                        else "Codex error notification without details"
-                    )
+                message = (
+                    _error_message(error)
+                    or getattr(state, "notification_error_reason", None)
+                    or terminal_status
+                )
+                if not message or message.casefold() == "failed":
+                    message = "Codex reported a failed turn without a reason."
                 state.terminal_reason = message
                 if state.user_cancel_requested and _is_cancellation_terminal(
                     terminal_status, message
