@@ -29,6 +29,20 @@ from .policy import MAX_CODEX_MEMORY_RESTART_BACKOFF
 
 logger = _codex_logger()
 
+_CODEX_DATABASE_SUFFIXES = (
+    ".sqlite",
+    ".sqlite-shm",
+    ".sqlite-wal",
+    ".sqlite-journal",
+)
+_SQLITE_STARTUP_ERROR_MARKERS = (
+    "failed to initialize sqlite state runtime",
+    "failed to initialize state runtime",
+    "database is locked",
+    "database is busy",
+    "sqlite error",
+)
+
 
 class CodexLifecycleMixin:
     if TYPE_CHECKING:
@@ -57,6 +71,8 @@ class CodexLifecycleMixin:
         _heartbeat_last_success_at: float | None
         _heartbeat_last_attempt_at: float | None
         _heartbeat_latency_ms: float | None
+        _stderr_tail: list[str]
+        _codex_home: Path
 
     def __getattr__(self, name: str) -> Any:
         raise AttributeError(name)
@@ -66,7 +82,7 @@ class CodexLifecycleMixin:
         async with self._lifecycle_lock:
             await self._start_locked()
 
-    async def _start_locked(self) -> None:
+    async def _start_locked(self, *, allow_database_repair: bool = True) -> None:
         """Launch and initialize the project-local Codex App Server process."""
         if self._process is not None and self._process.returncode is None:
             if self._reader_task is not None and not self._reader_task.done():
@@ -102,6 +118,7 @@ class CodexLifecycleMixin:
             )
 
         self._codex_version = self.codex_cli_version()
+        self._stderr_tail = []
 
         try:
             self._process = await asyncio.create_subprocess_exec(
@@ -169,9 +186,67 @@ class CodexLifecycleMixin:
             )
             self._record_runtime_event("codex_start_failed")
             await self._close_locked()
+            if allow_database_repair and self._has_sqlite_startup_failure():
+                backup = self._backup_codex_databases()
+                if backup is not None:
+                    logger.warning(
+                        "Codex App Server SQLite startup failed; backed up "
+                        "%d database files and retrying",
+                        len(tuple(backup.iterdir())),
+                    )
+                    await self._start_locked(allow_database_repair=False)
+                    return
             if await self._retry_after_codex_update(update_result):
                 return
             raise
+
+    def _has_sqlite_startup_failure(self) -> bool:
+        """Return whether the child reported a repairable SQLite startup error."""
+        return any(
+            marker in line.casefold()
+            for line in self._stderr_tail
+            for marker in _SQLITE_STARTUP_ERROR_MARKERS
+        )
+
+    def _backup_codex_databases(self) -> Path | None:
+        """Move Codex SQLite artifacts into a private, reversible backup."""
+        try:
+            database_files = tuple(
+                sorted(
+                    path
+                    for path in self._codex_home.iterdir()
+                    if path.is_file() and path.name.endswith(_CODEX_DATABASE_SUFFIXES)
+                )
+            )
+        except OSError as exc:
+            logger.error(
+                "Could not inspect Codex database files for repair (error=%s)",
+                type(exc).__name__,
+            )
+            return None
+        if not database_files:
+            return None
+
+        backup = self._codex_home / f"codex-database-repair-{time.time_ns()}"
+        moved: list[tuple[Path, Path]] = []
+        try:
+            backup.mkdir(mode=0o700)
+            for source in database_files:
+                target = backup / source.name
+                source.replace(target)
+                moved.append((source, target))
+        except OSError as exc:
+            for source, target in reversed(moved):
+                with contextlib.suppress(OSError):
+                    target.replace(source)
+            with contextlib.suppress(OSError):
+                backup.rmdir()
+            logger.error(
+                "Could not back up Codex database files for repair (error=%s)",
+                type(exc).__name__,
+            )
+            return None
+        return backup
 
     async def _maybe_update_codex(self) -> CodexUpdateResult:
         """Stage a configured Codex update before launching the child process."""
