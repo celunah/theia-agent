@@ -56,14 +56,18 @@ main-agent tokens, subagent tokens, combined processed total, and estimated API
 cost; `Show Details` reveals bounded prompt-category estimates, separate
 activity counts, and model-specific pricing for routed usage in the same
 ephemeral response. Provider-reported token totals remain separate from local
-category estimates, and the cost estimate is not subscription billing.
+category estimates, and the cost estimate is not subscription billing. Provider
+usage limits are shown separately by `/credits`.
 
 The Lighthouse View is a read-only Rich terminal dashboard of live harness
-state. It shows Codex health, active work, character, presence, voice,
+state. It shows Codex health, active work, the resolved character and logical
+profile path, presence, voice,
 attention, mood, the latest assessed reasoning effort, workspace, approvals,
 memory counts, watchdog recovery, and
-bounded recent events. Its Workspace section is limited to current
-harness-backed session entries; separately supplied session objectives are
+bounded recent events. Global characters show their logical profile path,
+while effective user and server overrides label the same path explicitly. Its
+Workspace section is limited to current harness-backed session entries;
+separately supplied session objectives are
 labelled outside that section. It uses normal Python logging when no
 interactive TTY is available. In an interactive TTY it owns the terminal in a
 full-screen view, routes structured events into the dashboard, and preserves
@@ -74,9 +78,18 @@ turns, shows the current routing scope, and reports concurrent sessions without
 exposing Discord identifiers. Recent events use full timestamps, severity, and
 stable titles; technical event and log details remain available in a separate
 bounded diagnostic view. Its Workspace section shows the total entry count and
-the most recent entry only. Press F1 in the interactive view to toggle the
-diagnostic details. Session selection is runtime-only and is cleared
-by session reset or termination.
+the most recent entry only. Press F1 in the interactive view to open the
+diagnostic details; use ESC to return to the main view. Session selection is
+runtime-only and is cleared by session reset or termination. Codex App Server
+failures retain their typed classification, HTTP status, and additional details
+when available.
+Repeated skill-catalog change notifications are coalesced during the refresh
+window so routine catalog churn does not flood the diagnostics view.
+Transient Discord gateway handshake failures are labelled as gateway
+reconnect warnings rather than generic active errors. The diagnostics view
+keeps its title and return footer anchored, and retained log rows can be
+reviewed with Up/Down, Page Up/Page Down, and Home/End. Its footer advertises
+only the primary Up/Down navigation beside `ESC go back`.
 
 `/improvements` is an administrator-only ephemeral audit view of recent
 self-improvement changes. Administrators can list and preview bounded change
@@ -154,8 +167,9 @@ procedures, and explicit detail requests remain complete and can expand as neede
 Command responses, approvals, and choices use embeds. Statuses use compact `-#` text:
 
 - Public thinking status uses the most specific safe runtime step available,
-  including `Compacting context` and `Generating image`, and falls back to
-  `Thinking` when no specific summary is available.
+  including `Compacting context` and `Generating image`. A generic `Thinking`
+  status is deferred for five seconds and is skipped when the turn finishes
+  sooner, so short turns do not create a transient progress message.
 - `Thought for N seconds` or `Thought for M minutes and S seconds` remains after completion.
 - Natural-language Codex preambles and intermediate messages are shown when Codex emits them.
 - Updates are coalesced rather than token-streamed.
@@ -236,6 +250,12 @@ agent state.
   an exponential backoff to prevent a restart loop. Configure the initial delay
   with `THEIA_CODEX_MEMORY_RESTART_BACKOFF`; configure the memory limit with
   `THEIA_CODEX_MAX_RSS_MB` or set that value to `0` to disable the watchdog.
+- If Codex exits during startup because its private SQLite runtime cannot be
+  initialized, Theia moves the Codex SQLite artifacts into a timestamped,
+  reversible `codex-database-repair-*` backup inside the private home and
+  retries startup once. Authentication, configuration, Discord state, and
+  non-SQLite files remain in place; the repair can reset Codex's internal
+  threads and logs if the retry succeeds.
 - Administrator threads can access Theia's private `.theia` runtime directory
   when needed. Any command, file change, permission change, or Discord file
   delivery involving that directory requires explicit approval; regular users
