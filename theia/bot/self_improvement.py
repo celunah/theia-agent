@@ -6,6 +6,7 @@ from typing import Any
 
 import discord
 
+from ..colors import discord_color
 from ..core import _is_super_admin_user, _safe_error_reason
 from ..server.core import CodexAppServerError
 from .embeds import (
@@ -37,7 +38,7 @@ async def handle_self_improvement_command(
                 "Choose list, preview, or revert.",
                 channel=interaction.channel,
                 user=interaction.user,
-                color=discord.Color.orange(),
+                color=discord_color("WARNING"),
             ),
             ephemeral=True,
         )
@@ -50,7 +51,7 @@ async def handle_self_improvement_command(
                 f"Provide a change ID to {selected} a self-improvement change.",
                 channel=interaction.channel,
                 user=interaction.user,
-                color=discord.Color.orange(),
+                color=discord_color("WARNING"),
             ),
             ephemeral=True,
         )
@@ -63,7 +64,7 @@ async def handle_self_improvement_command(
                 "Only a Theia Super Admin can revert self-improvement changes.",
                 channel=interaction.channel,
                 user=interaction.user,
-                color=discord.Color.orange(),
+                color=discord_color("WARNING"),
             ),
             ephemeral=True,
         )
@@ -98,6 +99,6 @@ async def handle_self_improvement_command(
             _safe_error_reason(exc),
             channel=interaction.channel,
             user=interaction.user,
-            color=discord.Color.orange(),
+            color=discord_color("WARNING"),
         )
     await interaction.response.send_message(embed=embed, ephemeral=True)

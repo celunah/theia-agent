@@ -7,6 +7,7 @@ from typing import Any, cast
 
 import discord
 
+from .colors import discord_color
 from .core import (
     _command_embed,
     _render_frontend_label,
@@ -427,7 +428,7 @@ class _UserInputView(_PersistentViewMixin, discord.ui.View):
             message["embed"] = _command_embed(
                 "Choose an option",
                 self._question_prompt(),
-                color=discord.Color.blurple(),
+                color=discord_color("INFO"),
                 target="label:choose_option",
                 guild_id=self.guild_id,
                 customizer=self.customizer,

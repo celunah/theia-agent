@@ -15,6 +15,7 @@ from typing import Any, ClassVar
 import discord
 from dotenv import load_dotenv
 
+from .colors import ansi_color, discord_color
 from .customization import CustomizationError
 
 
@@ -227,11 +228,11 @@ class _CodexColorFormatter(logging.Formatter):
     """Use the same layout and ANSI palette as discord.py's logger."""
 
     _LEVEL_COLORS = (
-        (logging.DEBUG, "\x1b[40;1m"),
-        (logging.INFO, "\x1b[34;1m"),
-        (logging.WARNING, "\x1b[33;1m"),
-        (logging.ERROR, "\x1b[31m"),
-        (logging.CRITICAL, "\x1b[41m"),
+        (logging.DEBUG, ansi_color("INFO")),
+        (logging.INFO, ansi_color("INFO")),
+        (logging.WARNING, ansi_color("WARNING")),
+        (logging.ERROR, ansi_color("ERROR")),
+        (logging.CRITICAL, ansi_color("FATAL", emphasis=True)),
     )
     _FORMATS: ClassVar[dict[int, logging.Formatter]] = {
         level: logging.Formatter(
@@ -258,7 +259,7 @@ class _CodexColorFormatter(logging.Formatter):
         formatter = self._FORMATS.get(record.levelno, self._FORMATS[logging.DEBUG])
         if record.exc_info:
             text = formatter.formatException(record.exc_info)
-            record.exc_text = f"\x1b[31m{text}\x1b[0m"
+            record.exc_text = f"{ansi_color('ERROR')}{text}\x1b[0m"
         output = formatter.format(record)
         record.exc_text = None
         return output
@@ -1059,7 +1060,7 @@ def _command_embed(
     customizer: Any | None = None,
     context: dict[str, Any] | None = None,
 ) -> discord.Embed:
-    base_color = color or discord.Color.blurple()
+    base_color = color or discord_color("INFO")
     if customizer is not None and target is not None:
         try:
             title = customizer.render(guild_id, target, "title", title, context=context)

@@ -16,6 +16,7 @@ from typing import Any, cast
 import discord
 from discord import app_commands
 
+from ..colors import discord_color
 from ..server.core import CodexAppServerError
 from ..core import (
     DEFAULT_MODE,
@@ -146,7 +147,7 @@ async def codex_restart(interaction: discord.Interaction) -> None:
                 "The Discord bot is already preparing to restart.",
                 channel=interaction.channel,
                 user=interaction.user,
-                color=discord.Color.orange(),
+                color=discord_color("WARNING"),
             ),
         )
         return
@@ -159,7 +160,7 @@ async def codex_restart(interaction: discord.Interaction) -> None:
             "and frontend settings will be reused.",
             channel=interaction.channel,
             user=interaction.user,
-            color=discord.Color.blurple(),
+            color=discord_color("INFO"),
         ),
     )
     bot._restart_task = asyncio.create_task(_restart_in_place())
@@ -336,7 +337,7 @@ async def codex_mode(
                     "Voice mode requires Theia to be installed in the server.",
                     channel=interaction.channel,
                     user=interaction.user,
-                    color=discord.Color.orange(),
+                    color=discord_color("WARNING"),
                 ),
                 ephemeral=True,
             )
@@ -358,7 +359,7 @@ async def codex_mode(
                     reason,
                     channel=interaction.channel,
                     user=interaction.user,
-                    color=discord.Color.orange(),
+                    color=discord_color("WARNING"),
                 ),
                 ephemeral=True,
             )
@@ -373,7 +374,7 @@ async def codex_mode(
                     "Join a voice channel before selecting voice mode.",
                     channel=interaction.channel,
                     user=interaction.user,
-                    color=discord.Color.orange(),
+                    color=discord_color("WARNING"),
                 ),
                 ephemeral=True,
             )
@@ -401,7 +402,7 @@ async def codex_mode(
                 "remain available, and responses will be spoken back.",
                 channel=interaction.channel,
                 user=interaction.user,
-                color=discord.Color.green(),
+                color=discord_color("HEALTHY"),
             ),
             ephemeral=True,
         )
@@ -420,7 +421,7 @@ async def codex_mode(
             "Voice listening is disabled for this Discord session.",
             channel=interaction.channel,
             user=interaction.user,
-            color=discord.Color.green(),
+            color=discord_color("HEALTHY"),
         ),
         ephemeral=True,
     )
@@ -479,7 +480,7 @@ async def codex_model(interaction: discord.Interaction, model: str) -> None:
             channel=interaction.channel,
             user=interaction.user,
             context={"model": model},
-            color=discord.Color.green(),
+            color=discord_color("HEALTHY"),
         ),
     )
 
@@ -540,7 +541,7 @@ async def codex_personality(
                     _safe_error_reason(exc),
                     channel=interaction.channel,
                     user=interaction.user,
-                    color=discord.Color.orange(),
+                    color=discord_color("WARNING"),
                 ),
                 ephemeral=True,
             )
@@ -578,7 +579,7 @@ async def codex_personality(
                 _safe_error_reason(exc),
                 channel=interaction.channel,
                 user=interaction.user,
-                color=discord.Color.orange(),
+                color=discord_color("WARNING"),
             ),
             ephemeral=True,
         )
@@ -608,7 +609,7 @@ async def codex_personality(
                 "personality": selected or "none",
                 "personality_scope": selected_scope,
             },
-            color=discord.Color.green(),
+            color=discord_color("HEALTHY"),
         ),
         ephemeral=True,
     )
@@ -638,7 +639,7 @@ async def codex_approve(interaction: discord.Interaction) -> None:
             else "There is no pending approval request active.",
             channel=interaction.channel,
             user=interaction.user,
-            color=discord.Color.green() if active else discord.Color.orange(),
+            color=discord_color("HEALTHY" if active else "DEGRADED"),
         ),
         ephemeral=True,
     )
@@ -668,7 +669,7 @@ async def codex_deny(interaction: discord.Interaction) -> None:
             else "There is no pending approval request active.",
             channel=interaction.channel,
             user=interaction.user,
-            color=discord.Color.red() if active else discord.Color.orange(),
+            color=discord_color("ERROR" if active else "DEGRADED"),
         ),
         ephemeral=True,
     )
@@ -694,7 +695,7 @@ async def codex_stop(interaction: discord.Interaction) -> None:
                 else "There is no active Codex request.",
                 channel=interaction.channel,
                 user=interaction.user,
-                color=discord.Color.orange() if not stopped else discord.Color.green(),
+                color=discord_color("DEGRADED" if not stopped else "HEALTHY"),
             )
         )
     except (CodexAppServerError, OSError, discord.DiscordException) as exc:
@@ -720,7 +721,7 @@ async def codex_undo(interaction: discord.Interaction) -> None:
             "The most recent Codex turn was removed from this conversation.",
             channel=interaction.channel,
             user=interaction.user,
-            color=discord.Color.green(),
+            color=discord_color("HEALTHY"),
         ),
         ephemeral=True,
     )
@@ -945,7 +946,7 @@ async def codex_skill(interaction: discord.Interaction, skill_name: str) -> None
                 _safe_error_reason(exc),
                 channel=interaction.channel,
                 user=interaction.user,
-                color=discord.Color.orange(),
+                color=discord_color("WARNING"),
             ),
             ephemeral=True,
         )
@@ -960,7 +961,7 @@ async def codex_skill(interaction: discord.Interaction, skill_name: str) -> None
                 "That skill is not available to this Codex session.",
                 channel=interaction.channel,
                 user=interaction.user,
-                color=discord.Color.orange(),
+                color=discord_color("WARNING"),
             ),
             ephemeral=True,
         )
@@ -1061,7 +1062,7 @@ async def codex_customize(
                 "Frontend customization is available only inside a Discord server.",
                 channel=interaction.channel,
                 user=interaction.user,
-                color=discord.Color.orange(),
+                color=discord_color("WARNING"),
             ),
             ephemeral=True,
         )
@@ -1098,7 +1099,7 @@ async def codex_customize(
                 "Provide target, element, and value together.",
                 channel=interaction.channel,
                 user=interaction.user,
-                color=discord.Color.orange(),
+                color=discord_color("WARNING"),
             ),
             ephemeral=True,
         )
@@ -1123,7 +1124,7 @@ async def codex_customize(
                 str(exc),
                 channel=interaction.channel,
                 user=interaction.user,
-                color=discord.Color.orange(),
+                color=discord_color("WARNING"),
             ),
             ephemeral=True,
         )
@@ -1141,7 +1142,7 @@ async def codex_customize(
             description,
             channel=interaction.channel,
             user=interaction.user,
-            color=discord.Color.green(),
+            color=discord_color("HEALTHY"),
         ),
     )
 

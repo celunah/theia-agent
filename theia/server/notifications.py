@@ -5,8 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
-import discord
-
+from ..colors import discord_color
 from ..core import (
     _TurnState,
     _codex_logger,
@@ -85,7 +84,7 @@ class CodexNotificationMixin:
                         "command:login",
                         "Authentication completed",
                         access_message,
-                        color=discord.Color.green(),
+                        color=discord_color("HEALTHY"),
                     )
                     if login_sender is not None:
                         self._background_send_callback(login_sender, embed)
@@ -98,7 +97,7 @@ class CodexNotificationMixin:
                         "command:login",
                         "Login failed",
                         "Codex login did not complete. Please try `/login` again.",
-                        color=discord.Color.red(),
+                        color=discord_color("ERROR"),
                     )
                     if login_sender is not None:
                         self._background_send_callback(login_sender, embed)

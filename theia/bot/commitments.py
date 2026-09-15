@@ -7,6 +7,7 @@ from typing import Any
 import discord
 from discord import app_commands
 
+from ..colors import discord_color
 from ..core import CodexAppServerError, _safe_error_reason
 from .support import _frontend_embed, _require_login, session_key
 
@@ -25,7 +26,7 @@ def _commitments_embed(
             "There are no active open loops in this session.",
             channel=channel,
             user=user,
-            color=discord.Color.blurple(),
+            color=discord_color("INFO"),
         )
     lines = [
         f"**{_kind_label(item.get('kind'))}** — {item.get('text', '')}\n"
@@ -38,7 +39,7 @@ def _commitments_embed(
         "\n\n".join(lines),
         channel=channel,
         user=user,
-        color=discord.Color.blurple(),
+        color=discord_color("INFO"),
     )
 
 
@@ -68,7 +69,7 @@ async def handle_commitments_command(
                 "Choose list, complete, dismiss, or promote.",
                 channel=interaction.channel,
                 user=interaction.user,
-                color=discord.Color.orange(),
+                color=discord_color("WARNING"),
             ),
             ephemeral=True,
         )
@@ -81,7 +82,7 @@ async def handle_commitments_command(
                 f"Provide an open loop ID to {selected} it.",
                 channel=interaction.channel,
                 user=interaction.user,
-                color=discord.Color.orange(),
+                color=discord_color("WARNING"),
             ),
             ephemeral=True,
         )
@@ -103,7 +104,7 @@ async def handle_commitments_command(
                 "That open loop was explicitly added to your durable memory.",
                 channel=interaction.channel,
                 user=interaction.user,
-                color=discord.Color.green(),
+                color=discord_color("HEALTHY"),
             )
         else:
             status = "completed" if selected == "complete" else "dismissed"
@@ -114,7 +115,7 @@ async def handle_commitments_command(
                 f"The open loop was marked {selected}.",
                 channel=interaction.channel,
                 user=interaction.user,
-                color=discord.Color.green(),
+                color=discord_color("HEALTHY"),
             )
     except (CodexAppServerError, OSError, ValueError) as exc:
         embed = _frontend_embed(
@@ -123,6 +124,6 @@ async def handle_commitments_command(
             _safe_error_reason(exc),
             channel=interaction.channel,
             user=interaction.user,
-            color=discord.Color.orange(),
+            color=discord_color("WARNING"),
         )
     await interaction.followup.send(embed=embed, ephemeral=True)

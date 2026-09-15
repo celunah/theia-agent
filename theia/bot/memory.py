@@ -8,6 +8,7 @@ from typing import Any
 import discord
 from discord import app_commands
 
+from ..colors import discord_color
 from ..core import _is_super_admin_user
 from ..server.core import CodexAppServerError
 from ..delivery import _MemoryView
@@ -131,7 +132,7 @@ async def handle_memory_command(
                 "Only a Theia Super Admin can inspect everyone or a targeted scope.",
                 channel=interaction.channel,
                 user=interaction.user,
-                color=discord.Color.orange(),
+                color=discord_color("WARNING"),
             ),
             ephemeral=True,
         )

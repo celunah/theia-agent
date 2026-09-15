@@ -493,7 +493,11 @@ When enabled:
 
 ## Logging and presence
 
-The `theia.codex` logger uses discord.py-style colored output.
+The `theia.codex` logger and Lighthouse View use Theia's shared default status
+palette: blue for information, connected, and healthy states; green for
+warnings and degraded states; red for errors and fatal states; and dark slate
+for disabled states. Server administrators can override Discord embed colors
+with `/customize`.
 
 It logs basic Codex lifecycle, requests, turns, tools, approvals, and failures without sensitive payloads. Debug logging can be enabled with:
 

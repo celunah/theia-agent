@@ -7,7 +7,9 @@ from theia.server.lighthouse import (
     LighthouseView,
     render_lighthouse,
     render_lighthouse_diagnostics,
+    render_lighthouse_rich,
 )
+from theia.colors import THEIA_COLORS, color_value
 
 
 def _snapshot(**overrides: Any) -> dict[str, Any]:
@@ -74,6 +76,48 @@ class _TTYBuffer:
 
 
 class LighthouseTests(unittest.IsolatedAsyncioTestCase):
+    def test_lighthouse_uses_the_shared_default_palette(self) -> None:
+        self.assertEqual(
+            THEIA_COLORS,
+            {
+                "INFO": "#A5BAFF",
+                "WARNING": "#C0E68C",
+                "ERROR": "#C07178",
+                "FATAL": "#C07178",
+                "CONNECTED": "#A5BAFF",
+                "HEALTHY": "#A5BAFF",
+                "DEGRADED": "#C0E68C",
+                "DISABLED": "#2E304C",
+            },
+        )
+        self.assertEqual(color_value("INFO"), 0xA5BAFF)
+        self.assertEqual(color_value("DISABLED"), 0x2E304C)
+
+        formatter = core_module._CodexColorFormatter(use_colors=True)
+        info = logging.LogRecord(
+            "theia.codex", logging.INFO, "test.py", 1, "info", (), None
+        )
+        self.assertIn("\x1b[38;2;165;186;255m", formatter.format(info))
+        fatal = logging.LogRecord(
+            "theia.codex", logging.CRITICAL, "test.py", 1, "fatal", (), None
+        )
+        self.assertIn("\x1b[1;7m\x1b[38;2;192;113;120m", formatter.format(fatal))
+
+        plain = render_lighthouse(_snapshot())
+        styled = render_lighthouse_rich(_snapshot())
+        self.assertEqual(styled.plain, plain)
+        self.assertTrue(any(str(span.style) == "#A5BAFF" for span in styled.spans))
+
+        fatal = render_lighthouse_rich(
+            _snapshot(events=({"timestamp": 0, "event": "fatal"},))
+        )
+        self.assertTrue(
+            any(
+                "bold reverse" in str(span.style) and "#C07178" in str(span.style)
+                for span in fatal.spans
+            )
+        )
+
     async def test_lighthouse_uses_the_latest_adaptive_assessment(self) -> None:
         server = main.CodexAppServer()
         server.available_models = AsyncMock(

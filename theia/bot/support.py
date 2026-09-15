@@ -19,6 +19,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from ..colors import discord_color
 from ..server.policy import MAX_ATTACHMENT_BYTES
 from ..server.core import CodexAppServerError, CodexTurnCancelled
 from ..core import (
@@ -707,7 +708,7 @@ async def handle_login(
                 "Codex could not start authentication. Please try `/login` again.",
                 channel=channel,
                 context={"user_id": user_id},
-                color=discord.Color.red(),
+                color=discord_color("ERROR"),
             ),
             ephemeral=ephemeral,
         )
@@ -724,7 +725,7 @@ async def handle_login(
                 _safe_error_reason(exc),
                 channel=channel,
                 context={"user_id": user_id},
-                color=discord.Color.red(),
+                color=discord_color("ERROR"),
             ),
             ephemeral=ephemeral,
         )
@@ -751,7 +752,7 @@ async def handle_login(
             ),
             channel=channel,
             context={"user_id": user_id},
-            color=discord.Color.green(),
+            color=discord_color("HEALTHY"),
         )
     elif result.get("login_in_progress"):
         embed = _frontend_embed(
@@ -760,7 +761,7 @@ async def handle_login(
             "A Codex login is already in progress. Complete it before trying again.",
             channel=channel,
             context={"user_id": user_id},
-            color=discord.Color.orange(),
+            color=discord_color("WARNING"),
         )
     else:
         embed = _frontend_embed(
@@ -769,7 +770,7 @@ async def handle_login(
             "Open the verification link and enter the displayed code.",
             channel=channel,
             context={"user_id": user_id},
-            color=discord.Color.blurple(),
+            color=discord_color("INFO"),
         )
         url = result.get("verificationUrl") or result.get("verification_url")
         code = result.get("userCode") or result.get("user_code")
@@ -1057,7 +1058,7 @@ async def _require_server_admin(
         message,
         channel=interaction.channel,
         user=interaction.user,
-        color=discord.Color.orange(),
+        color=discord_color("WARNING"),
     )
     if interaction.response.is_done():
         await interaction.followup.send(embed=embed, ephemeral=True)
@@ -1085,7 +1086,7 @@ async def _send_command_failure(
         _safe_error_reason(exc),
         channel=interaction.channel,
         user=interaction.user,
-        color=discord.Color.orange(),
+        color=discord_color("WARNING"),
     )
     if interaction.response.is_done():
         await interaction.followup.send(embed=embed, ephemeral=True)

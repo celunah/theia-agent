@@ -12,6 +12,7 @@ from typing import Any
 
 import discord
 
+from ..colors import discord_color
 from .support import (
     _current_revision,
     _frontend_embed,
@@ -125,7 +126,7 @@ def _usage_embed(
             "Usage data is currently unavailable. Please try again later.",
             channel=channel,
             user=user,
-            color=discord.Color.orange(),
+            color=discord_color("WARNING"),
         )
     if not any(value is not None for value in summary.values()):
         return _frontend_embed(
@@ -134,7 +135,7 @@ def _usage_embed(
             "Usage data is currently unavailable. Please try again later.",
             channel=channel,
             user=user,
-            color=discord.Color.orange(),
+            color=discord_color("WARNING"),
         )
     embed = _frontend_embed(
         "command:usage",
@@ -437,7 +438,7 @@ def _credits_embed(
             "Credits data is currently unavailable. Please try again later.",
             channel=channel,
             user=user,
-            color=discord.Color.orange(),
+            color=discord_color("WARNING"),
         )
     credit_details = snapshot.get("credits")
     if not isinstance(credit_details, dict):
@@ -447,7 +448,7 @@ def _credits_embed(
             "Credits data is currently unavailable. Please try again later.",
             channel=channel,
             user=user,
-            color=discord.Color.orange(),
+            color=discord_color("WARNING"),
         )
     balance = credit_details.get("balance")
     balance_text = str(balance) if balance is not None else "Unavailable"
@@ -463,7 +464,7 @@ def _credits_embed(
         channel=channel,
         user=user,
         context={"balance": balance_text},
-        color=discord.Color.blurple() if balance_available else discord.Color.orange(),
+        color=discord_color("INFO" if balance_available else "DEGRADED"),
     )
     embed.add_field(
         name=_frontend_label(
@@ -797,5 +798,5 @@ def _login_required_embed(
         "Please use `/login` before starting or controlling a Codex request.",
         channel=channel,
         user=user,
-        color=discord.Color.orange(),
+        color=discord_color("WARNING"),
     )

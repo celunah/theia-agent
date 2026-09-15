@@ -1063,6 +1063,7 @@ class CommandSurfaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = main.FrontendCustomizationStore(Path(directory) / "frontend.json")
             store.set(42, "usage", "title", "Custom usage")
+            store.set(42, "usage", "color", "#010203")
             default = main._command_embed(
                 "Usage",
                 "Usage tracked from Theia's conversation threads.",
@@ -1087,7 +1088,9 @@ class CommandSurfaceTests(unittest.TestCase):
             )
 
         self.assertEqual(default.title, "Usage")
+        self.assertEqual(default.color, discord.Color(0xA5BAFF))
         self.assertEqual(customized.title, "Custom usage")
+        self.assertEqual(customized.color, discord.Color(0x010203))
         self.assertEqual(label_customized.title, "Failure")
 
     def test_about_embed_contains_only_the_requested_runtime_details(self) -> None:

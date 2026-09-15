@@ -19,6 +19,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, cast
 
+from ..colors import rich_style
 from ..core import (
     DEFAULT_CODEX_MODEL,
     THEIA_VERSION,
@@ -101,6 +102,8 @@ def _event_title(event_name: str, detail: Any = None) -> str:
 
 def _event_severity(event_name: str, detail: Any = None) -> str:
     """Return the compact severity displayed beside a stable event title."""
+    if event_name in {"fatal", "critical", "log_critical"}:
+        return "FATAL"
     if event_name == "log_error":
         return "ERROR"
     if event_name == "log_warning":
@@ -736,6 +739,53 @@ def render_lighthouse(snapshot: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def render_lighthouse_rich(
+    snapshot: dict[str, Any],
+    *,
+    records: Any = (),
+    diagnostic_mode: bool = False,
+) -> Any:
+    """Render Lighthouse text with Theia's shared terminal status palette."""
+    from rich.text import Text
+
+    plain = (
+        render_lighthouse_diagnostics(snapshot, records)
+        if diagnostic_mode
+        else render_lighthouse(snapshot)
+    )
+    rendered = Text(plain)
+    offset = 0
+    status_styles = {
+        "INFO": rich_style("INFO"),
+        "WARNING": rich_style("WARNING"),
+        "ERROR": rich_style("ERROR"),
+        "FATAL": rich_style("FATAL", emphasis=True),
+        "CONNECTED": rich_style("CONNECTED"),
+        "HEALTHY": rich_style("HEALTHY"),
+        "DEGRADED": rich_style("DEGRADED"),
+        "DISABLED": rich_style("DISABLED"),
+    }
+    for line in plain.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        if body.startswith(("Theia ", "Workspace", "Runtime", "Recent events")):
+            rendered.stylize(status_styles["INFO"], offset, offset + len(body))
+        if body.startswith("─"):
+            rendered.stylize(status_styles["INFO"], offset, offset + len(body))
+        for match in re.finditer(
+            r"\b(INFO|WARNING|ERROR|FATAL|CONNECTED|HEALTHY|DEGRADED|DISABLED)\b",
+            body,
+            re.IGNORECASE,
+        ):
+            name = match.group(1).upper()
+            rendered.stylize(
+                status_styles[name],
+                offset + match.start(),
+                offset + match.end(),
+            )
+        offset += len(line)
+    return rendered
+
+
 def _diagnostic_message(record: Any) -> str:
     """Return a bounded diagnostic message without exposing unsafe payloads."""
     try:
@@ -940,6 +990,21 @@ class LighthouseView:
             return render_lighthouse_diagnostics(self.snapshot(), self._diagnostics)
         return render_lighthouse(self.snapshot())
 
+    def _render_current_payload(self) -> Any:
+        """Use styled Rich output only after Rich has been selected by ``start``."""
+        text_type = self._text_type
+        if getattr(text_type, "__module__", "") == "rich.text":
+            return render_lighthouse_rich(
+                self.snapshot(),
+                records=self._diagnostics,
+                diagnostic_mode=self._diagnostic_mode,
+            )
+        return (
+            text_type(self._render_current_view())
+            if text_type
+            else self._render_current_view()
+        )
+
     def _toggle_diagnostics(self) -> None:
         """Toggle the read-only diagnostic screen from the terminal key reader."""
         self._diagnostic_mode = not self._diagnostic_mode
@@ -948,7 +1013,7 @@ class LighthouseView:
         if live is None or text_type is None:
             return
         with contextlib.suppress(Exception):
-            live.update(text_type(self._render_current_view()), refresh=True)
+            live.update(self._render_current_payload(), refresh=True)
 
     def _handle_keyboard_text(self, text: str) -> None:
         """Recognize F1 escape sequences without interpreting other input."""
@@ -1075,7 +1140,7 @@ class LighthouseView:
                 self._diagnostic_handlers.append((log, diagnostic_handler))
             console = Console(file=self.output, force_terminal=True)
             self._live = Live(
-                Text(self._render_current_view()),
+                self._render_current_payload(),
                 console=console,
                 refresh_per_second=1,
                 screen=True,
@@ -1088,7 +1153,7 @@ class LighthouseView:
             console.clear()
             self._live.refresh()
             self._start_keyboard_input()
-            self._task = asyncio.create_task(self._run(Text))
+            self._task = asyncio.create_task(self._run())
             return True
         except Exception:
             self._restore_logging()
@@ -1101,7 +1166,7 @@ class LighthouseView:
             logger.exception("Lighthouse View could not start")
             return False
 
-    async def _run(self, text_type: Any) -> None:
+    async def _run(self) -> None:
         next_heartbeat = 0.0
         try:
             while True:
@@ -1116,9 +1181,7 @@ class LighthouseView:
                             await heartbeat_call(timeout=1.5)
                     next_heartbeat = now + self.heartbeat_interval
                 if self._live is not None:
-                    self._live.update(
-                        text_type(self._render_current_view()), refresh=True
-                    )
+                    self._live.update(self._render_current_payload(), refresh=True)
                 await asyncio.sleep(self.refresh_interval)
         except Exception:
             logger.exception("Lighthouse View stopped unexpectedly")

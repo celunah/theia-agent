@@ -8,6 +8,7 @@ from typing import Any
 
 import discord
 
+from .colors import discord_color
 from .audio import AudioOutput
 from .core import (
     _codex_logger,
@@ -1195,7 +1196,7 @@ class _ResponseDelivery:
             embed = _command_embed(
                 "Request failed",
                 f"Codex could not complete this request.\n\nReason: {reason}",
-                color=discord.Color.red(),
+                color=discord_color("ERROR"),
                 target="label:request_failed",
                 guild_id=self.guild_id,
                 customizer=self.customizer,

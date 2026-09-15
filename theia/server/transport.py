@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import discord
 
+from ..colors import discord_color
 from ..core import (
     CodexAppServerError,
     _PendingApproval,
@@ -501,7 +502,7 @@ class CodexTransportMixin:
                 "Approval needed",
                 description,
                 context={"reason": reason, "status": "approval"},
-                color=discord.Color.orange(),
+                color=discord_color("WARNING"),
             )
             embed.set_footer(text="You can also use /approve or /deny.")
             await self._send_turn_message(
@@ -634,7 +635,7 @@ class CodexTransportMixin:
                     "Approval needed",
                     description,
                     context={"reason": reason, "status": "unavailable"},
-                    color=discord.Color.orange(),
+                    color=discord_color("WARNING"),
                 ),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
