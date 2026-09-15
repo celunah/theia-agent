@@ -250,6 +250,10 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("token.txt", rendered)
         self.assertIn("Qwen Audio Agent · listening", rendered)
         self.assertIn("7.0 GB", rendered)
+        self.assertIn("Workspace      2 entries", rendered)
+        self.assertIn("Recent         Inspect the runtime", rendered)
+        self.assertNotIn("Should the view stay enabled?", rendered)
+        self.assertNotIn("Goal: Inspect the runtime", rendered)
 
     def test_render_separates_cleanup_health_from_session_health(self) -> None:
         base_runtime = _snapshot()["runtime"]
@@ -357,6 +361,10 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertIn("No active workspace entries", rendered)
+        self.assertIn(
+            "Workspace      0 entries\nRecent         No active workspace entries",
+            rendered,
+        )
         self.assertIn("Presence     unknown", rendered)
         self.assertIn("Voice        disabled", rendered)
         self.assertIn("No recent events", rendered)
@@ -372,7 +380,10 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertIn("Session objective Ship the current release", rendered)
-        self.assertIn("Workspace\n  No active workspace entries", rendered)
+        self.assertIn(
+            "Workspace      0 entries\nRecent         No active workspace entries",
+            rendered,
+        )
 
     def test_workspace_entries_without_current_source_are_not_rendered(self) -> None:
         rendered = render_lighthouse(
@@ -383,7 +394,10 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
                 session_objective=None,
             )
         )
-        self.assertIn("Workspace\n  No active workspace entries", rendered)
+        self.assertIn(
+            "Workspace      0 entries\nRecent         No active workspace entries",
+            rendered,
+        )
         self.assertNotIn("untrusted objective", rendered)
 
     async def test_noninteractive_terminal_keeps_normal_logging_and_no_heartbeat(self):

@@ -71,7 +71,8 @@ reflects the explicitly selected or resumed session plus unfinished normal
 turns, shows the current routing scope, and reports concurrent sessions without
 exposing Discord identifiers. Recent events use full timestamps, severity, and
 stable titles; technical event and log details remain available in a separate
-bounded diagnostic view. Session selection is runtime-only and is cleared
+bounded diagnostic view. Its Workspace section shows the total entry count and
+the most recent entry only. Session selection is runtime-only and is cleared
 by session reset or termination.
 
 `/improvements` is an administrator-only ephemeral audit view of recent

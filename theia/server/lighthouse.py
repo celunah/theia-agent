@@ -286,11 +286,21 @@ class CodexLighthouseMixin:
 
     def _lighthouse_workspace(self, session: _Session | None) -> dict[str, Any]:
         if session is None:
-            return {"entries": (), "revision": 0, "source": "session workspace"}
+            return {
+                "entries": (),
+                "entry_count": 0,
+                "revision": 0,
+                "source": "session workspace",
+            }
         try:
             workspace = self._workspace_snapshot(session)
         except Exception:  # noqa: BLE001 - missing workspace must not stop the view
-            return {"entries": (), "revision": 0, "source": "session workspace"}
+            return {
+                "entries": (),
+                "entry_count": 0,
+                "revision": 0,
+                "source": "session workspace",
+            }
         entries = []
         for item in workspace.get("entries", ()):
             if not isinstance(item, dict):
@@ -305,6 +315,7 @@ class CodexLighthouseMixin:
             revision = 0
         return {
             "entries": tuple(entries[:10]),
+            "entry_count": len(entries),
             "revision": revision,
             "source": "session workspace",
         }
@@ -657,27 +668,24 @@ def render_lighthouse(snapshot: dict[str, Any]) -> str:
         # A separately named objective is not part of the workspace and must
         # never be presented as a workspace goal.
         lines.append(f"Session objective {session_objective}")
-    lines.extend(["────────────────────────────────────────", "Workspace"])
-    workspace_count_before = len(lines)
-    if not entries:
-        lines.append("  No active workspace entries")
-    else:
-        for item in entries[:10]:
-            if not isinstance(item, dict):
-                continue
-            category = _dashboard_text(item.get("category"), 32)
-            category = category.replace("_", " ").title()
-            text = _dashboard_text(item.get("text"), 180)
-            if category and text:
-                lines.append(f"  • {category}: {text}")
-        if len(lines) == workspace_count_before + 1:
-            lines.append("  No active workspace entries")
-    parked = attention.get("parked")
-    if isinstance(parked, (list, tuple)):
-        for title in parked[:3]:
-            safe_title = _dashboard_text(title, 100)
-            if safe_title:
-                lines.append(f"  • Parked topic: {safe_title}")
+    try:
+        workspace_count = int(workspace.get("entry_count", len(entries)))
+    except (TypeError, ValueError):
+        workspace_count = len(entries)
+    workspace_count = max(0, workspace_count)
+    recent_workspace_text = "No active workspace entries"
+    if entries and isinstance(entries[0], dict):
+        recent_workspace_text = (
+            _dashboard_text(entries[0].get("text"), 180) or recent_workspace_text
+        )
+    entry_label = "entry" if workspace_count == 1 else "entries"
+    lines.extend(
+        [
+            "────────────────────────────────────────",
+            f"Workspace      {workspace_count} {entry_label}",
+            f"Recent         {recent_workspace_text}",
+        ]
+    )
     lines.extend(
         [
             "────────────────────────────────────────",
