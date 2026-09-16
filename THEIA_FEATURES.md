@@ -221,6 +221,10 @@ agent state.
 - Authentication is cached in Theia’s private runtime, normally `~/.theia`.
 - A valid private cache is reused; another Codex cache is imported atomically
   when needed, and the device-code flow is used only when no usable cache remains.
+- Docker Compose does not implicitly create Theia's bind-mounted directories.
+  Theia repairs their ownership at startup, verifies runtime and workspace
+  access after dropping to the configured container identity, and stops with a
+  `FATAL` startup message if the permissions remain unusable.
 - Runtime `.env` configuration is found from the working directory, compiled
   executable directory, or source project root and is never bundled into the
   executable.

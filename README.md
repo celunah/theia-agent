@@ -70,18 +70,31 @@ message listening, threads, or voice.
 
 ### Docker
 
-Create `.env`, add your Discord bot token, then run:
+Create `.env`, add your Discord bot token, and on Linux or WSL set the host
+identity and create the bind-mount directories:
 
 ```bash
 cp .env.example .env
+export THEIA_UID="$(id -u)"
+export THEIA_GID="$(id -g)"
+mkdir -p "$HOME/.theia" "$HOME/theia-workspace"
+```
+
+Native Windows hosts do not have a Unix UID/GID to mirror, so Compose defaults
+to Theia's container identity (`1000:1000`). Then run:
+
+```bash
 docker compose up --build -d
 ```
 
-On Linux or WSL, set `THEIA_UID` and `THEIA_GID` to the account that owns the
-mounted directories before running Compose. Native Windows hosts do not have a
-Unix UID/GID to mirror, so Compose defaults to Theia's container identity
-(`1000:1000`) automatically. Theia keeps her private data and working files in
-the mounted directories.
+Compose is configured not to create missing bind sources with Docker-owned
+permissions. On native Windows, create the two corresponding folders before
+running the Compose command.
+
+The mounted directories should be owned by that identity. On container startup,
+Theia repairs ownership of the runtime and workspace mounts, verifies access as
+that identity, and then drops container privileges. If access still fails,
+startup stops with a `FATAL` message instead of entering a broken run loop.
 
 Administrator requests can inspect the private `.theia` runtime when needed,
 but operations there always require approval.

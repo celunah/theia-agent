@@ -51,6 +51,7 @@ from ..core import (
     _render_frontend_label,
     _safe_intermediate_text,
 )
+from ..permissions import StoragePermissionError, prepare_runtime_storage
 
 logger = _codex_logger()
 
@@ -85,6 +86,22 @@ class CodexStateMixin:
     def runtime_home(self) -> Path:
         """Return Theia's private runtime home for auxiliary persistent data."""
         return self._codex_home
+
+    def _prepare_storage(self) -> None:
+        """Repair container storage ownership before loading persisted state."""
+        try:
+            repaired = prepare_runtime_storage(
+                self._codex_home,
+                Path(self._cwd),
+                self._state_path,
+            )
+        except StoragePermissionError as exc:
+            logger.critical("FATAL: Theia %s permissions remain unusable", exc.area)
+            raise CodexAppServerError(
+                "FATAL: Theia storage permissions are unusable."
+            ) from exc
+        if repaired:
+            logger.info("Repaired Theia runtime and workspace ownership")
 
     def _frontend_embed(
         self,

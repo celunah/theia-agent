@@ -1,6 +1,5 @@
 services:
   theia:
-    user: "${THEIA_UID:-1000}:${THEIA_GID:-1000}"
     network_mode: host
     build:
       context: .
@@ -13,6 +12,9 @@ services:
     env_file:
       - .env
     environment:
+      THEIA_CONTAINER: "1"
+      THEIA_UID: "${THEIA_UID:-1000}"
+      THEIA_GID: "${THEIA_GID:-1000}"
       THEIA_HOME: /data
       THEIA_STATE: /data/sessions.json
       CODEX_CWD: /workspace
@@ -22,9 +24,13 @@ services:
       - type: bind
         source: ${HOME}/.theia
         target: /data
+        bind:
+          create_host_path: false
       - type: bind
         source: ${HOME}/theia-workspace
         target: /workspace
+        bind:
+          create_host_path: false
     stdin_open: true
     tty: true
     restart: unless-stopped

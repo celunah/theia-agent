@@ -439,6 +439,7 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
             or os.getenv("CODEX_DISCORD_STATE")
             or (self._codex_home / "sessions.json")
         ).expanduser()
+        self._prepare_storage()
         legacy_state = (
             Path(
                 os.getenv("CODEX_DISCORD_STATE")

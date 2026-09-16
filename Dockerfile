@@ -23,6 +23,9 @@ LABEL org.opencontainers.image.version="${THEIA_VERSION}"
 
 ENV HOME=/home/theia \
     PATH=/app/.venv/bin:/app/node_modules/.bin:${PATH} \
+    THEIA_UID=${THEIA_UID} \
+    THEIA_GID=${THEIA_GID} \
+    THEIA_CONTAINER=1 \
     TERM=xterm-256color \
     COLORTERM=truecolor \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -68,5 +71,6 @@ RUN uv sync --frozen --no-dev \
 
 VOLUME ["/data", "/workspace"]
 
-USER theia
+# Theia repairs bind-mount ownership once, then drops to THEIA_UID:THEIA_GID.
+USER root
 ENTRYPOINT ["python", "main.py"]
