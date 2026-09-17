@@ -71,32 +71,35 @@ message listening, threads, or voice.
 
 ### Docker
 
-Create `.env`, add your Discord bot token, and on Linux or WSL set the host
-identity and create the bind-mount directories:
+Create `.env`, add your Discord bot token, and create both bind-mount source
+directories as the deploying account:
 
 ```bash
 cp .env.example .env
+mkdir -p "$HOME/.theia" "$HOME/theia-workspace"
 export THEIA_UID="$(id -u)"
 export THEIA_GID="$(id -g)"
-mkdir -p "$HOME/.theia" "$HOME/theia-workspace"
-```
-
-Native Windows hosts do not have a Unix UID/GID to mirror, so Compose defaults
-to Theia's container identity (`1000:1000`). Then run:
-
-```bash
 docker compose up --build -d
 ```
 
-Compose is configured not to create missing bind sources with Docker-owned
-permissions. On native Windows, create the two corresponding folders before
-running the Compose command.
+On native Windows PowerShell, use:
 
-The mounted directories should be owned by that identity. On container startup,
-Theia repairs ownership of the runtime and workspace mounts, verifies access as
-that identity, and then drops container privileges. If access still fails, or
-another startup component cannot initialize, the Lighthouse remains available
-with a `FATAL` degraded state instead of hiding the startup failure.
+```powershell
+Copy-Item .env.example .env
+New-Item -ItemType Directory -Force "$HOME\.theia", "$HOME\theia-workspace"
+docker compose up --build -d
+```
+
+Compose deliberately does not create the directories automatically, because
+Docker may create missing bind sources as `root`, which prevents the non-root
+Theia process from reading `/data`. On Linux or WSL, set `THEIA_UID` and
+`THEIA_GID` to the account that owns those directories. Native Windows hosts
+do not have a Unix UID/GID to mirror, so Compose defaults to Theia's container
+identity (`1000:1000`) automatically. Theia repairs ownership of the runtime
+and workspace mounts at startup, verifies access as that identity, and then
+drops container privileges. If access still fails, or another startup component
+cannot initialize, the Lighthouse remains available with a `FATAL` degraded
+state instead of hiding the startup failure.
 
 Administrator requests can inspect the private `.theia` runtime when needed,
 but operations there always require approval.
