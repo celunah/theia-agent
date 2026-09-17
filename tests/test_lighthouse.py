@@ -229,6 +229,7 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
 
     def test_lighthouse_character_reports_global_and_override_sources(self) -> None:
         server = main.CodexAppServer()
+        server._codex_home = (Path.home() / ".theia").resolve()
         profile_path = Path.home() / ".theia" / "personalities" / "cel.md"
         with (
             patch.object(
@@ -279,6 +280,7 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         server = main.CodexAppServer()
+        profile_path = server.runtime_home() / "personalities" / "cel.md"
         channel = SimpleNamespace(name="general", guild=SimpleNamespace(id=1))
         user = SimpleNamespace(display_name="Alice")
         session = server.select_session(
@@ -299,6 +301,11 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
                 server._personalities,
                 "summary",
                 return_value=SimpleNamespace(character_name="Cel", identifier="cel"),
+            ),
+            patch.object(
+                server._personalities,
+                "resolve",
+                return_value=SimpleNamespace(path=profile_path),
             ),
         ):
             snapshot = server.lighthouse_snapshot()
@@ -344,7 +351,7 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
         server._ensure_running = AsyncMock()
         server._request = AsyncMock(return_value={"thread": {"id": "created"}})
         channel = SimpleNamespace(name="general", guild=SimpleNamespace(id=1))
-        session = server.select_session("guild:1:channel:2:user:7", channel=channel)
+        session = server.select_session("guild:1:channel:3:user:8", channel=channel)
 
         await server._ensure_thread(session, allow_tools=False)
 
