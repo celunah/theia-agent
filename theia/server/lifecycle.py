@@ -45,6 +45,8 @@ _SQLITE_STARTUP_ERROR_MARKERS = (
 
 
 class CodexLifecycleMixin:
+    """Control App Server startup, health checks, recovery, and shutdown."""
+
     if TYPE_CHECKING:
         _model: str | None
         _approval_level: str

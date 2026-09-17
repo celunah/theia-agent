@@ -21,6 +21,8 @@ SKILLS_CHANGE_DEDUP_SECONDS = 30.0
 
 
 class CodexNotificationMixin:
+    """Translate unsolicited App Server events into safe local state updates."""
+
     if TYPE_CHECKING:
         _memory_roots: Any
         _skill_roots: Any

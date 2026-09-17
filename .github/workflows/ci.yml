@@ -58,7 +58,7 @@ jobs:
 
       - name: Check docstring coverage
         run: |
-          python3 scripts/ci_warnings.py -- uv run docstr-coverage -i -P --fail-under 80 theia scripts main.py || {
+          python3 scripts/ci_warnings.py -- uv run docstr-coverage -i -P -m --fail-under 80 theia scripts main.py || {
             echo "::warning::Docstring coverage is below 80%. Try adding more missing docstrings."
           }
 

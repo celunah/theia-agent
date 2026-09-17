@@ -55,6 +55,7 @@ def _mention_prompt(content: str, bot_id: int) -> str:
 
 
 def configure_bot(instance: Any) -> None:
+    """Set the façade instance used by lazily imported Discord helpers."""
     global bot
     bot = instance
 
@@ -163,6 +164,7 @@ class _PersistentViewStore:
                 temporary.unlink()
 
     def register(self, view: Any, message: Any) -> None:
+        """Record a view only when its state is serializable and time-bounded."""
         token = getattr(view, "persistence_token", None)
         message_id = getattr(message, "id", None)
         if not isinstance(token, str) or not token:
@@ -190,6 +192,7 @@ class _PersistentViewStore:
         )
 
     async def update(self, view: Any) -> None:
+        """Persist the latest JSON-safe state for a registered view."""
         token = getattr(view, "persistence_token", None)
         if token not in self.records:
             return
@@ -202,6 +205,7 @@ class _PersistentViewStore:
         self._persist()
 
     def remove(self, view: Any) -> None:
+        """Remove a stopped view from the restart registry."""
         token = getattr(view, "persistence_token", None)
         if token in self.records:
             self.records.pop(token, None)
@@ -212,6 +216,7 @@ class _PersistentViewStore:
         bot_instance: commands.Bot,
         factory: Callable[[dict[str, Any]], Any | None],
     ) -> None:
+        """Re-register valid, unexpired views and discard unusable records."""
         now = time.time()
         changed = False
         for token, record in tuple(self.records.items()):

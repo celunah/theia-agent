@@ -27,6 +27,7 @@ from .support import (
 async def memory_scope_autocomplete(
     _interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
+    """Suggest the three memory scopes supported by the slash command."""
     values = ("me", "server", "everyone")
     requested = current.strip().casefold()
     return [
@@ -67,6 +68,7 @@ def _mutation_callback(
         record_id: str,
         replacement: str | None,
     ) -> tuple[bool, str]:
+        """Apply one owner-authorized memory edit and refresh the Discord view."""
         server_admin, super_admin = _view_admin_state(interaction)
         kwargs = {
             "actor_user_id": interaction.user.id,

@@ -57,6 +57,8 @@ logger = _codex_logger()
 
 
 class CodexStateMixin:
+    """Own shared runtime state and its safe persistence-facing accessors."""
+
     if TYPE_CHECKING:
         _model: str | None
         _usage_tracked_since: float | None

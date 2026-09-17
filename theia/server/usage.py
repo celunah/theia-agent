@@ -48,14 +48,17 @@ class ModelPricing:
 
     @property
     def cache_miss_input_per_million(self) -> float:
+        """Return the uncached input rate in USD per million tokens."""
         return self.input_miss
 
     @property
     def cache_hit_input_per_million(self) -> float:
+        """Return the cached input rate in USD per million tokens."""
         return self.input_hit
 
     @property
     def output_per_million(self) -> float:
+        """Return the output rate in USD per million tokens."""
         return self.output
 
 

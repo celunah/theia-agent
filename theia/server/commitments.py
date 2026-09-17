@@ -143,6 +143,7 @@ def _new_commitment_id(workspace_key: str, text: str) -> str:
 def serialize_commitments(
     commitments: dict[str, _Commitment] | None,
 ) -> list[dict[str, Any]] | None:
+    """Serialize only bounded, valid commitments for persisted session state."""
     if not commitments:
         return None
     records: list[dict[str, Any]] = []
@@ -386,6 +387,7 @@ class CodexCommitmentMixin:
     def session_commitments(
         self, session_key: str, *, include_closed: bool = False
     ) -> list[dict[str, Any]]:
+        """Return active or complete open loops in newest-first order."""
         session = self._session(session_key)
         changed = expire_commitments(session, now=time.time())
         if changed:
@@ -415,6 +417,7 @@ class CodexCommitmentMixin:
     def update_commitment(
         self, session_key: str, commitment_id: str, status: str
     ) -> dict[str, Any]:
+        """Complete or dismiss one active open loop and persist the change."""
         if not isinstance(status, str) or status not in {"completed", "dismissed"}:
             raise CodexAppServerError("Unsupported commitment status.")
         session = self._session(session_key)

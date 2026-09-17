@@ -53,6 +53,8 @@ logger = _codex_logger()
 
 
 class CodexConversationMixin:
+    """Manage session conversation modes, summaries, and attention context."""
+
     if TYPE_CHECKING:
         _model: str | None
         _approval_level: str

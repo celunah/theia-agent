@@ -97,28 +97,33 @@ class WorkerRun:
     terminal: str | None = None
 
     def request(self) -> None:
+        """Count one internal App Server request for this worker scope."""
         if self.diagnostics is not None:
             self.diagnostics.record_internal_request()
 
     def timeout(self) -> None:
+        """Record the first timeout terminal state for this worker scope."""
         if self.terminal is None:
             self.terminal = "timeout"
             if self.diagnostics is not None:
                 self.diagnostics.record_timeout()
 
     def cancelled(self) -> None:
+        """Record the first cancellation terminal state for this worker scope."""
         if self.terminal is None:
             self.terminal = "cancelled"
             if self.diagnostics is not None:
                 self.diagnostics.record_cancellation()
 
     def failed(self) -> None:
+        """Record the first failure terminal state for this worker scope."""
         if self.terminal is None:
             self.terminal = "failed"
             if self.diagnostics is not None:
                 self.diagnostics.record_failure()
 
     def finish(self) -> None:
+        """Record elapsed time and restore the previous worker context."""
         if self.diagnostics is not None:
             self.diagnostics.record_worker_duration(
                 self.worker, time.monotonic() - self.started_at

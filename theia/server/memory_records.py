@@ -238,14 +238,17 @@ class MemoryRecord:
 
     @property
     def origin(self) -> str:
+        """Return the stable source category used by compatibility callers."""
         return self.source_category
 
     @property
     def display_scope(self) -> str:
+        """Return the privacy-safe scope label shown in Discord."""
         return display_memory_scope(self.scope)
 
     @property
     def display_metadata(self) -> dict[str, str]:
+        """Return bounded source and date metadata for the memory card."""
         return {
             "source": self.source_category.replace("_", " "),
             "scope": self.display_scope,
@@ -338,6 +341,7 @@ def workspace_record(
     scope_keys: tuple[str, ...] = (),
     source_key: str | None = None,
 ) -> MemoryRecord | None:
+    """Build a safe memory record from one session workspace entry."""
     bounded = safe_memory_text(text)
     if not bounded:
         return None
@@ -373,6 +377,7 @@ def recap_record(
     scope_keys: tuple[str, ...] = (),
     source_key: str | None = None,
 ) -> MemoryRecord | None:
+    """Build a safe memory record from one generated nightly recap."""
     bounded = safe_memory_text(text, MEMORY_RECORD_MAX_CHARACTERS)
     if not bounded:
         return None

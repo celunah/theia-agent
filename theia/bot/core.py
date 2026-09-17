@@ -748,6 +748,7 @@ async def codex_btw(
             modal_interaction: discord.Interaction,
             modal_prompt: str,
         ) -> None:
+            """Defer the modal response and schedule the same request pipeline."""
             if not await _require_login(modal_interaction):
                 return
             await modal_interaction.response.defer()

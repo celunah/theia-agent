@@ -1,3 +1,5 @@
+"""Render Codex events into bounded Discord messages, views, and attachments."""
+
 import asyncio
 import contextlib
 import io

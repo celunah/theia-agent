@@ -83,6 +83,7 @@ RECURRENCE_TRIVIAL_MESSAGES = frozenset(
 
 
 def recurrence_tokens(value: str) -> set[str]:
+    """Extract meaningful bounded tokens used to compare conversation topics."""
     return {
         token.casefold()
         for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9'-]{2,}", value)
@@ -91,6 +92,7 @@ def recurrence_tokens(value: str) -> set[str]:
 
 
 def context_material(context: _ConversationContext) -> str:
+    """Flatten bounded conversation evidence into text for overlap checks."""
     return " ".join(
         (
             context.title,
@@ -102,6 +104,7 @@ def context_material(context: _ConversationContext) -> str:
 
 
 def is_substantial_message(text: str) -> bool:
+    """Reject greetings and short acknowledgements as recurrence candidates."""
     normalized = re.sub(r"\s+", " ", text.casefold()).strip()
     if normalized in RECURRENCE_TRIVIAL_MESSAGES:
         return False
@@ -118,6 +121,7 @@ def has_meaningful_overlap(
     matched_title: str,
     current_title: str,
 ) -> bool:
+    """Require repeated content or title terms before linking two conversations."""
     current_tokens = recurrence_tokens(text)
     if len(current_tokens) < 3:
         return False
@@ -129,7 +133,10 @@ def has_meaningful_overlap(
 
 
 def same_bounded_text(first: Any, second: Any, limit: int) -> bool:
+    """Compare values after the same bounded whitespace normalization."""
+
     def normalize(value: Any) -> str:
+        """Normalize one value without retaining unbounded text."""
         return re.sub(r"\s+", " ", str(value or "")).strip()[:limit].casefold()
 
     return normalize(first) == normalize(second)

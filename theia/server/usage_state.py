@@ -300,6 +300,7 @@ class CodexUsageStateMixin:  # pylint: disable=no-member
     def theia_usage(
         self, *, now: float | None = None, date_value: str | None = None
     ) -> dict[str, Any]:
+        """Return aggregate token, activity, and bounded local usage metrics."""
         totals = self._token_usage_breakdown(None)
         for snapshot in self._usage_threads.values():
             for key in _TOKEN_USAGE_KEYS:

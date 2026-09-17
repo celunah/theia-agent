@@ -238,6 +238,7 @@ class TheiaBot(commands.Bot):
                 requested_id: str,
                 requested_replacement: str | None,
             ) -> tuple[bool, str]:
+                """Apply a recovered memory confirmation with fresh authorization."""
                 from .support import _guild_id, _is_server_admin
                 from ..core import _is_super_admin_user
 
@@ -313,6 +314,7 @@ class TheiaBot(commands.Bot):
                 image_paths: tuple[Path, ...],
                 view: _ImageResultView,
             ) -> None:
+                """Route a recovered image view's follow-up to the bot handler."""
                 await _run_image_follow_up_callback(
                     interaction,
                     prompt,

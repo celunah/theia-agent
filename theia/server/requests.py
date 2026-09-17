@@ -40,6 +40,8 @@ _SESSION_CLEANUP_RETRY_DELAY = 0.1
 
 
 class CodexRequestMixin:
+    """Build and recover user turns across the local App Server boundary."""
+
     if TYPE_CHECKING:
         _model: str | None
         _approval_level: str

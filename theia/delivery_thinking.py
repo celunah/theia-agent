@@ -7,18 +7,22 @@ GENERIC_THINKING_DELAY = 5.0
 
 
 class GenericThinkingStatus:
+    """Show a delayed thinking indicator while a response has no visible output."""
+
     def __init__(self, delivery: Any) -> None:
         self.delivery = delivery
         self.delay = GENERIC_THINKING_DELAY
         self.task: asyncio.Task[None] | None = None
 
     def cancel(self) -> None:
+        """Cancel the pending indicator task, if one exists."""
         task = self.task
         self.task = None
         if task is not None and not task.done():
             task.cancel()
 
     def schedule(self) -> None:
+        """Schedule the indicator unless delivery has already produced status."""
         if (
             self.delivery.status_message is not None
             or self.delivery.thinking_summary is not None

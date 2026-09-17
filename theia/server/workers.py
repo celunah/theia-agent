@@ -75,6 +75,8 @@ logger = _codex_logger()
 
 
 class CodexWorkerMixin:
+    """Run disposable recap, presence, and attachment work in bounded scopes."""
+
     if TYPE_CHECKING:
         _model: str | None
         _approval_level: str

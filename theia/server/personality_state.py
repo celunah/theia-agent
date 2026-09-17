@@ -61,6 +61,8 @@ logger = _codex_logger()
 
 
 class CodexPersonalityStateMixin:
+    """Expose scoped personality profiles without mixing them into Codex state."""
+
     if TYPE_CHECKING:
         _model: str | None
 
