@@ -39,6 +39,7 @@ private, owner-locked explorer: users can inspect their own entries, server
 administrators can inspect the current server, and Super Admins can inspect
 broader scopes. The full capability inventory is in
 [`THEIA_FEATURES.md`](THEIA_FEATURES.md).
+Entries are shown newest-first with their UTC calendar date.
 
 Its Recent events feed shows bounded timestamps, severity, and stable event
 titles. Technical event details remain available through its diagnostic view.
@@ -93,8 +94,9 @@ running the Compose command.
 
 The mounted directories should be owned by that identity. On container startup,
 Theia repairs ownership of the runtime and workspace mounts, verifies access as
-that identity, and then drops container privileges. If access still fails,
-startup stops with a `FATAL` message instead of entering a broken run loop.
+that identity, and then drops container privileges. If access still fails, or
+another startup component cannot initialize, the Lighthouse remains available
+with a `FATAL` degraded state instead of hiding the startup failure.
 
 Administrator requests can inspect the private `.theia` runtime when needed,
 but operations there always require approval.

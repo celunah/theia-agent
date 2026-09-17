@@ -228,20 +228,21 @@ class CodexPersonalityStateMixin:
                     or not isinstance(text, str)
                 ):
                     continue
+                generated_at = self._memory_timestamp(item.get("generated_at"))
+                if generated_at is None:
+                    generated_at = self._memory_timestamp(f"{day}T00:00:00+00:00")
                 record = recap_record(
                     source_scope=server_scope,
                     scope_keys=(server_scope, user_scope),
                     source_key=f"{raw_scope}\0{day}",
                     day=day,
                     text=text,
-                    generated_at=self._memory_timestamp(item.get("generated_at")),
+                    generated_at=generated_at,
                     character_name=character_name,
                     character_slug=character_slug,
                 )
                 if record is not None:
                     records.append(record)
-                if len(records) >= MEMORY_RECORD_MAX_COUNT:
-                    return records
         return records
 
     def _memory_records(
@@ -268,8 +269,6 @@ class CodexPersonalityStateMixin:
                     source_category=category,
                 )
             )
-            if len(records) >= MEMORY_RECORD_MAX_COUNT:
-                return records[:MEMORY_RECORD_MAX_COUNT]
         records.extend(
             self._memory_recap_records(
                 character_name=character_name,
@@ -294,6 +293,15 @@ class CodexPersonalityStateMixin:
                 )
                 if record is not None:
                     records.append(record)
+        records.sort(
+            key=lambda record: (
+                record.created_at
+                if record.created_at is not None
+                else record.updated_at or 0.0,
+                record.ordinal,
+            ),
+            reverse=True,
+        )
         return records[:MEMORY_RECORD_MAX_COUNT]
 
     @staticmethod

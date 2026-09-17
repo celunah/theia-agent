@@ -247,9 +247,9 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         self.assertEqual(
             result["entries"],
             [
-                "- First durable fact\nwith more context",
-                "- Second durable fact",
                 "- The user prefers concise replies.",
+                "- Second durable fact",
+                "- First durable fact\nwith more context",
             ],
         )
 

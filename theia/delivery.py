@@ -22,6 +22,7 @@ from .core import (
 )
 from .customization import CustomizationError
 from .delivery_text import _format_thought_duration, _split_pages
+from .server.memory_records import memory_display_date, memory_timestamp
 from .delivery_thinking import GenericThinkingStatus
 from .ui import (
     _PersistentViewMixin,
@@ -499,6 +500,14 @@ class _MemoryView(_PersistentViewMixin, discord.ui.View):
                         },
                     }
                 )
+        normalized.sort(
+            key=lambda record: (
+                memory_timestamp(record.get("created_at"))
+                or memory_timestamp(record.get("updated_at"))
+                or 0.0
+            ),
+            reverse=True,
+        )
         return normalized
 
     def _add_button(
@@ -585,7 +594,9 @@ class _MemoryView(_PersistentViewMixin, discord.ui.View):
             record_scope = _safe_intermediate_text(
                 metadata.get("scope") or record.get("scope"), 60
             )
-            updated = _safe_intermediate_text(metadata.get("updated"), 40) or "unknown"
+            updated = memory_display_date(
+                record.get("updated_at") or record.get("created_at")
+            )
             provenance = (
                 f"Source: {source or 'memory'} | Scope: {record_scope or 'unknown'} "
                 f"| Updated: {updated}"

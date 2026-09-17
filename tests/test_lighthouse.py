@@ -1,5 +1,6 @@
 # pylint: disable=wildcard-import,unused-wildcard-import,undefined-variable
 import io
+import tempfile
 
 from rich.console import Console
 from rich.text import Text
@@ -251,7 +252,10 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
                 return_value={"scope": "server", "name": "cel"},
             ):
                 server_character = server._lighthouse_character(
-                    SimpleNamespace(key="guild:42:channel:1:user:7")
+                    cast(
+                        main._Session,
+                        SimpleNamespace(key="guild:42:channel:1:user:7"),
+                    )
                 )
             with patch.object(
                 server,
@@ -259,7 +263,10 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
                 return_value={"scope": "me", "name": "cel"},
             ):
                 user_character = server._lighthouse_character(
-                    SimpleNamespace(key="guild:42:channel:1:user:7")
+                    cast(
+                        main._Session,
+                        SimpleNamespace(key="guild:42:channel:1:user:7"),
+                    )
                 )
 
         self.assertEqual(global_character["source"], "global")
@@ -956,6 +963,21 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
         heartbeat.assert_not_awaited()
         await view.close()
 
+    async def test_unexpected_lighthouse_start_failure_is_fatal_in_shared_health(self):
+        output = _TTYBuffer()
+        codex = SimpleNamespace(
+            lighthouse_snapshot=Mock(return_value=_snapshot()),
+            record_startup_failure=Mock(),
+        )
+        view = LighthouseView(codex, output=output)
+
+        with patch("rich.console.Console", side_effect=RuntimeError("private detail")):
+            self.assertFalse(await view.start())
+
+        codex.record_startup_failure.assert_called_once_with(
+            "Theia Lighthouse could not start.", block=False
+        )
+
     async def test_interactive_view_updates_and_heartbeat_is_transport_only(self):
         states = [_snapshot(action="Idle"), _snapshot(action="Processing request")]
         calls: list[str] = []
@@ -1134,6 +1156,69 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["state"], "degraded")
         self.assertEqual(result["consecutive_failures"], 1)
+
+    async def test_any_codex_start_exception_becomes_a_fatal_lighthouse_state(
+        self,
+    ) -> None:
+        server = main.CodexAppServer()
+        server._start_locked = AsyncMock(side_effect=RuntimeError("private detail"))
+
+        with self.assertRaises(RuntimeError):
+            await server.start()
+
+        snapshot = server.lighthouse_snapshot()
+        self.assertEqual(snapshot["startup"]["status"], "degraded")
+        self.assertEqual(snapshot["startup"]["severity"], "FATAL")
+        self.assertEqual(
+            snapshot["startup"]["reason"],
+            "Theia could not start the Codex App Server.",
+        )
+        self.assertIn(
+            "Status       FATAL · Theia could not start the Codex App Server.",
+            render_lighthouse(snapshot),
+        )
+        self.assertIn("FATAL    Fatal startup failure", render_lighthouse(snapshot))
+        with self.assertRaisesRegex(main.CodexAppServerError, "FATAL"):
+            await server.start()
+        server._start_locked.assert_awaited_once_with()
+
+    async def test_setup_hook_keeps_lighthouse_alive_when_startup_services_fail(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "THEIA_HOME": str(root / "runtime"),
+                        "THEIA_STATE": str(root / "runtime" / "sessions.json"),
+                        "CODEX_CWD": str(root / "workspace"),
+                    },
+                ),
+                patch("theia.server.state.prepare_runtime_storage", return_value=False),
+                patch(
+                    "discord.ext.commands.Bot.setup_hook",
+                    new=AsyncMock(side_effect=RuntimeError("discord")),
+                ),
+            ):
+                bot = main.TheiaBot()
+                bot._persistent_views.restore = Mock(side_effect=RuntimeError("views"))
+                bot.lighthouse.start = AsyncMock(return_value=False)
+                bot.codex.start = AsyncMock(side_effect=RuntimeError("codex"))
+                bot.tree.sync = AsyncMock(side_effect=RuntimeError("sync"))
+                bot.presence.start = AsyncMock(side_effect=RuntimeError("presence"))
+                bot.rich_presence.start = AsyncMock(
+                    side_effect=RuntimeError("rich presence")
+                )
+                bot.recaps.enabled = False
+
+                with patch("asyncio.create_task", side_effect=RuntimeError("tasks")):
+                    await bot.setup_hook()
+
+                self.assertEqual(bot.codex.startup_snapshot()["severity"], "FATAL")
+                self.assertIn("FATAL", bot.codex.lighthouse_snapshot()["action"])
+                bot.lighthouse.start.assert_awaited_once()
 
     def test_compose_allocates_a_tty_for_lighthouse_view(self) -> None:
         compose = Path("compose.yaml").read_text(encoding="utf-8")

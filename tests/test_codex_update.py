@@ -149,11 +149,12 @@ class CodexUpdaterTests(unittest.IsolatedAsyncioTestCase):
     async def test_explicit_cli_path_is_not_replaced_by_managed_update(self) -> None:
         with patch.dict(os.environ, {"THEIA_CODEX_CLI": "/explicit/codex"}):
             server = main.CodexAppServer()
-            server._codex_updater.maybe_update = AsyncMock()  # type: ignore[method-assign]
+            maybe_update = AsyncMock()
+            server._codex_updater.maybe_update = maybe_update  # type: ignore[method-assign]
             result = await server._maybe_update_codex()
 
         self.assertEqual(result.status, "skipped")
-        server._codex_updater.maybe_update.assert_not_called()
+        maybe_update.assert_not_awaited()
 
 
 class CodexConfigurationTests(unittest.TestCase):

@@ -103,6 +103,24 @@ def _safe_timestamp(value: Any) -> float | None:
     return timestamp if 0 < timestamp < 4102444800 else None
 
 
+def memory_timestamp(value: Any) -> float | None:
+    """Parse a bounded timestamp from current or persisted view data."""
+    if isinstance(value, str):
+        try:
+            value = float(value.strip())
+        except ValueError:
+            return None
+    return _safe_timestamp(value)
+
+
+def memory_display_date(value: Any) -> str:
+    """Return a stable UTC calendar date for a memory timestamp."""
+    timestamp = memory_timestamp(value)
+    if timestamp is None:
+        return "unknown"
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).date().isoformat()
+
+
 def _record_id(
     *,
     source_file: str,
@@ -228,20 +246,12 @@ class MemoryRecord:
 
     @property
     def display_metadata(self) -> dict[str, str]:
-        updated = "unknown"
-        if self.updated_at is not None:
-            age = max(0.0, time.time() - self.updated_at)
-            updated = (
-                "recently"
-                if age < 86400
-                else datetime.fromtimestamp(self.updated_at, tz=timezone.utc)
-                .date()
-                .isoformat()
-            )
         return {
             "source": self.source_category.replace("_", " "),
             "scope": self.display_scope,
-            "updated": updated,
+            "updated": memory_display_date(
+                self.updated_at if self.updated_at is not None else self.created_at
+            ),
         }
 
     def to_dict(self) -> dict[str, Any]:

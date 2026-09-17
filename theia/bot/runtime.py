@@ -477,16 +477,71 @@ class TheiaBot(commands.Bot):
 
     async def setup_hook(self) -> None:
         """Start Codex, synchronize slash commands, and begin background services."""
-        await super().setup_hook()
-        self._persistent_views.restore(self, self._restore_persistent_view)
-        await self.codex.start()
-        await self.tree.sync()
-        await self.presence.start()
-        await self.rich_presence.start()
-        await self.lighthouse.start()
-        self._retention_task = asyncio.create_task(self._retention_loop())
-        if self.recaps.enabled:
-            self._nightly_recap_task = asyncio.create_task(self._nightly_recap_loop())
+        try:
+            await super().setup_hook()
+        except Exception as exc:  # noqa: BLE001 - preserve the operator dashboard
+            self.codex.record_startup_failure(
+                "Theia's Discord runtime could not initialize.", block=False
+            )
+            logger.critical(
+                "FATAL: Theia startup degraded (component=Discord runtime, error=%s)",
+                type(exc).__name__,
+            )
+        try:
+            self._persistent_views.restore(self, self._restore_persistent_view)
+        except Exception as exc:  # noqa: BLE001 - preserve the operator dashboard
+            self.codex.record_startup_failure(
+                "Theia persistent views could not be restored.", block=False
+            )
+            logger.critical(
+                "FATAL: Theia startup degraded (component=persistent views, error=%s)",
+                type(exc).__name__,
+            )
+        try:
+            await self.lighthouse.start()
+        except Exception as exc:  # noqa: BLE001 - preserve startup diagnostics
+            self.codex.record_startup_failure(
+                "Theia Lighthouse could not start.", block=False
+            )
+            logger.critical(
+                "FATAL: Theia startup degraded (component=Lighthouse, error=%s)",
+                type(exc).__name__,
+            )
+        for operation, reason in (
+            (self.codex.start, "Theia could not start the Codex App Server."),
+            (self.tree.sync, "Theia Discord commands could not be synchronized."),
+            (self.presence.start, "Theia presence could not start."),
+            (self.rich_presence.start, "Theia rich presence could not start."),
+        ):
+            try:
+                await operation()
+            except Exception as exc:  # noqa: BLE001 - keep Lighthouse available
+                self.codex.record_startup_failure(reason, block=False)
+                logger.critical(
+                    "FATAL: Theia startup degraded (error=%s)", type(exc).__name__
+                )
+        try:
+            retention_coroutine = self._retention_loop()
+            try:
+                self._retention_task = asyncio.create_task(retention_coroutine)
+            except Exception:
+                retention_coroutine.close()
+                raise
+            if self.recaps.enabled:
+                recap_coroutine = self._nightly_recap_loop()
+                try:
+                    self._nightly_recap_task = asyncio.create_task(recap_coroutine)
+                except Exception:
+                    recap_coroutine.close()
+                    raise
+        except Exception as exc:  # noqa: BLE001 - keep Lighthouse available
+            self.codex.record_startup_failure(
+                "Theia background services could not start.", block=False
+            )
+            logger.critical(
+                "FATAL: Theia startup degraded (component=background services, error=%s)",
+                type(exc).__name__,
+            )
 
     async def close(self) -> None:
         """Stop background services and close Discord and Codex resources in order."""

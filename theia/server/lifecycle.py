@@ -80,7 +80,20 @@ class CodexLifecycleMixin:
     async def start(self) -> None:
         """Launch and initialize Codex while serializing lifecycle changes."""
         async with self._lifecycle_lock:
-            await self._start_locked()
+            if getattr(self, "_startup_blocked", False):
+                reason = (
+                    getattr(self, "_startup_reason", None) or "Theia could not start."
+                )
+                self._record_runtime_event("codex_start_failed")
+                raise CodexAppServerError(f"FATAL: {reason}")
+            try:
+                await self._start_locked()
+            except Exception:
+                self._record_runtime_event("codex_start_failed")
+                self.record_startup_failure(
+                    "Theia could not start the Codex App Server."
+                )
+                raise
 
     async def _start_locked(self, *, allow_database_repair: bool = True) -> None:
         """Launch and initialize the project-local Codex App Server process."""
@@ -177,6 +190,7 @@ class CodexLifecycleMixin:
                 )
             if not self._memory_recovery_active:
                 self._start_memory_watchdog()
+            self._mark_startup_ready()
             logger.info("Codex App Server is ready")
             self._record_runtime_event("codex_connected")
         except BaseException as exc:
@@ -578,6 +592,9 @@ class CodexLifecycleMixin:
             logger.error(
                 "Codex App Server memory recovery failed (error=%s)",
                 type(exc).__name__,
+            )
+            self.record_startup_failure(
+                "Theia could not restart the Codex App Server after memory pressure."
             )
         finally:
             self._memory_recovery_active = False

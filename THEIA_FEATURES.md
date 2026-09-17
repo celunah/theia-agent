@@ -73,6 +73,8 @@ interactive TTY is available. In an interactive TTY it owns the terminal in a
 full-screen view, routes structured events into the dashboard, and preserves
 warnings, errors, and tracebacks through the logging diagnostics path. It never
 creates model requests beyond its transport heartbeat. Its Session display
+also exposes startup health; initialization failures remain visible as a
+`FATAL` degraded state instead of aborting before the dashboard can render.
 reflects the explicitly selected or resumed session plus unfinished normal
 turns, shows the current routing scope, and reports concurrent sessions without
 exposing Discord identifiers. Recent events use full timestamps, severity, and
@@ -103,7 +105,9 @@ configured memory database. Users can choose `me`, server administrators can
 choose the current `server`, and Super Admins can choose `everyone` or a
 targeted user/server scope. Each entry has bounded provenance and a stable
 record identifier; search, inspect, forget, and confirmed edit operations are
-available without requiring migration of existing Markdown memory files.
+available without requiring migration of existing Markdown memory files. Entries
+show a UTC calendar date and are ordered with the most recently added memory
+first.
 
 Each isolated conversation also has a temporary simulated mood. It derives a
 resting affect from the active personality, uses a bounded private Codex
@@ -223,8 +227,9 @@ agent state.
   when needed, and the device-code flow is used only when no usable cache remains.
 - Docker Compose does not implicitly create Theia's bind-mounted directories.
   Theia repairs their ownership at startup, verifies runtime and workspace
-  access after dropping to the configured container identity, and stops with a
-  `FATAL` startup message if the permissions remain unusable.
+  access after dropping to the configured container identity. If permissions or
+  another startup component remain unusable, Lighthouse reports a `FATAL`
+  degraded startup state.
 - Runtime `.env` configuration is found from the working directory, compiled
   executable directory, or source project root and is never bundled into the
   executable.

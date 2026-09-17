@@ -96,6 +96,7 @@ from .realtime import CodexRealtimeMixin
 from .self_improvement import CodexSelfImprovementMixin
 from .workers import CodexWorkerMixin
 from .worker_diagnostics import record_current_worker_timeout
+from .startup import CodexStartupMixin
 
 logger = _codex_logger()
 
@@ -145,6 +146,7 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
     CodexWorkerMixin,
     CodexTransportMixin,
     CodexNotificationMixin,
+    CodexStartupMixin,
 ):
     """Own the local Codex process and map Discord sessions to Codex threads.
 
@@ -179,8 +181,6 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
         self._codex_update_skip_once = False
         self._server_tasks: set[asyncio.Task[Any]] = set()
         self._runtime_events: deque[dict[str, Any]] = deque(maxlen=100)
-        # The active key points at the existing _Session object; it is not a
-        # second session cache and is intentionally transient across restarts.
         self._lighthouse_active_session_key: str | None = None
         self._heartbeat_last_success_at: float | None = None
         self._heartbeat_last_attempt_at: float | None = None
@@ -485,11 +485,12 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
         self.account: dict[str, Any] | None = None
         self.requires_openai_auth = True
         self._auth_imported = False
-        self._migrate_legacy_state()
-        self._load_state()
-        if self._state_needs_cleanup:
-            self._persist_state()
-            self._state_needs_cleanup = False
+        if not getattr(self, "_startup_blocked", False):
+            self._migrate_legacy_state()
+            self._load_state()
+            if self._state_needs_cleanup:
+                self._persist_state()
+                self._state_needs_cleanup = False
         logger.debug(
             "Codex layer initialized (adaptive_reasoning=%s, approval_level=%s, "
             "self_improvement=%s, codex_auto_update=%s, memory_roots=%d, "

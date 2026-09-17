@@ -16,6 +16,10 @@ class MemoryRecordTests(unittest.TestCase):
             (memories / "users" / "9" / "USER.md").write_text(
                 "- User preference for concise answers.\n", encoding="utf-8"
             )
+            os.utime(
+                memories / "users" / "9" / "USER.md",
+                (datetime(2024, 1, 2, tzinfo=timezone.utc).timestamp(),) * 2,
+            )
             (memories / "servers" / "42" / "MEMORY.md").write_text(
                 "- Current server release plan.\n", encoding="utf-8"
             )
@@ -69,7 +73,7 @@ class MemoryRecordTests(unittest.TestCase):
         self.assertEqual(len(own["records"]), 1)
         self.assertEqual(own["records"][0]["source_category"], "user_memory")
         self.assertEqual(own["records"][0]["scope"], "user scope")
-        self.assertEqual(own["records"][0]["display_metadata"]["updated"], "recently")
+        self.assertEqual(own["records"][0]["display_metadata"]["updated"], "2024-01-02")
         self.assertEqual(len(current_server["records"]), 1)
         self.assertEqual(
             current_server["records"][0]["source_category"], "server_memory"
@@ -77,6 +81,52 @@ class MemoryRecordTests(unittest.TestCase):
         self.assertEqual(len(all_records["records"]), 3)
         self.assertNotIn("/memories/", str(all_records))
         self.assertNotIn("secret", own["records"][0]["text"].casefold())
+
+    def test_memory_view_orders_newest_added_record_first(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            memories = root / "memories" / "users" / "9"
+            memories.mkdir(parents=True)
+            older = memories / "MEMORY.md"
+            newer = memories / "USER.md"
+            older.write_text("- Older memory.\n", encoding="utf-8")
+            newer.write_text("- Newer memory.\n", encoding="utf-8")
+            os.utime(
+                older,
+                (datetime(2024, 1, 2, tzinfo=timezone.utc).timestamp(),) * 2,
+            )
+            os.utime(
+                newer,
+                (datetime(2024, 1, 3, tzinfo=timezone.utc).timestamp(),) * 2,
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "THEIA_HOME": str(root / "theia"),
+                    "THEIA_STATE": str(root / "state.json"),
+                    "CODEX_MEMORY_ROOTS": str(root / "memories"),
+                    "CODEX_HOME": str(root / "codex"),
+                    "HERMES_HOME": str(root / "hermes"),
+                },
+            ):
+                server = self._server(root)
+                result = server.memory_view(
+                    "guild:42:channel:7:user:9",
+                    "me",
+                    actor_user_id=9,
+                    actor_guild_id=42,
+                    server_admin=False,
+                    super_admin=False,
+                )
+
+        self.assertEqual(
+            [record["text"] for record in result["records"]],
+            ["- Newer memory.", "- Older memory."],
+        )
+        self.assertEqual(
+            [record["display_metadata"]["updated"] for record in result["records"]],
+            ["2024-01-03", "2024-01-02"],
+        )
 
     def test_search_inspect_and_confirmed_forget_preserve_other_records(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -244,6 +294,32 @@ class MemoryRecordTests(unittest.TestCase):
 
 
 class MemoryViewTests(unittest.TestCase):
+    def test_memory_view_renders_newest_record_and_calendar_date(self) -> None:
+        view = main._MemoryView(
+            [
+                {
+                    "record_id": "0123456789abcdef01234567",
+                    "text": "Older memory",
+                    "created_at": datetime(2024, 1, 2, tzinfo=timezone.utc).timestamp(),
+                },
+                {
+                    "record_id": "fedcba9876543210fedcba98",
+                    "text": "Newer memory",
+                    "created_at": datetime(2024, 1, 3, tzinfo=timezone.utc).timestamp(),
+                },
+            ],
+            character_name="Celune",
+            owner_id=7,
+        )
+
+        current = view._current_record()
+        self.assertIsNotNone(current)
+        assert current is not None
+        self.assertEqual(current["text"], "Newer memory")
+        description = view.embed().description or ""
+        self.assertIn("Updated: 2024-01-03", description)
+        self.assertNotIn("recent", description.casefold())
+
     def test_memory_embed_supports_customized_total_and_page_labels(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             customizer = main.FrontendCustomizationStore(

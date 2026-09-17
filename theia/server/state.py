@@ -95,11 +95,9 @@ class CodexStateMixin:
                 Path(self._cwd),
                 self._state_path,
             )
-        except StoragePermissionError as exc:
-            logger.critical("FATAL: Theia %s permissions remain unusable", exc.area)
-            raise CodexAppServerError(
-                "FATAL: Theia storage permissions are unusable."
-            ) from exc
+        except StoragePermissionError:
+            self.record_startup_failure("Theia storage permissions are unusable.")
+            return
         if repaired:
             logger.info("Repaired Theia runtime and workspace ownership")
 

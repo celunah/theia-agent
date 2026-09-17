@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
 import unittest
@@ -85,7 +86,7 @@ class StoragePermissionTests(unittest.TestCase):
             ):
                 permissions.prepare_runtime_storage(runtime, workspace)
 
-    def test_codex_startup_logs_fatal_and_stops_on_storage_failure(self) -> None:
+    def test_codex_startup_exposes_fatal_storage_failure_to_lighthouse(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             error = permissions.StoragePermissionError(
@@ -105,12 +106,14 @@ class StoragePermissionTests(unittest.TestCase):
                     side_effect=error,
                 ),
                 self.assertLogs("theia.codex", level="CRITICAL") as captured,
-                self.assertRaises(main.CodexAppServerError) as raised,
             ):
-                main.CodexAppServer()
+                server = main.CodexAppServer()
 
             self.assertIn("FATAL", "\n".join(captured.output))
-            self.assertIn("FATAL", str(raised.exception))
+            self.assertEqual(server.startup_snapshot()["status"], "degraded")
+            self.assertEqual(server.startup_snapshot()["severity"], "FATAL")
+            with self.assertRaisesRegex(main.CodexAppServerError, "FATAL"):
+                asyncio.run(server.start())
 
     def test_compose_prevents_implicit_bind_source_creation(self) -> None:
         compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")

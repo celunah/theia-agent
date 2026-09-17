@@ -312,6 +312,7 @@ class CodexLighthouseMixin:
         if current is None and active_sessions:
             current = active_sessions[-1]
         session, turn = current or (None, None)
+        startup = self.startup_snapshot()
         session_status = "inactive"
         session_reason = None
         if session is not None:
@@ -337,6 +338,9 @@ class CodexLighthouseMixin:
             action = "Processing request"
         else:
             action = "Idle"
+        if startup["status"] == "degraded":
+            reason = startup.get("reason") or "Theia could not start."
+            action = f"FATAL · {_safe_intermediate_text(reason, 120)}"
         try:
             transport = self._codex_transport_health()
         except Exception:  # noqa: BLE001
@@ -430,6 +434,7 @@ class CodexLighthouseMixin:
                 if callable(getattr(self, "cleanup_snapshot", None))
                 else {"status": "unknown", "reason": None},
             },
+            "startup": startup,
             "events": self.runtime_events(limit=12),
         }
         return snapshot
@@ -564,6 +569,14 @@ class LighthouseView:
             with contextlib.suppress(Exception):
                 snapshot["voice"] = self.voice.snapshot()
         return snapshot
+
+    def _record_startup_failure(self, reason: str) -> None:
+        """Keep an unexpected dashboard startup failure in shared health state."""
+        recorder = getattr(self.codex, "record_startup_failure", None)
+        if not callable(recorder):
+            return
+        with contextlib.suppress(Exception):
+            cast(Callable[..., Any], recorder)(reason, block=False)
 
     def diagnostic_view(self) -> str:
         """Return the explicit technical detail view without creating work."""
@@ -891,7 +904,7 @@ class LighthouseView:
             self._start_keyboard_input()
             self._task = asyncio.create_task(self._run())
             return True
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 - preserve fatal startup state
             self._restore_logging()
             self._stop_keyboard_input()
             self._text_type = None
@@ -899,7 +912,10 @@ class LighthouseView:
             if live is not None:
                 with contextlib.suppress(Exception):
                     live.stop()
-            logger.exception("Lighthouse View could not start")
+            self._record_startup_failure("Theia Lighthouse could not start.")
+            logger.error(
+                "Lighthouse View could not start (error=%s)", type(exc).__name__
+            )
             return False
 
     async def _run(self) -> None:

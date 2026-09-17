@@ -58,6 +58,7 @@ _EVENT_LABELS = {
     "codex_recovered": "Codex recovered",
     "codex_restarted": "Codex restarted",
     "presence_updated": "Presence updated",
+    "fatal": "Fatal startup failure",
 }
 
 _EVENT_WARNING_NAMES = frozenset(
@@ -91,6 +92,7 @@ _NEUTRAL_STATUS_TERMS = (
 _DEGRADED_STATUS_TERMS = (
     "failed worker",
     "degraded",
+    "fatal",
     "timeout",
     "unavailable",
 )
@@ -725,7 +727,11 @@ def _compact_parts(snapshot: dict[str, Any], *, width: int) -> dict[str, list[st
     ]
     events = _event_lines(snapshot)
     problem, severity = _latest_problem_details(snapshot)
-    issue_label = "Active warning" if severity == "WARNING" else "Active error"
+    issue_label = {
+        "WARNING": "Active warning",
+        "ERROR": "Active error",
+        "FATAL": "FATAL",
+    }.get(severity, "Active error")
     errors = [f"{issue_label}  {problem}"] if problem != "none" else []
     return {
         "header": [base[0], _separator(width)],

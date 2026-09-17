@@ -78,6 +78,21 @@ class MemoryWatchdogTests(AsyncBehaviorTestBase):
         server._start_memory_watchdog.assert_called_once_with()
         self.assertFalse(server._memory_recovery_active)
 
+    async def test_failed_memory_recovery_is_fatal_in_lighthouse(self) -> None:
+        server = main.CodexAppServer()
+        server._process = cast(Any, SimpleNamespace(returncode=None))
+        server._interrupt_active_turns = AsyncMock()
+        server._close_locked = AsyncMock()
+        server._start_locked = AsyncMock(side_effect=RuntimeError("private detail"))
+
+        await server._recover_memory_pressure(700 * 1024 * 1024)
+
+        self.assertEqual(server.startup_snapshot()["severity"], "FATAL")
+        self.assertEqual(
+            server.startup_snapshot()["reason"],
+            "Theia could not restart the Codex App Server after memory pressure.",
+        )
+
     async def test_recovery_backoff_grows_after_each_restart(self) -> None:
         server = main.CodexAppServer()
         server._process = cast(Any, SimpleNamespace(returncode=None))
