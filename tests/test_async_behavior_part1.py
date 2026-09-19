@@ -846,6 +846,47 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         self.assertIn("message 7", context)
         self.assertLessEqual(len(context.split("\n", 1)[1]), 45)
 
+    async def test_recent_history_attachments_are_carried_into_followup_context(
+        self,
+    ) -> None:
+        attachment = SimpleNamespace(
+            id=901,
+            filename="recording.ogg",
+            content_type="audio/ogg",
+            size=4,
+            read=AsyncMock(return_value=b"audio"),
+        )
+        history = _HistoryChannel(
+            [
+                SimpleNamespace(
+                    id=1,
+                    author=SimpleNamespace(display_name="Alice", bot=False),
+                    content="Here is the recording.",
+                    attachments=(attachment,),
+                    mentions=[],
+                )
+            ]
+        )
+        current = SimpleNamespace(
+            id=2,
+            channel=history,
+            author=SimpleNamespace(display_name="Alice", bot=False),
+            content="Please process that recording.",
+            attachments=[],
+            mentions=[],
+            reference=None,
+        )
+        historical: list[Any] = []
+
+        context = await main._message_context(
+            current,
+            attachment_sink=historical,
+        )
+
+        self.assertIsNotNone(context)
+        self.assertEqual(historical, [attachment])
+        self.assertIn("recording.ogg", context or "")
+
     async def test_backfill_logs_channel_id_when_history_is_forbidden(self) -> None:
         channel = _ForbiddenHistoryChannel(321)
         known_channels = dict(main.bot._known_channels)

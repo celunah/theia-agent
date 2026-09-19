@@ -56,6 +56,7 @@ from .support import (
     _is_server_admin,
     _is_thread,
     _is_user_only_install,
+    _merge_request_attachments,
     _message_context,
     _message_has_mention,
     _require_login,
@@ -1285,7 +1286,14 @@ async def _run_message_request(message: discord.Message, prompt: str) -> None:
         await _name_new_response_thread(response_channel, prompt)
         bot._participating_threads.add(response_channel.id)
         bot.codex.mark_thread_participating(response_channel.id)
-    context = await _message_context(message)
+    historical_attachments: list[Any] = []
+    context = await _message_context(
+        message,
+        attachment_sink=historical_attachments,
+    )
+    attachments = _merge_request_attachments(
+        getattr(message, "attachments", ()) or (), historical_attachments
+    )
     key = session_key(response_channel, message.author.id)
     send_kwargs: dict[str, Any] = {"mention_author": False}
     if response_channel is message.channel:
@@ -1296,7 +1304,7 @@ async def _run_message_request(message: discord.Message, prompt: str) -> None:
         channel=response_channel,
         user_id=message.author.id,
         user=message.author,
-        attachments=message.attachments,
+        attachments=attachments,
         allow_tools=_is_server_admin(message.author, response_channel),
         context=context,
         request_id=f"message:{message.id}",

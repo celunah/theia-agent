@@ -20,7 +20,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from ..colors import discord_color
-from ..server.policy import MAX_ATTACHMENT_BYTES
+from ..server.policy import MAX_ATTACHMENTS_PER_REQUEST, MAX_ATTACHMENT_BYTES
 from ..server.core import CodexAppServerError, CodexTurnCancelled
 from ..core import (
     _codex_logger,
@@ -619,12 +619,52 @@ def _render_channel_context(messages: Iterable[str]) -> str | None:
     )
 
 
+def _attachment_identity(attachment: Any) -> tuple[str, str]:
+    attachment_id = getattr(attachment, "id", None)
+    if isinstance(attachment_id, (int, str)) and str(attachment_id):
+        return ("id", str(attachment_id))
+    url = getattr(attachment, "url", None)
+    if isinstance(url, str) and url:
+        return ("url", url)
+    return (
+        "metadata",
+        "|".join(
+            (
+                str(getattr(attachment, "filename", "attachment")),
+                str(getattr(attachment, "size", "")),
+                str(getattr(attachment, "content_type", "")),
+            )
+        ),
+    )
+
+
+def _merge_request_attachments(
+    current: Iterable[Any], historical: Iterable[Any]
+) -> tuple[Any, ...]:
+    """Keep current uploads first, then add bounded unique history uploads."""
+    current_items = tuple(current)
+    if len(current_items) >= MAX_ATTACHMENTS_PER_REQUEST:
+        return current_items
+    selected = list(current_items)
+    seen = {_attachment_identity(item) for item in selected}
+    for attachment in historical:
+        identity = _attachment_identity(attachment)
+        if identity in seen:
+            continue
+        selected.append(attachment)
+        seen.add(identity)
+        if len(selected) >= MAX_ATTACHMENTS_PER_REQUEST:
+            break
+    return tuple(selected)
+
+
 async def _channel_context(
     channel: Any | None,
     *,
     before: discord.Message | None = None,
     exclude_id: int | None = None,
     extra: Iterable[discord.Message] = (),
+    attachment_sink: list[Any] | None = None,
 ) -> str | None:
     recent = await _recent_channel_messages(
         channel, before=before, exclude_id=exclude_id
@@ -643,12 +683,18 @@ async def _channel_context(
         recent.insert(0, item)
         if message_id is not None:
             seen.add(message_id)
+    if attachment_sink is not None:
+        for item in recent:
+            attachments = getattr(item, "attachments", ()) or ()
+            attachment_sink.extend(attachments)
     bot_id = getattr(bot.user, "id", None)
     lines = (_message_context_line(item, bot_id) for item in recent)
     return _render_channel_context(lines)
 
 
-async def _message_context(message: Any) -> str | None:
+async def _message_context(
+    message: Any, *, attachment_sink: list[Any] | None = None
+) -> str | None:
     """Collect bounded reply and recent-channel context for a request."""
     reference = getattr(message, "reference", None)
     resolved = getattr(reference, "resolved", None) if reference else None
@@ -658,6 +704,7 @@ async def _message_context(message: Any) -> str | None:
         before=message,
         exclude_id=getattr(message, "id", None),
         extra=extra,
+        attachment_sink=attachment_sink,
     )
 
 
