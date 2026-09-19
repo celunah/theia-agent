@@ -848,6 +848,7 @@ async def handle_request(
     thread_source: discord.Message | None = None,
     interaction_sender: SendMessage | None = None,
     allow_discord_tools: bool = True,
+    dedicated_perception: bool = False,
     image_message: Any | None = None,
     image_view: _ImageResultView | None = None,
     existing_image_paths: Iterable[Path] = (),
@@ -953,6 +954,7 @@ async def handle_request(
                     on_event=on_codex_event,
                     interaction_sender=interaction_sender,
                     allow_discord_tools=allow_discord_tools,
+                    dedicated_perception=dedicated_perception,
                 )
             except CodexTurnCancelled as exc:
                 cancelled = True

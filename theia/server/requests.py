@@ -16,6 +16,12 @@ from .policy import (
     SESSION_DELETE_AFTER,
     _MEMORY_RETRIEVAL_HINT_RE,
 )
+from .perception import (
+    CodexModalityCapabilities,
+    QwenPerceptionClient,
+    perception_context,
+    route_attachments,
+)
 from ..core import (
     BASE_PRIORS,
     DEFAULT_MODE,
@@ -50,6 +56,59 @@ class CodexRequestMixin:
 
     def __getattr__(self, name: str) -> Any:
         raise AttributeError(name)
+
+    def _perception_client(self) -> Any | None:
+        """Lazily load the optional media client without touching voice state."""
+        if "_qwen_perception_client" not in self.__dict__:
+            self.__dict__["_qwen_perception_client"] = (
+                QwenPerceptionClient.from_environment(
+                    usage_callback=self._record_perception_usage
+                )
+            )
+        return self.__dict__["_qwen_perception_client"]
+
+    async def _prepare_perception_context(
+        self,
+        prompt: str,
+        attachments: tuple[Any, ...],
+        *,
+        dedicated_requested: bool,
+    ) -> tuple[tuple[Any, ...], str]:
+        """Inspect Codex capabilities before selecting a disjoint Qwen route."""
+        client = self._perception_client()
+        if client is None or not getattr(client, "available", False) or not attachments:
+            return attachments, ""
+        try:
+            capabilities = CodexModalityCapabilities.from_snapshot(
+                await self.provider_capabilities(model=self._model)
+            )
+        except Exception as exc:  # noqa: BLE001 - capability probing is optional
+            logger.info(
+                "Codex modality capability probe unavailable (error=%s)",
+                type(exc).__name__,
+            )
+            capabilities = CodexModalityCapabilities()
+        route = route_attachments(
+            attachments,
+            capabilities,
+            qwen_available=True,
+            dedicated_requested=dedicated_requested,
+        )
+        if not route.qwen_indices:
+            return attachments, ""
+        qwen_attachments = tuple(attachments[index] for index in route.qwen_indices)
+        native_attachments = tuple(attachments[index] for index in route.native_indices)
+        try:
+            report = await client.perceive_attachments(
+                qwen_attachments, instruction=prompt
+            )
+        except Exception as exc:  # noqa: BLE001 - external provider boundary
+            logger.warning("Qwen perception failed (error=%s)", type(exc).__name__)
+            return native_attachments, (
+                "The requested media perception service was unavailable. "
+                "Treat the omitted media as unavailable and do not infer its contents."
+            )
+        return native_attachments, perception_context(report)
 
     async def _run_turn_with_recovery(
         self,
@@ -453,6 +512,7 @@ class CodexRequestMixin:
         on_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
         interaction_sender: Callable[..., Awaitable[Any]] | None = None,
         allow_discord_tools: bool = True,
+        dedicated_perception: bool = False,
     ) -> str:
         """Run a user request in a session and return its completed response text."""
         await self._ensure_running()
@@ -468,6 +528,17 @@ class CodexRequestMixin:
         )
         assert session.lock is not None
         attachment_list = tuple(attachments)
+        (
+            attachment_list,
+            perception_report_context,
+        ) = await self._prepare_perception_context(
+            prompt,
+            attachment_list,
+            dedicated_requested=dedicated_perception,
+        )
+        prompt_for_codex = prompt
+        if perception_report_context:
+            prompt_for_codex = f"{prompt}\n\n{perception_report_context}"
         logger.info(
             "Codex request accepted (prompt_characters=%d, attachments=%d, "
             "tools_allowed=%s)",
@@ -540,6 +611,10 @@ class CodexRequestMixin:
                     self._tool_instructions(allow_tools)
                 ),
             }
+            if perception_report_context:
+                prompt_attribution["routing_context"] = estimated_tokens(
+                    perception_report_context
+                )
             memory_context = None
             memory_retrieval_used = bool(
                 allow_tools and _MEMORY_RETRIEVAL_HINT_RE.search(user_prompt or prompt)
@@ -560,7 +635,7 @@ class CodexRequestMixin:
             )
             turn_prompt, summary_injected = self._turn_prompt_with_summary(
                 session,
-                prompt,
+                prompt_for_codex,
                 memory_context=memory_context,
                 attention_transition=attention_transition,
                 self_model=self_model or {},

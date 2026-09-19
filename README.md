@@ -112,6 +112,19 @@ For Qwen Audio middleware, set `THEIA_AUDIO_PROVIDER=qwen` (or leave it as
 must implement Theia's bounded audio-provider event protocol; Qwen remains an
 audio middleware service and does not receive Theia's personality or tools.
 
+Uploaded-media perception is a separate, opt-in path. Set
+`THEIA_QWEN_PERCEPTION_ENABLED=true` and configure a Model Studio compatible
+`THEIA_QWEN_PERCEPTION_BASE_URL` and private `THEIA_QWEN_PERCEPTION_API_KEY`.
+The default model is `qwen3.8-omni-flash`. Before Qwen is called, Theia reads
+the current Codex modality capabilities and sends natively supported media
+directly to Codex. Qwen receives only unsupported, oversized, or explicitly
+dedicated-perception media; the same item is never sent to both providers in
+one request. The perception report is neutral JSON context, while Codex still
+controls reasoning, personality, tools, and the final response. The current
+checkout has no encrypted Qwen credential store, so the adapter uses the
+private deployment environment as its credential hook and never reuses the
+realtime voice token automatically.
+
 Set `THEIA_CODEX_AUTO_UPDATE=true` to let Theia check for and stage official
 Codex CLI updates in her private runtime. Updates are disabled by default and
 are deferred safely around active work. The update interval and timeout can be

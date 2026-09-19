@@ -194,6 +194,18 @@ and speech output while Theia retains identity, personality, memory, tools,
 permissions, and final conversational decisions. `auto` safely falls back to
 the existing custom STT/TTS or Codex Realtime providers.
 
+Optional uploaded-media perception is isolated from that voice path. With
+`THEIA_QWEN_PERCEPTION_ENABLED=true`, Theia queries the current Codex modality
+capabilities before routing each image, audio, or video attachment. Supported
+media remain native Codex inputs; only unsupported, over-limit, or explicitly
+dedicated-perception media go to `qwen3.8-omni-flash`, and a media item is never
+sent to both providers by the router. Qwen output is validated neutral JSON and
+injected as untrusted observational context. Perception requests, retries,
+durations, file sizes, token usage, and optional price estimates are reported
+separately under `/usage`. This checkout does not contain an encrypted Qwen
+credential database, so its optional adapter takes a private deployment API-key
+environment value and does not reuse the realtime voice token automatically.
+
 Rich Presence activity text is generated in short, low-effort ephemeral Codex
 turns with no tools, self-improvement, or session writes. Active task activity
 overrides idle activity and updates are debounced and deduplicated. Discord

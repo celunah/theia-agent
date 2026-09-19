@@ -20,6 +20,43 @@ from ..core import DEFAULT_CODEX_MODEL, _Session, _TurnState
 LONG_RUNNING_TURN_SECONDS = 60.0
 
 
+def _bounded_nonnegative_int(value: Any) -> int:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return max(0, min(value, 1_000_000_000))
+    return 0
+
+
+def _bounded_number_list(value: Any) -> list[int | None]:
+    if not isinstance(value, list):
+        return []
+    result: list[int | None] = []
+    for item in value[:10]:
+        if item is None:
+            result.append(None)
+        elif isinstance(item, int) and not isinstance(item, bool) and item >= 0:
+            result.append(min(item, 512 * 1024 * 1024))
+        else:
+            result.append(None)
+    return result
+
+
+def _bounded_float_list(value: Any) -> list[float | None]:
+    if not isinstance(value, list):
+        return []
+    result: list[float | None] = []
+    for item in value[:10]:
+        if item is None:
+            result.append(None)
+        elif isinstance(item, (int, float)) and not isinstance(item, bool):
+            number = float(item)
+            result.append(
+                max(0.0, min(number, 86400.0)) if math.isfinite(number) else None
+            )
+        else:
+            result.append(None)
+    return result
+
+
 def initialize_usage_state(server: Any) -> None:
     """Initialize usage counters added after the original state schema."""
     server._usage_api_calls = 0
@@ -27,6 +64,7 @@ def initialize_usage_state(server: Any) -> None:
     server._usage_subagent_turns = 0
     server._usage_subagent_turns_daily = {}
     server._usage_long_running_turns_daily = {}
+    server._perception_usage_records = []
 
 
 class CodexUsageStateMixin:  # pylint: disable=no-member
@@ -50,9 +88,118 @@ class CodexUsageStateMixin:  # pylint: disable=no-member
         _usage_subagent_turns: int
         _usage_subagent_turns_daily: dict[str, int]
         _usage_long_running_turns_daily: dict[str, int]
+        _perception_usage_records: list[dict[str, Any]]
         _sessions: dict[str, _Session]
         _turns: dict[str, Any]
         _persist_state: Any
+
+    def _record_perception_usage(self, value: Any) -> None:
+        """Store bounded Qwen perception metrics separately from Codex usage."""
+        if not isinstance(value, dict):
+            return
+        now = time.time()
+        record: dict[str, Any] = {
+            "day": time.strftime("%Y-%m-%d", time.gmtime(now)),
+            "recorded_at": now,
+            "provider": str(value.get("provider") or "Alibaba Model Studio")[:80],
+            "model": str(value.get("model") or "unknown")[:120],
+            "modality": str(value.get("modality") or "unknown")[:24],
+            "success": value.get("success") is True,
+            "retry_count": _bounded_nonnegative_int(value.get("retry_count")),
+        }
+        duration = value.get("duration_sec")
+        if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+            record["duration_sec"] = max(0.0, min(float(duration), 86400.0))
+        for source, target in (
+            ("input_tokens", "input_tokens"),
+            ("output_tokens", "output_tokens"),
+        ):
+            number = value.get(source)
+            if isinstance(number, int) and not isinstance(number, bool) and number >= 0:
+                record[target] = number
+        estimated_usd = value.get("estimated_usd")
+        if (
+            isinstance(estimated_usd, (int, float))
+            and not isinstance(estimated_usd, bool)
+            and math.isfinite(float(estimated_usd))
+            and estimated_usd >= 0
+        ):
+            record["estimated_usd"] = round(float(estimated_usd), 8)
+        record["file_sizes_bytes"] = _bounded_number_list(value.get("file_sizes_bytes"))
+        record["file_durations_seconds"] = _bounded_float_list(
+            value.get("file_durations_seconds")
+        )
+        self._perception_usage_records.append(record)
+        self._perception_usage_records = self._perception_usage_records[-256:]
+        self._persist_state()
+
+    def _perception_usage_snapshot(self, selected_day: str) -> dict[str, Any]:
+        records = [
+            record
+            for record in self._perception_usage_records
+            if record.get("day") == selected_day
+        ]
+        successful = sum(1 for record in records if record.get("success") is True)
+        input_values = [
+            record["input_tokens"]
+            for record in records
+            if isinstance(record.get("input_tokens"), int)
+        ]
+        output_values = [
+            record["output_tokens"]
+            for record in records
+            if isinstance(record.get("output_tokens"), int)
+        ]
+        cost_values = [
+            record["estimated_usd"]
+            for record in records
+            if isinstance(record.get("estimated_usd"), (int, float))
+        ]
+        duration = sum(
+            float(record.get("duration_sec", 0.0))
+            for record in records
+            if isinstance(record.get("duration_sec"), (int, float))
+        )
+        successful_records = [
+            record for record in records if record.get("success") is True
+        ]
+        estimated_usd = (
+            round(sum(cost_values), 8)
+            if successful_records and len(cost_values) == len(successful_records)
+            else None
+        )
+        return {
+            "provider": "Alibaba Model Studio",
+            "requests": len(records),
+            "successfulRequests": successful,
+            "failedRequests": len(records) - successful,
+            "retries": sum(
+                _bounded_nonnegative_int(record.get("retry_count"))
+                for record in records
+            ),
+            "durationSec": round(duration, 3),
+            "inputTokens": sum(input_values) if input_values else None,
+            "outputTokens": sum(output_values) if output_values else None,
+            "estimatedUsd": estimated_usd,
+            "records": [
+                {
+                    "provider": record.get("provider"),
+                    "model": record.get("model"),
+                    "modality": record.get("modality"),
+                    "durationSec": record.get("duration_sec"),
+                    "inputTokens": record.get("input_tokens"),
+                    "outputTokens": record.get("output_tokens"),
+                    "estimatedUsd": record.get("estimated_usd"),
+                    "success": record.get("success") is True,
+                    "retryCount": record.get("retry_count", 0),
+                    "fileSizesBytes": list(record.get("file_sizes_bytes", [])),
+                    "fileDurationsSeconds": list(
+                        record.get("file_durations_seconds", [])
+                    ),
+                }
+                for record in records
+            ],
+        }
 
     @staticmethod
     def _token_usage_breakdown(value: Any) -> dict[str, int]:
@@ -468,6 +615,7 @@ class CodexUsageStateMixin:  # pylint: disable=no-member
         return {
             "scope": "theia",
             "date": selected_day,
+            "perception": self._perception_usage_snapshot(selected_day),
             "exact": exact,
             "estimate": estimate,
             "detailed": {
@@ -534,6 +682,63 @@ class CodexUsageStateMixin:  # pylint: disable=no-member
         """Restore only the bounded, Theia-owned usage subsection."""
         if not isinstance(usage, dict):
             return
+        perception_records = usage.get("perception_records")
+        if isinstance(perception_records, list):
+            restored_perception: list[dict[str, Any]] = []
+            for value in perception_records[-256:]:
+                if not isinstance(value, dict):
+                    continue
+                day = value.get("day")
+                recorded_at = value.get("recorded_at", 0.0)
+                if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(day)):
+                    continue
+                if not isinstance(recorded_at, (int, float)) or isinstance(
+                    recorded_at, bool
+                ):
+                    recorded_at = 0.0
+                record = {
+                    "day": str(day),
+                    "recorded_at": max(0.0, float(recorded_at)),
+                    "provider": str(value.get("provider") or "Alibaba Model Studio")[
+                        :80
+                    ],
+                    "model": str(value.get("model") or "unknown")[:120],
+                    "modality": str(value.get("modality") or "unknown")[:24],
+                    "success": value.get("success") is True,
+                    "retry_count": _bounded_nonnegative_int(value.get("retry_count")),
+                    "file_sizes_bytes": _bounded_number_list(
+                        value.get("file_sizes_bytes")
+                    ),
+                    "file_durations_seconds": _bounded_float_list(
+                        value.get("file_durations_seconds")
+                    ),
+                }
+                for source in ("input_tokens", "output_tokens"):
+                    number = value.get(source)
+                    if (
+                        isinstance(number, int)
+                        and not isinstance(number, bool)
+                        and number >= 0
+                    ):
+                        record[source] = _bounded_nonnegative_int(number)
+                estimated_usd = value.get("estimated_usd")
+                if (
+                    isinstance(estimated_usd, (int, float))
+                    and not isinstance(estimated_usd, bool)
+                    and math.isfinite(float(estimated_usd))
+                    and estimated_usd >= 0
+                ):
+                    record["estimated_usd"] = round(float(estimated_usd), 8)
+                duration = value.get("duration_sec")
+                if (
+                    isinstance(duration, (int, float))
+                    and not isinstance(duration, bool)
+                    and math.isfinite(float(duration))
+                    and duration >= 0
+                ):
+                    record["duration_sec"] = min(float(duration), 86400.0)
+                restored_perception.append(record)
+            self._perception_usage_records = restored_perception
         usage_threads = usage.get("threads")
         if isinstance(usage_threads, dict):
             for thread_id, snapshot in usage_threads.items():
@@ -715,6 +920,9 @@ class CodexUsageStateMixin:  # pylint: disable=no-member
     def _serialize_usage_state(self) -> dict[str, Any]:
         """Return the bounded usage subsection for the atomic state writer."""
         return {
+            "perception_records": [
+                dict(record) for record in self._perception_usage_records
+            ],
             "threads": {
                 thread_id: dict(snapshot)
                 for thread_id, snapshot in self._usage_threads.items()
