@@ -32,6 +32,7 @@ class MemoryRecordTests(unittest.TestCase):
                     "THEIA_HOME": str(root / "theia"),
                     "THEIA_STATE": str(root / "state.json"),
                     "CODEX_MEMORY_ROOTS": str(memories),
+                    "HERMES_HOME": str(root / "hermes"),
                 },
             ):
                 server = self._server(root)
@@ -279,6 +280,7 @@ class MemoryRecordTests(unittest.TestCase):
                     "THEIA_HOME": str(root / "theia"),
                     "THEIA_STATE": str(root / "state.json"),
                     "CODEX_MEMORY_ROOTS": str(memories),
+                    "HERMES_HOME": str(root / "hermes"),
                 },
             ):
                 server = self._server(root)

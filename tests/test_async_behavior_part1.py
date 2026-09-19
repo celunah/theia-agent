@@ -529,7 +529,7 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
             patch("theia.bot.core.os.execv") as execv,
             patch("theia.bot.core.sys.executable", "/tmp/onefile-runtime/theia"),
             patch("theia.bot.core.sys.argv", ["/opt/theia", "--test"]),
-            patch("theia.bot.core.__compiled__", object(), create=True),
+            patch("theia.bot.voice.__compiled__", object(), create=True),
         ):
             await main._restart_in_place(delay=0)
 

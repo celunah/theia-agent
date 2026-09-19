@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import tempfile
 import time
 import unittest
@@ -152,11 +153,17 @@ class _ForbiddenHistoryChannel(_Channel):
 class AsyncBehaviorTestBase(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         """Keep default-policy tests independent of a developer's .env file."""
+        self._hermes_home = Path(tempfile.mkdtemp(prefix="theia-test-hermes-"))
         self._approval_environment = patch.dict(
-            os.environ, {"THEIA_APPROVAL_LEVEL": "high"}
+            os.environ,
+            {
+                "THEIA_APPROVAL_LEVEL": "high",
+                "HERMES_HOME": str(self._hermes_home),
+            },
         )
         self._approval_environment.start()
         self.addCleanup(self._approval_environment.stop)
+        self.addCleanup(shutil.rmtree, self._hermes_home, ignore_errors=True)
 
 
 __all__ = [
