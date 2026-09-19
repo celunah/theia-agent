@@ -12,7 +12,7 @@ Environment=THEIA_RUNTIME_DIR=%t
 Environment=THEIA_UID=%U
 Environment=THEIA_GID=%U
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus
-ExecStart=/usr/bin/docker compose -f compose.yaml -f compose.systemd.yaml up --build
+ExecStart=/usr/bin/docker compose -f compose.yaml -f compose.systemd.yaml up --build --force-recreate
 ExecStop=/usr/bin/docker compose -f compose.yaml -f compose.systemd.yaml stop --timeout 30
 Restart=on-failure
 RestartSec=10

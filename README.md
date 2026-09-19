@@ -151,6 +151,9 @@ unlocks the vault from the terminal. The encrypted vault is stored at
 `$THEIA_HOME/credentials.vault`; the passphrase is never stored there.
 
 Set `THEIA_CODEX_AUTO_UPDATE=true` to let Theia check for and stage official
-Codex CLI updates in her private runtime. Updates are disabled by default and
-are deferred safely around active work. The update interval and timeout can be
-adjusted with `THEIA_CODEX_UPDATE_INTERVAL` and `THEIA_CODEX_UPDATE_TIMEOUT`.
+Codex CLI updates in her private runtime. In Docker, each update installs the
+latest npm package into the persistent runtime with its `package.json`,
+`package-lock.json`, and `node_modules`; the managed copy is selected before
+the image-bundled fallback. Updates are disabled by default and are deferred
+safely around active work. The update interval and timeout can be adjusted with
+`THEIA_CODEX_UPDATE_INTERVAL` and `THEIA_CODEX_UPDATE_TIMEOUT`.

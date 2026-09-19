@@ -83,6 +83,63 @@ class CodexUpdaterTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(Path(manifest["active_dir"]).parent, Path("."))
             self.assertTrue(updater.status()["managed_install"])
 
+    def test_container_update_persists_npm_files_with_the_managed_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            updater = CodexUpdater(
+                root,
+                cwd=root,
+                environment={"CODEX_HOME": str(root), "THEIA_CONTAINER": "1"},
+                enabled=True,
+                interval=86400,
+                timeout=30,
+            )
+
+            def npm_install(
+                command: list[str], **_kwargs: object
+            ) -> subprocess.CompletedProcess:
+                staging = Path(command[command.index("--prefix") + 1])
+                package_bin = staging / "node_modules" / ".bin"
+                package_bin.mkdir(parents=True)
+                (staging / "package.json").write_text(
+                    '{"dependencies":{"@openai/codex":"0.201.0"}}\n',
+                    encoding="utf-8",
+                )
+                (staging / "package-lock.json").write_text(
+                    '{"lockfileVersion":3}\n', encoding="utf-8"
+                )
+                self._write_cli(package_bin, "0.201.0")
+                return subprocess.CompletedProcess(command, 0)
+
+            def npm_or_version(
+                command: list[str], **kwargs: object
+            ) -> subprocess.CompletedProcess:
+                if command[0] == "/usr/bin/npm":
+                    return npm_install(command, **kwargs)
+                return subprocess.CompletedProcess(
+                    command, 0, stdout="codex 0.201.0\n", stderr=""
+                )
+
+            updater._verify_app_server = Mock(return_value=True)  # type: ignore[method-assign]
+            with (
+                patch(
+                    "theia.server.codex_update.shutil.which",
+                    return_value="/usr/bin/npm",
+                ),
+                patch(
+                    "theia.server.codex_update.subprocess.run",
+                    side_effect=npm_or_version,
+                ),
+            ):
+                result = updater._maybe_update_sync(force=True)
+
+            install_dir = Path(result.install_dir or "")
+            self.assertEqual(result.status, "updated")
+            self.assertTrue((install_dir / "package.json").is_file())
+            self.assertTrue((install_dir / "package-lock.json").is_file())
+            self.assertTrue((install_dir / "node_modules" / ".bin" / "codex").is_file())
+            self.assertEqual(updater.active_executable(), result.executable)
+
     def test_recent_success_skips_another_network_update(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

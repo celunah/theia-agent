@@ -1,4 +1,4 @@
-"""Opt-in, staged updates for the standalone Codex CLI."""
+"""Opt-in, staged updates for the Codex CLI."""
 
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ DEFAULT_CODEX_UPDATE_TIMEOUT = 120.0
 CODEX_INSTALLER_URL = "https://chatgpt.com/codex/install.sh"
 CODEX_INSTALLER_WINDOWS_URL = "https://chatgpt.com/codex/install.ps1"
 CODEX_INSTALLER_MAX_BYTES = 1024 * 1024
+CODEX_NPM_PACKAGE = "@openai/codex"
 _VERSION_RE = re.compile(r"(?<![0-9])([0-9]+\.[0-9]+\.[0-9]+)(?![0-9])")
 _INSTALL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$")
 
@@ -50,8 +51,8 @@ def _version_from_output(output: str) -> str | None:
 
 
 def _find_executable(root: Path) -> Path | None:
-    """Find the command produced by the official installer in ``root``."""
-    for directory in (root, root / "bin"):
+    """Find a Codex command produced by an installer in ``root``."""
+    for directory in (root, root / "bin", root / "node_modules" / ".bin"):
         for name in ("codex.exe", "codex.cmd", "codex"):
             candidate = directory / name
             try:
@@ -184,17 +185,21 @@ class CodexUpdater:
                     "CODEX_NON_INTERACTIVE": "1",
                 }
             )
-            command = self._installer_command()
-            completed = subprocess.run(
-                command,
-                input=script,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                cwd=str(self.cwd if self.cwd.is_dir() else self.home),
-                env=environment,
-                check=False,
-                timeout=self.timeout,
-            )
+            if self._use_npm_installer():
+                completed = self._run_npm_installer(staging, environment)
+            else:
+                script = self._download_installer()
+                command = self._installer_command()
+                completed = subprocess.run(
+                    command,
+                    input=script,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    cwd=str(self.cwd if self.cwd.is_dir() else self.home),
+                    env=environment,
+                    check=False,
+                    timeout=self.timeout,
+                )
             if completed.returncode != 0:
                 return CodexUpdateResult("failed")
             candidate = _find_executable(staging)
@@ -238,6 +243,46 @@ class CodexUpdater:
                 shutil.rmtree(staging, ignore_errors=True)
             if final_dir is not None and not self._manifest_uses(final_dir):
                 shutil.rmtree(final_dir, ignore_errors=True)
+
+    def _use_npm_installer(self) -> bool:
+        """Use npm in Docker so the updated package files persist with Theia."""
+        return self.environment.get("THEIA_CONTAINER", "").strip().casefold() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    def _run_npm_installer(
+        self, staging: Path, environment: Mapping[str, str]
+    ) -> subprocess.CompletedProcess[bytes]:
+        npm = shutil.which("npm")
+        if npm is None:
+            raise OSError("npm is unavailable")
+        command = [
+            npm,
+            "install",
+            "--prefix",
+            str(staging),
+            "--save-exact",
+            "--ignore-scripts",
+            "--no-audit",
+            "--no-fund",
+            f"{CODEX_NPM_PACKAGE}@latest",
+        ]
+        npm_environment = dict(environment)
+        npm_environment["NPM_CONFIG_CACHE"] = str(self.home / ".npm-cache")
+        npm_environment["NPM_CONFIG_UPDATE_NOTIFIER"] = "false"
+        return subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=str(self.cwd if self.cwd.is_dir() else self.home),
+            env=npm_environment,
+            check=False,
+            timeout=self.timeout,
+        )
 
     def _download_installer(self) -> bytes:
         installer_url = (

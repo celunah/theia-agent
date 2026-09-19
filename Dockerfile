@@ -67,7 +67,7 @@ COPY --chown=theia:theia theia ./theia
 COPY --from=revision --chown=theia:theia /theia-build-revision ./theia/build-revision.txt
 RUN uv sync --frozen --no-dev \
     && mkdir --parents /data/theia /workspace \
-    && chown --recursive theia:theia /data /workspace
+    && chown --recursive theia:theia /data /workspace /home/theia
 
 VOLUME ["/data", "/workspace"]
 
