@@ -282,6 +282,16 @@ class CodexLighthouseMixin:
 
     def lighthouse_snapshot(self, session_key: str | None = None) -> dict[str, Any]:
         """Return safe live state for the operator dashboard."""
+        secure_snapshot = getattr(self, "secure_vault_snapshot", None)
+        if callable(secure_snapshot):
+            vault = secure_snapshot()
+            if isinstance(vault, dict) and vault.get("status") == "locked":
+                return {
+                    "version": THEIA_VERSION,
+                    "action": "Locked",
+                    "vault": vault,
+                    "events": tuple(vault.get("events", ())),
+                }
         active_sessions = self._lighthouse_active_sessions()
         requested_key = None
         if isinstance(session_key, str) and session_key:
@@ -552,6 +562,7 @@ class LighthouseView:
         self._keyboard_buffer = ""
         self._escape_handle: asyncio.TimerHandle | None = None
         self._keyboard_task: asyncio.Task[None] | None = None
+        self._vault_action_task: asyncio.Task[None] | None = None
 
     def _interactive(self) -> bool:
         if not self.enabled:
@@ -563,6 +574,9 @@ class LighthouseView:
         """Build a dashboard snapshot without creating sessions or requests."""
         snapshot = self.codex.lighthouse_snapshot(self.session_key)
         snapshot = dict(snapshot) if isinstance(snapshot, dict) else {}
+        vault = snapshot.get("vault")
+        if isinstance(vault, dict) and vault.get("status") == "locked":
+            return snapshot
         if self.presence is not None:
             with contextlib.suppress(Exception):
                 snapshot["presence"] = self.presence.snapshot()
@@ -710,6 +724,10 @@ class LighthouseView:
 
     def _handle_keyboard_text(self, text: str) -> None:
         """Recognize view switching and diagnostic navigation key sequences."""
+        if "\x0c" in text:
+            if not self._diagnostic_mode:
+                self._toggle_vault_lock()
+            return
         if self._escape_handle is not None and text != "\x1b":
             self._cancel_pending_escape()
         if "\x1b" in text:
@@ -793,8 +811,42 @@ class LighthouseView:
             return False
         if character in {"\x00", "\xe0"}:
             return True
+        if character == "\x0c" and not self._diagnostic_mode:
+            self._toggle_vault_lock()
+            return False
         self._handle_keyboard_text(character)
         return False
+
+    def _toggle_vault_lock(self) -> None:
+        """Toggle the encrypted vault from the Lighthouse terminal."""
+        if self._vault_action_task is not None and not self._vault_action_task.done():
+            return
+        snapshot = self.snapshot()
+        vault = snapshot.get("vault")
+        if not isinstance(vault, dict):
+            return
+        self._vault_action_task = asyncio.create_task(self._run_vault_action(vault))
+
+    async def _run_vault_action(self, vault: dict[str, Any]) -> None:
+        locked = vault.get("status") == "locked"
+        try:
+            if not locked:
+                await self.codex.lock_secure_credentials(reason="Manual vault lock")
+                return
+            await self.pause_secret_input()
+            try:
+                await self.codex.unlock_secure_credentials()
+            finally:
+                self.resume_secret_input()
+            await self.codex.start()
+        except Exception as exc:  # noqa: BLE001 - keep the view available
+            logger.warning(
+                "Lighthouse vault action failed (error=%s)", type(exc).__name__
+            )
+            if not locked:
+                return
+            with contextlib.suppress(Exception):
+                await self.codex.lock_secure_credentials(reason="Vault unlock failed")
 
     async def _read_windows_keyboard(self) -> None:
         """Poll Windows console input for F1 without a blocking console read."""
@@ -862,8 +914,27 @@ class LighthouseView:
                 termios = cast(Any, __import__("termios"))
                 termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
 
+    async def pause_secret_input(self) -> None:
+        """Release Lighthouse keyboard ownership before hidden secret input."""
+        keyboard_task, self._keyboard_task = self._keyboard_task, None
+        if keyboard_task is not None:
+            keyboard_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await keyboard_task
+        self._stop_keyboard_input()
+
+    def resume_secret_input(self) -> None:
+        """Restore Lighthouse keyboard ownership after hidden secret input."""
+        self._start_keyboard_input()
+        live = self._live
+        if live is not None:
+            with contextlib.suppress(Exception):
+                live.update(self._render_current_payload(), refresh=True)
+
     async def start(self) -> bool:
         """Start the live dashboard; non-TTY output keeps normal logging intact."""
+        if self._live is not None:
+            return True
         if not self._interactive():
             return False
         try:
@@ -976,6 +1047,11 @@ class LighthouseView:
             keyboard_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await keyboard_task
+        vault_action, self._vault_action_task = self._vault_action_task, None
+        if vault_action is not None:
+            vault_action.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await vault_action
         self._stop_keyboard_input()
         live, self._live = self._live, None
         if live is not None:

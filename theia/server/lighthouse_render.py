@@ -570,6 +570,51 @@ def _event_lines(snapshot: dict[str, Any]) -> list[str]:
     return lines or ["  No recent events"]
 
 
+def _vault_locked(snapshot: dict[str, Any]) -> bool:
+    vault = snapshot.get("vault")
+    return isinstance(vault, dict) and vault.get("status") == "locked"
+
+
+def _locked_lines(snapshot: dict[str, Any], *, width: int) -> list[str]:
+    """Render only the safe unlock surface while credential data is locked."""
+    vault = snapshot.get("vault")
+    vault = vault if isinstance(vault, dict) else {}
+    lines = [
+        f"Theia {_dashboard_text(snapshot.get('version'), 24) or THEIA_VERSION} · Lighthouse View",
+        _separator(width),
+        "Status       Locked",
+        f"Reason       {_dashboard_text(vault.get('reason'), 120) or 'Vault unlock required'}",
+        _separator(width),
+        "Recent events",
+    ]
+    events = vault.get("events", snapshot.get("events"))
+    events = events if isinstance(events, (list, tuple)) else ()
+    for event in events[-LIGHTHOUSE_EVENT_LIMIT:][::-1]:
+        if not isinstance(event, dict):
+            continue
+        severity = _dashboard_text(event.get("severity"), 8).upper() or "INFO"
+        if severity not in {"INFO", "WARNING", "ERROR"}:
+            severity = "INFO"
+        detail = _dashboard_text(event.get("detail"), 120) or "Vault state changed"
+        lines.append(
+            f"  [{_format_event_time(event.get('timestamp'))}] {severity:<8} {detail}"
+        )
+    if len(lines) == 6:
+        lines.append("  No unlock events")
+    lines.extend(
+        [
+            _separator(width),
+            "Input",
+            "  "
+            + (
+                _dashboard_text(vault.get("input_hint"), 180)
+                or "Type the vault passphrase in the terminal and press Enter."
+            ),
+        ]
+    )
+    return lines
+
+
 def _latest_problem_details(snapshot: dict[str, Any]) -> tuple[str, str]:
     events = snapshot.get("events")
     events = events if isinstance(events, (list, tuple)) else ()
@@ -952,6 +997,13 @@ def render_lighthouse(
         0 if show_keyboard_hint else 1,
         height - (1 if show_keyboard_hint else 0),
     )
+    if _vault_locked(snapshot):
+        return _fit_dashboard(
+            _locked_lines(snapshot, width=width),
+            width=width,
+            height=height,
+            hint="",
+        )
     full_lines = _normal_lines(snapshot, width=width)
     tight_lines = _tight_compact_lines(snapshot, width=width)
     if width >= 64 and len(full_lines) <= body_budget:
@@ -1215,6 +1267,8 @@ def render_lighthouse_diagnostics_rich(
     from rich.text import Text
 
     width, height = _dimensions(width, height)
+    if _vault_locked(snapshot):
+        return Text(render_lighthouse(snapshot, width=width, height=height))
     lines = _diagnostic_lines(snapshot, records, width=width)
 
     rendered = Text()

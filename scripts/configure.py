@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
+from theia.server.vault import CredentialVault, VaultError, vault_path
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE_ENV = "THEIA_ENV_FILE"
@@ -277,6 +279,47 @@ def save_configuration(
     return target
 
 
+def _existing_vault_path() -> Path:
+    home = Path(os.getenv("THEIA_HOME") or (Path.home() / ".theia"))
+    return vault_path(home)
+
+
+def update_existing_vault(
+    values: ConfigurationValues,
+    *,
+    secret_input_fn: Callable[[str], str] | None = None,
+) -> Path | None:
+    """Update an initialized vault instead of recreating plaintext dotenv secrets."""
+    keychain = os.getenv("THEIA_VAULT_KEYCHAIN", "false").strip().casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    vault = CredentialVault(_existing_vault_path(), keychain_enabled=keychain)
+    if not vault.initialized:
+        return None
+    read_secret = getpass.getpass if secret_input_fn is None else secret_input_fn
+    passphrase = read_secret("Vault passphrase (input hidden): ")
+    try:
+        try:
+            vault.unlock(passphrase)
+        except VaultError as exc:
+            raise ConfigurationError("The vault passphrase was not accepted.") from exc
+        payload = vault.credentials()
+        environment = payload.get("environment", {})
+        if not isinstance(environment, dict):
+            raise ConfigurationError("The vault environment payload is invalid.")
+        environment.update(values.as_environment())
+        vault.update({"environment": environment})
+        if keychain and not vault.store_passphrase_key(passphrase):
+            raise ConfigurationError("The configured OS keychain is unavailable.")
+        return vault.path
+    finally:
+        del passphrase
+        vault.lock(reason="Configuration update complete")
+
+
 def _choose_mode(
     input_fn: Callable[[str], str],
     output_fn: Callable[[str], None],
@@ -355,7 +398,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         values = collect_configuration()
-        target = save_configuration(values, path=args.env_file)
+        target = update_existing_vault(values)
+        if target is None:
+            target = save_configuration(values, path=args.env_file)
     except KeyboardInterrupt:
         print("Configuration cancelled.")
         return 130

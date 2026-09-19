@@ -12,6 +12,7 @@ import urllib.error
 import urllib.request
 import uuid
 from dataclasses import dataclass
+from collections.abc import Mapping
 from typing import Any
 
 from .core import _codex_logger, _env_float, _truncate
@@ -64,7 +65,16 @@ class AudioOutput:
     content_type: str
 
 
-def _env_text(*names: str, default: str = "") -> str:
+def _env_text(
+    *names: str,
+    default: str = "",
+    credentials: Mapping[str, str] | None = None,
+) -> str:
+    if credentials is not None:
+        for name in names:
+            value = credentials.get(name)
+            if isinstance(value, str):
+                return value.strip()
     for name in names:
         value = os.getenv(name)
         if value is not None:
@@ -176,7 +186,9 @@ class OpenAICompatibleAudio:
         self.tts = tts
 
     @classmethod
-    def from_environment(cls) -> OpenAICompatibleAudio:
+    def from_environment(
+        cls, credentials: Mapping[str, str] | None = None
+    ) -> OpenAICompatibleAudio:
         """Build independent transcription and TTS clients from environment settings."""
         transcription = AudioServiceConfig(
             protocol=_protocol(
@@ -184,17 +196,35 @@ class OpenAICompatibleAudio:
                     "STT_PROTOCOL",
                     "THEIA_TRANSCRIPTION_PROTOCOL",
                     default="openai-compatible",
+                    credentials=credentials,
                 )
             ),
-            base_url=_env_text("STT_BASE_URL", "THEIA_TRANSCRIPTION_BASE_URL"),
-            api_key=_env_text("STT_TOKEN", "THEIA_TRANSCRIPTION_API_KEY"),
-            model=_env_text(
-                "STT_MODEL", "THEIA_TRANSCRIPTION_MODEL", default="whisper-1"
+            base_url=_env_text(
+                "STT_BASE_URL",
+                "THEIA_TRANSCRIPTION_BASE_URL",
+                credentials=credentials,
             ),
-            timeout=max(1.0, _env_float("THEIA_TRANSCRIPTION_TIMEOUT", 120)),
+            api_key=_env_text(
+                "STT_TOKEN",
+                "THEIA_TRANSCRIPTION_API_KEY",
+                credentials=credentials,
+            ),
+            model=_env_text(
+                "STT_MODEL",
+                "THEIA_TRANSCRIPTION_MODEL",
+                default="whisper-1",
+                credentials=credentials,
+            ),
+            timeout=max(
+                1.0,
+                _env_float("THEIA_TRANSCRIPTION_TIMEOUT", 120),
+            ),
         )
         tts_format = _env_text(
-            "TTS_FORMAT", "THEIA_TTS_FORMAT", default="mp3"
+            "TTS_FORMAT",
+            "THEIA_TTS_FORMAT",
+            default="mp3",
+            credentials=credentials,
         ).casefold()
         if tts_format not in _SUPPORTED_TTS_FORMATS:
             logger.warning(
@@ -208,13 +238,32 @@ class OpenAICompatibleAudio:
                     "TTS_PROTOCOL",
                     "THEIA_TTS_PROTOCOL",
                     default="openai-compatible",
+                    credentials=credentials,
                 )
             ),
-            base_url=_env_text("TTS_BASE_URL", "THEIA_TTS_BASE_URL"),
-            api_key=_env_text("TTS_TOKEN", "THEIA_TTS_API_KEY"),
-            model=_env_text("TTS_MODEL", "THEIA_TTS_MODEL", default="tts-1"),
+            base_url=_env_text(
+                "TTS_BASE_URL",
+                "THEIA_TTS_BASE_URL",
+                credentials=credentials,
+            ),
+            api_key=_env_text(
+                "TTS_TOKEN",
+                "THEIA_TTS_API_KEY",
+                credentials=credentials,
+            ),
+            model=_env_text(
+                "TTS_MODEL",
+                "THEIA_TTS_MODEL",
+                default="tts-1",
+                credentials=credentials,
+            ),
             timeout=max(1.0, _env_float("THEIA_TTS_TIMEOUT", 120)),
-            voice=_env_text("TTS_VOICE", "THEIA_TTS_VOICE", default="alloy"),
+            voice=_env_text(
+                "TTS_VOICE",
+                "THEIA_TTS_VOICE",
+                default="alloy",
+                credentials=credentials,
+            ),
             response_format=tts_format,
         )
         return cls(transcription, tts)

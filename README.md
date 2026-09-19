@@ -64,6 +64,9 @@ uv run python main.py
 The setup wizard creates the local `.env` file and can configure text or voice
 mode. Voice mode uses Codex Realtime by default, or custom OpenAI-compatible
 STT/TTS services when both endpoints are configured. Keep `.env` private.
+On the first real launch, supported secret entries are migrated into the
+encrypted vault and removed from the dotenv file. Once the vault exists,
+`scripts/configure.py` asks for its passphrase and updates the vault directly.
 
 To use account installation, enable User Install for the Discord application
 and use its account-install link. Install Theia to a server when you want
@@ -121,9 +124,16 @@ directly to Codex. Qwen receives only unsupported, oversized, or explicitly
 dedicated-perception media; the same item is never sent to both providers in
 one request. The perception report is neutral JSON context, while Codex still
 controls reasoning, personality, tools, and the final response. The current
-checkout has no encrypted Qwen credential store, so the adapter uses the
-private deployment environment as its credential hook and never reuses the
-realtime voice token automatically.
+Theia's real launcher migrates supported provider secrets from the initial
+private deployment environment into an encrypted vault before connecting to
+Discord. The vault uses an interactive passphrase by default; the Lighthouse
+starts in a redacted `Locked` state until it is unlocked. Set
+`THEIA_VAULT_KEYCHAIN=true` and `THEIA_VAULT_UNLOCK_MODE=auto` to try the OS
+keychain first, or use `unattended` to fail without prompting when no keychain
+credential is available. `THEIA_VAULT_IDLE_TIMEOUT` enables optional inactivity
+locking in seconds. While the Lighthouse is running, Ctrl+L manually locks or
+unlocks the vault from the terminal. The encrypted vault is stored at
+`$THEIA_HOME/credentials.vault`; the passphrase is never stored there.
 
 Set `THEIA_CODEX_AUTO_UPDATE=true` to let Theia check for and stage official
 Codex CLI updates in her private runtime. Updates are disabled by default and

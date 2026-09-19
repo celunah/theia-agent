@@ -245,6 +245,14 @@ agent state.
 - Runtime `.env` configuration is found from the working directory, compiled
   executable directory, or source project root and is never bundled into the
   executable.
+- The real launcher migrates supported secret environment values and Codex auth
+  into `$THEIA_HOME/credentials.vault`, encrypted with an Argon2id-derived key
+  and authenticated encryption. Startup remains `Locked` in Lighthouse until
+  an interactive passphrase or explicit OS-keychain unlock succeeds. The
+  optional `THEIA_VAULT_IDLE_TIMEOUT` setting locks after inactivity, and Ctrl+L
+  toggles a manual lock/unlock from the Lighthouse terminal. Runtime provider
+  references and the temporary private auth cache are cleared on lock as far as
+  the runtime permits; plaintext process memory cannot be made attacker-proof.
 - Login reports `Already logged in`, `Cached authentication imported`,
   `Device code required`, and `Authentication completed` for those states.
 - A server administrator can authenticate the bot for server-wide use.

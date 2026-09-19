@@ -1,6 +1,9 @@
 # pylint: disable=wildcard-import,unused-wildcard-import,undefined-variable,duplicate-code
 from tests.test_support import *
 
+from scripts.configure import update_existing_vault
+from theia.server.vault import CredentialVault
+
 
 class ConfigurationScriptTests(unittest.TestCase):
     def test_text_setup_only_requests_the_discord_token(self) -> None:
@@ -157,3 +160,30 @@ class ConfigurationScriptTests(unittest.TestCase):
                 tts_base_url="https://tts.example/v1",
                 tts_format="not-audio",
             )
+
+    def test_setup_updates_an_existing_vault_without_writing_dotenv_secrets(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            vault = CredentialVault(root / "credentials.vault")
+            vault.create(
+                {"environment": {"TOKEN": "old-token"}},
+                "correct horse battery",
+            )
+            values = validate_configuration(
+                discord_token="new-token",
+                mode=TEXT_MODE,
+            )
+
+            with patch.dict(os.environ, {"THEIA_HOME": str(root)}):
+                target = update_existing_vault(
+                    values,
+                    secret_input_fn=lambda _prompt: "correct horse battery",
+                )
+
+            self.assertEqual(target, root / "credentials.vault")
+            vault.lock()
+            vault.unlock("correct horse battery")
+            self.assertEqual(vault.credentials()["environment"]["TOKEN"], "new-token")
+            self.assertFalse((root / ".env").exists())

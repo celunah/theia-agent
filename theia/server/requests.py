@@ -62,7 +62,8 @@ class CodexRequestMixin:
         if "_qwen_perception_client" not in self.__dict__:
             self.__dict__["_qwen_perception_client"] = (
                 QwenPerceptionClient.from_environment(
-                    usage_callback=self._record_perception_usage
+                    credentials=getattr(self, "_credential_environment", None),
+                    usage_callback=self._record_perception_usage,
                 )
             )
         return self.__dict__["_qwen_perception_client"]

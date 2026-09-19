@@ -13,7 +13,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -554,13 +554,18 @@ class QwenPerceptionClient:
     def from_environment(
         cls,
         *,
+        credentials: Mapping[str, str] | None = None,
         usage_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> QwenPerceptionClient | None:
         """Build the optional client only when explicitly enabled and configured."""
         if not _env_bool(QWEN_PERCEPTION_ENABLED_ENV):
             return None
         base_url = os.getenv(QWEN_PERCEPTION_BASE_URL_ENV, "").strip()
-        api_key = os.getenv(QWEN_PERCEPTION_API_KEY_ENV, "").strip()
+        api_key = (
+            credentials.get(QWEN_PERCEPTION_API_KEY_ENV, "")
+            if credentials is not None
+            else os.getenv(QWEN_PERCEPTION_API_KEY_ENV, "")
+        ).strip()
         if not base_url or not api_key:
             logger.warning("Qwen perception is enabled but not fully configured")
             return None

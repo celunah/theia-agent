@@ -27,6 +27,7 @@ from ..core import (
 from ..identifiers import new_unique_token
 from .codex_update import CodexUpdateResult
 from .policy import MAX_CODEX_MEMORY_RESTART_BACKOFF
+from .secure_credentials import SecureCredentialLifecycleMixin
 
 logger = _codex_logger()
 
@@ -45,7 +46,7 @@ _SQLITE_STARTUP_ERROR_MARKERS = (
 )
 
 
-class CodexLifecycleMixin:
+class CodexLifecycleMixin(SecureCredentialLifecycleMixin):
     """Control App Server startup, health checks, recovery, and shutdown."""
 
     if TYPE_CHECKING:
@@ -100,6 +101,10 @@ class CodexLifecycleMixin:
 
     async def _start_locked(self, *, allow_database_repair: bool = True) -> None:
         """Launch and initialize the project-local Codex App Server process."""
+        if getattr(self, "_secure_credentials_enabled", False) and not getattr(
+            self, "_credentials_ready", False
+        ):
+            raise CodexAppServerError("FATAL: The credential vault is locked.")
         if self._process is not None and self._process.returncode is None:
             if self._reader_task is not None and not self._reader_task.done():
                 logger.debug("Codex App Server is already running")
@@ -356,6 +361,8 @@ class CodexLifecycleMixin:
 
     def _import_global_auth(self, *, force: bool = False) -> bool:
         """Bootstrap the private home from existing global Codex auth once."""
+        if getattr(self, "_secure_credentials_enabled", False):
+            return False
         if self._codex_home == self._global_codex_home:
             return False
         source = self._global_codex_home / "auth.json"
@@ -381,6 +388,7 @@ class CodexLifecycleMixin:
             return False
 
     async def _ensure_running(self) -> None:
+        self.touch_secure_credentials()
         while self._memory_recovery_active:
             recovery = self._memory_recovery_task
             if recovery is not None and recovery is not asyncio.current_task():
@@ -399,7 +407,11 @@ class CodexLifecycleMixin:
     async def close(self) -> None:
         """Stop Codex and cancel any memory recovery in progress."""
         current = asyncio.current_task()
-        for task in (self._memory_watchdog_task, self._memory_recovery_task):
+        for task in (
+            self._memory_watchdog_task,
+            self._memory_recovery_task,
+            getattr(self, "_credential_watchdog_task", None),
+        ):
             if task is None or task is current or task.done():
                 continue
             task.cancel()
@@ -407,6 +419,16 @@ class CodexLifecycleMixin:
                 await task
         async with self._lifecycle_lock:
             await self._close_locked()
+            if getattr(self, "_secure_credentials_enabled", False):
+                self._credential_watchdog_task = None
+                self._credential_vault.lock(reason="Vault closed")
+                self._credential_environment.clear()
+                self._credentials_ready = False
+                self._clear_provider_credentials()
+                if self._vault_auth_written:
+                    with contextlib.suppress(OSError):
+                        (self._codex_home / "auth.json").unlink()
+                    self._vault_auth_written = False
 
     async def _close_locked(self) -> None:
         """Stop the Codex process and resolve pending interaction state safely."""
@@ -672,6 +694,7 @@ class CodexLifecycleMixin:
         result = await self._request("account/read", {"refreshToken": False})
         self.account = result.get("account")
         self.requires_openai_auth = bool(result.get("requiresOpenaiAuth", False))
+        self._persist_vault_auth()
         logger.debug(
             "Codex account state refreshed (authenticated=%s, auth_required=%s)",
             self.account is not None,

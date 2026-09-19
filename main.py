@@ -1,6 +1,6 @@
 """Compatibility entry point for Theia Agent."""
 
-import os
+import asyncio
 
 from theia.server.core import (
     CodexAppServer,
@@ -96,6 +96,7 @@ from theia.server.codex_update import (
     CodexUpdater,
 )
 from theia.server.lighthouse import LighthouseView, render_lighthouse
+from theia.server.vault import VaultError
 from theia.core import (
     ADAPTIVE_REASONING_ENV,
     AGENT_DISPLAY_NAME,
@@ -438,8 +439,33 @@ __all__ = [
 ]
 
 
+async def _run_secure_launcher() -> None:
+    """Unlock the private credential vault before connecting to Discord."""
+    bot.codex.enable_secure_credentials()
+    try:
+        await bot.lighthouse.start()
+        await bot.lighthouse.pause_secret_input()
+        try:
+            await bot.codex.unlock_secure_credentials()
+        finally:
+            bot.lighthouse.resume_secret_input()
+        token = (
+            bot.codex.secure_credential("TOKEN")
+            or bot.codex.secure_credential("DISCORD_TOKEN")
+            or bot.codex.secure_credential("THEIA_DISCORD_TOKEN")
+        )
+        if not token:
+            raise VaultError("The credential vault does not contain a Discord token.")
+        try:
+            await bot.start(token)
+        finally:
+            del token
+    finally:
+        await bot.close()
+
+
 if __name__ == "__main__":
-    token = os.getenv("TOKEN")
-    if not token:
-        raise SystemExit("TOKEN is required to run Theia Agent.")
-    bot.run(token)
+    try:
+        asyncio.run(_run_secure_launcher())
+    except VaultError as exc:
+        raise SystemExit(str(exc)) from None

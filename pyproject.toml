@@ -4,8 +4,11 @@ version = "2.0.0"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = [
+    "argon2-cffi>=25.1",
+    "cryptography>=45.0",
     "discord.py>=2.4",
     "discord-ext-voice-recv>=0.5.2a179",
+    "keyring>=25.6",
     "psutil",
     "python-dotenv",
     "rich>=13.7",

@@ -8,7 +8,7 @@ import contextlib
 import json
 import os
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -173,14 +173,21 @@ class QwenAudioProvider:
         self._sessions: dict[str, _QwenSession] = {}
 
     @classmethod
-    def from_environment(cls) -> QwenAudioProvider | None:
+    def from_environment(
+        cls, credentials: Mapping[str, str] | None = None
+    ) -> QwenAudioProvider | None:
         """Build the adapter only when an external Qwen endpoint is configured."""
         endpoint = os.getenv(QWEN_AUDIO_URL_ENV, "").strip()
         if not endpoint:
             return None
+        token = (
+            credentials.get(QWEN_AUDIO_TOKEN_ENV, "")
+            if credentials is not None
+            else os.getenv(QWEN_AUDIO_TOKEN_ENV, "")
+        )
         return cls(
             endpoint,
-            token=os.getenv(QWEN_AUDIO_TOKEN_ENV, ""),
+            token=token,
             semantic_audio_understanding=_env_bool(QWEN_AUDIO_SEMANTIC_ENV),
         )
 
