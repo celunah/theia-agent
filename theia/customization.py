@@ -12,9 +12,10 @@ import json
 import logging
 import os
 import re
-import time
 from pathlib import Path
 from typing import Any
+
+from .identifiers import new_unique_token
 
 CUSTOMIZATION_FILE_ENV = "THEIA_CUSTOMIZATIONS"
 DEFAULT_HOME = "~/.theia"
@@ -368,7 +369,9 @@ class FrontendCustomizationStore:
 
     def _quarantine(self, reason: str) -> None:
         """Preserve malformed customization data before recovery writes."""
-        quarantine = self.path.with_name(f"{self.path.name}.corrupt-{time.time_ns()}")
+        quarantine = self.path.with_name(
+            f"{self.path.name}.corrupt-{new_unique_token()}"
+        )
         try:
             self.path.replace(quarantine)
         except OSError as exc:

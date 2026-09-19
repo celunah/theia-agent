@@ -501,7 +501,10 @@ class AttentionStateTests(unittest.TestCase):
                 "THEIA_HOME": str(Path(directory) / "theia"),
                 "THEIA_STATE": str(Path(directory) / "state.json"),
             }
-            with patch.dict(os.environ, environment):
+            with (
+                patch.dict(os.environ, environment),
+                patch("theia.server.attention.time.monotonic_ns", return_value=123),
+            ):
                 server = main.CodexAppServer()
                 first = server._session("user-a")
                 second = server._session("user-b")

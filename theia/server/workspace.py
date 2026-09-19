@@ -33,6 +33,7 @@ from ..core import (
     _safe_intermediate_text,
     _truncate,
 )
+from ..identifiers import new_unique_token
 from .worker_diagnostics import record_current_worker_failure, run_worker
 from .commitments import parse_commitment_proposals
 
@@ -529,7 +530,7 @@ class CodexWorkspaceMixin:
         generation: int,
     ) -> None:
         """Run and safely merge one isolated workspace review."""
-        session_id = f"__workspace_review__:{time.monotonic_ns()}"
+        session_id = f"__workspace_review__:{new_unique_token()}"
         worker_session = _Session(key=session_id)
         self._sessions[session_id] = worker_session
         thread_id: str | None = None

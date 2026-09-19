@@ -265,7 +265,7 @@ class CodexUpdater:
         shell = shutil.which("sh")
         if shell is None:
             raise OSError("POSIX shell is unavailable")
-        return [shell]
+        return [str(shell)]
 
     def _cli_version(
         self, executable: Path | None, environment: Mapping[str, str]

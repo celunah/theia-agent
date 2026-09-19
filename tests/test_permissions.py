@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class StoragePermissionTests(unittest.TestCase):
     """Verify storage repair and fail-closed startup behavior."""
 
+    @unittest.skipUnless(os.name == "posix", "container ownership is POSIX-only")
     def test_container_root_repairs_ownership_before_dropping_privileges(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -57,6 +58,7 @@ class StoragePermissionTests(unittest.TestCase):
             setgid.assert_called_once_with(2345)
             setuid.assert_called_once_with(1234)
 
+    @unittest.skipUnless(os.name == "posix", "container ownership is POSIX-only")
     def test_chown_failure_is_fatal_when_access_is_still_unusable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

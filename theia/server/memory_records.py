@@ -5,13 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from ..core import _redact_private_paths, _truncate
+from ..identifiers import new_unique_token
 
 MEMORY_RECORD_MAX_CHARACTERS = 3500
 MEMORY_RECORD_MAX_COUNT = 512
@@ -423,7 +423,7 @@ def append_audit(
         return False
     entry = {
         "audit_id": hashlib.sha256(
-            f"{time.time_ns()}:{record.record_id}".encode()
+            f"{new_unique_token()}:{record.record_id}".encode()
         ).hexdigest()[:24],
         "record_id": record.record_id,
         "action": action,

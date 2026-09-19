@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any, cast
 
 
 _ACCESS_FLAGS = os.R_OK | os.W_OK | os.X_OK
@@ -122,6 +124,9 @@ def _walk_root(root: Path) -> tuple[tuple[Path, ...], bool]:
 def _repair_ownership(root: Path, uid: int, gid: int) -> tuple[bool, bool]:
     entries, repair_failed = _walk_root(root)
     changed = False
+    chown = cast(Callable[..., Any] | None, getattr(os, "chown", None))
+    if chown is None:
+        return True, False
     for path in entries:
         try:
             ownership = os.lstat(path)
@@ -131,7 +136,7 @@ def _repair_ownership(root: Path, uid: int, gid: int) -> tuple[bool, bool]:
         if ownership.st_uid == uid and ownership.st_gid == gid:
             continue
         try:
-            os.chown(path, uid, gid, follow_symlinks=False)
+            chown(path, uid, gid, follow_symlinks=False)  # pylint: disable=not-callable
             changed = True
         except (OSError, TypeError):
             repair_failed = True
@@ -139,10 +144,17 @@ def _repair_ownership(root: Path, uid: int, gid: int) -> tuple[bool, bool]:
 
 
 def _drop_privileges(uid: int, gid: int) -> None:
+    setgroups = cast(Callable[..., Any] | None, getattr(os, "setgroups", None))
+    setgid = cast(Callable[..., Any] | None, getattr(os, "setgid", None))
+    setuid = cast(Callable[..., Any] | None, getattr(os, "setuid", None))
+    if setgroups is None or setgid is None or setuid is None:
+        raise StoragePermissionError(
+            "runtime data", "Theia could not drop container privileges"
+        )
     try:
-        os.setgroups([])
-        os.setgid(gid)
-        os.setuid(uid)
+        setgroups([])  # pylint: disable=not-callable
+        setgid(gid)  # pylint: disable=not-callable
+        setuid(uid)  # pylint: disable=not-callable
     except (AttributeError, OSError) as exc:
         raise StoragePermissionError(
             "runtime data", "Theia could not drop container privileges"

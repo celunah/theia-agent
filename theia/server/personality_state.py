@@ -38,6 +38,7 @@ from ..core import (
     _safe_intermediate_text,
     _truncate,
 )
+from ..identifiers import new_unique_token
 from ..personality import PersonalityError
 from .memory_records import (
     MEMORY_RECORD_MAX_CHARACTERS,
@@ -295,11 +296,19 @@ class CodexPersonalityStateMixin:
                 )
                 if record is not None:
                     records.append(record)
+        source_priority = {
+            "user_memory": 3,
+            "server_memory": 2,
+            "character_memory": 1,
+            "workspace": 1,
+            "recap": 0,
+        }
         records.sort(
             key=lambda record: (
                 record.created_at
                 if record.created_at is not None
                 else record.updated_at or 0.0,
+                source_priority.get(record.source_category, 0),
                 record.ordinal,
             ),
             reverse=True,
@@ -470,7 +479,7 @@ class CodexPersonalityStateMixin:
 
     @staticmethod
     def _atomic_memory_source_write(path: Path, text: str) -> bool:
-        temporary = path.with_name(f".{path.name}.{time.time_ns()}.tmp")
+        temporary = path.with_name(f".{path.name}.{new_unique_token()}.tmp")
         try:
             temporary.write_text(text, encoding="utf-8")
             temporary.chmod(0o600)
@@ -897,7 +906,7 @@ class CodexPersonalityStateMixin:
         personality_name = (
             self.active_personality(session_key) if session_key is not None else None
         )
-        session_id = f"__memory_retrieval__:{time.monotonic_ns()}"
+        session_id = f"__memory_retrieval__:{new_unique_token()}"
         session = _Session(key=session_id, personality_name=personality_name)
         self._sessions[session_id] = session
         personality = (
@@ -1024,7 +1033,7 @@ class CodexPersonalityStateMixin:
     async def _generate_personality_description(self, prompt: str) -> str | None:
         """Generate a disposable no-tool description without retaining its turn."""
         await self._ensure_running()
-        key = f"__personality_summary__:{time.monotonic_ns()}"
+        key = f"__personality_summary__:{new_unique_token()}"
         session = _Session(key=key)
         self._sessions[key] = session
         state: _TurnState | None = None

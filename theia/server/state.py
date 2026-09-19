@@ -52,6 +52,7 @@ from ..core import (
     _safe_intermediate_text,
 )
 from ..permissions import StoragePermissionError, prepare_runtime_storage
+from ..identifiers import new_unique_token
 
 logger = _codex_logger()
 
@@ -567,7 +568,7 @@ class CodexStateMixin:
     def _quarantine_state(self, reason: str) -> None:
         """Preserve an unreadable state file before allowing recovery writes."""
         quarantine = self._state_path.with_name(
-            f"{self._state_path.name}.corrupt-{time.time_ns()}"
+            f"{self._state_path.name}.corrupt-{new_unique_token()}"
         )
         try:
             self._state_path.replace(quarantine)

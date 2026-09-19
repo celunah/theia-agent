@@ -715,7 +715,7 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
             if not internal_worker:
                 self._record_runtime_event("turn_timed_out")
             with contextlib.suppress(CodexAppServerError):
-                await self.interrupt(session_key)
+                await self.interrupt(session_key, session_override=session)
             raise CodexTurnTimeoutError() from exc
         finally:
             if state.event_tasks:
@@ -730,9 +730,11 @@ class CodexAppServer(  # pylint: disable=too-many-ancestors
             session.turn_id = None
             self._turns.pop(turn_id, None)
 
-    async def interrupt(self, session_key: str) -> bool:
-        """Interrupt the active turn for a session, if one is running."""
-        session = self._session(session_key)
+    async def interrupt(
+        self, session_key: str, *, session_override: _Session | None = None
+    ) -> bool:
+        """Interrupt a session turn."""
+        session = session_override or self._session(session_key)
         if not session.thread_id or not session.turn_id:
             logger.debug("Ignored Codex interrupt because no turn is active")
             return False

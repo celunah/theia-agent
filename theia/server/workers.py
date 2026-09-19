@@ -8,7 +8,6 @@ import hashlib
 import json
 import math
 import re
-import time
 from collections.abc import Awaitable, Callable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -53,6 +52,7 @@ from ..core import (
     _safe_intermediate_text,
     _truncate,
 )
+from ..identifiers import new_unique_token
 from .prompts import (
     _ASSESSMENT_COMPLEXITIES,
     _ASSESSMENT_DEVELOPER_INSTRUCTIONS,
@@ -124,7 +124,7 @@ class CodexWorkerMixin:
     ) -> str | None:
         """Run the disposable recap turn inside its observability scope."""
         await self._ensure_running()
-        session_id = f"__nightly_recap__:{time.monotonic_ns()}"
+        session_id = f"__nightly_recap__:{new_unique_token()}"
         session = _Session(
             key=session_id,
             personality_name=(
@@ -229,7 +229,7 @@ class CodexWorkerMixin:
     ) -> dict[str, Any] | None:
         """Classify one turn in a disposable, no-tool Codex session."""
         await self._ensure_running()
-        session_id = f"__mood__:{time.monotonic_ns()}"
+        session_id = f"__mood__:{new_unique_token()}"
         session = _Session(
             key=session_id,
             personality_name=self.active_personality(session_key),
@@ -422,7 +422,7 @@ class CodexWorkerMixin:
     ) -> dict[str, str] | None:
         """Generate one short activity line in a disposable, no-tool turn."""
         await self._ensure_running()
-        session_id = f"__presence__:{time.monotonic_ns()}"
+        session_id = f"__presence__:{new_unique_token()}"
         session = _Session(
             key=session_id,
             personality_name=(
@@ -612,7 +612,7 @@ class CodexWorkerMixin:
     ) -> dict[str, Any] | None:
         """Run the hidden assessment without exposing it to the user turn."""
         logger.debug("Starting hidden Codex reasoning pre-assessment")
-        key = f"__assessment__:{time.monotonic_ns()}"
+        key = f"__assessment__:{new_unique_token()}"
         session = _Session(key=key)
         state: _TurnState | None = None
         try:
@@ -1039,7 +1039,7 @@ class CodexWorkerMixin:
             suffix = ".bin"
         digest = hashlib.sha256(filename.encode("utf-8") + b"\0" + raw).hexdigest()
         path = self._attachment_root / f"{digest}{suffix}"
-        temporary = path.with_name(f".{path.name}.{time.time_ns()}.tmp")
+        temporary = path.with_name(f".{path.name}.{new_unique_token()}.tmp")
         try:
             self._attachment_root.mkdir(parents=True, exist_ok=True)
             self._attachment_root.chmod(0o700)

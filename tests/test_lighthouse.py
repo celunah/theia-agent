@@ -69,19 +69,13 @@ def _snapshot(**overrides: Any) -> dict[str, Any]:
     return value
 
 
-class _TTYBuffer:
-    def __init__(self) -> None:
-        self.value = ""
-
+class _TTYBuffer(io.StringIO):
     def isatty(self) -> bool:
         return True
 
-    def write(self, value: str) -> int:
-        self.value += value
-        return len(value)
-
-    def flush(self) -> None:
-        return
+    @property
+    def value(self) -> str:
+        return self.getvalue()
 
 
 class LighthouseTests(unittest.IsolatedAsyncioTestCase):
@@ -347,13 +341,23 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Codex session resume failed", rendered)
 
     async def test_thread_creation_keeps_the_active_discord_route(self) -> None:
-        server = main.CodexAppServer()
-        server._ensure_running = AsyncMock()
-        server._request = AsyncMock(return_value={"thread": {"id": "created"}})
-        channel = SimpleNamespace(name="general", guild=SimpleNamespace(id=1))
-        session = server.select_session("guild:1:channel:3:user:8", channel=channel)
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(
+                os.environ,
+                {
+                    "THEIA_HOME": str(Path(directory) / "theia"),
+                    "THEIA_STATE": str(Path(directory) / "state.json"),
+                },
+            ),
+        ):
+            server = main.CodexAppServer()
+            server._ensure_running = AsyncMock()
+            server._request = AsyncMock(return_value={"thread": {"id": "created"}})
+            channel = SimpleNamespace(name="general", guild=SimpleNamespace(id=1))
+            session = server.select_session("guild:1:channel:3:user:8", channel=channel)
 
-        await server._ensure_thread(session, allow_tools=False)
+            await server._ensure_thread(session, allow_tools=False)
 
         snapshot = server.lighthouse_snapshot()
         self.assertEqual(
@@ -1004,17 +1008,19 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
             refresh_interval=0.1,
             heartbeat_interval=1,
         )
-        self.assertTrue(await view.start())
-        await asyncio.sleep(0.15)
-        await view.close()
+        with patch.dict(os.environ, {"TERM": "xterm"}, clear=False):
+            self.assertTrue(await view.start())
+            await asyncio.sleep(0.15)
+            await view.close()
 
         self.assertTrue(calls)
         self.assertEqual(calls[0], "heartbeat:1.5")
         self.assertIn("Lighthouse View", output.value)
         self.assertIn("Runtime", output.value)
         self.assertIn("\x1b[2J", output.value)
-        self.assertIn("\x1b[?1049h", output.value)
-        self.assertIn("\x1b[?1049l", output.value)
+        if os.name != "nt":
+            self.assertIn("\x1b[?1049h", output.value)
+            self.assertIn("\x1b[?1049l", output.value)
 
     async def test_interactive_view_mutes_console_logs_and_preserves_diagnostics(self):
         output = _TTYBuffer()

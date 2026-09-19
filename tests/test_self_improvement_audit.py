@@ -201,13 +201,16 @@ class SelfImprovementAuditTests(AsyncBehaviorTestBase):
                 },
             ):
                 server = main.CodexAppServer()
-                for _ in range(_SELF_IMPROVEMENT_HISTORY_LIMIT + 5):
-                    server._append_self_improvement_audit(
-                        category="memory",
-                        target="memory:MEMORY.md",
-                        status="applied",
-                        reason="Validated durable update applied atomically.",
-                    )
+                with patch(
+                    "theia.server.self_improvement.time.time_ns", return_value=123
+                ):
+                    for _ in range(_SELF_IMPROVEMENT_HISTORY_LIMIT + 5):
+                        server._append_self_improvement_audit(
+                            category="memory",
+                            target="memory:MEMORY.md",
+                            status="applied",
+                            reason="Validated durable update applied atomically.",
+                        )
                 server._persist_state()
                 restored = main.CodexAppServer()
 

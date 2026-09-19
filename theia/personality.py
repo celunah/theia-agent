@@ -2,13 +2,14 @@
 
 import contextlib
 import re
-import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, unquote
 from typing import Any, cast
 import unicodedata
+
+from .identifiers import new_unique_token
 
 PERSONALITY_SUFFIXES = frozenset({".md", ".markdown", ".text", ".txt"})
 MAX_PERSONALITY_BYTES = 128 * 1024
@@ -220,7 +221,7 @@ class PersonalityStore:
         existing = self.resolve(name)
         stored_name = existing.name if existing is not None else name
         path = self._path_for(stored_name)
-        temporary = path.with_name(f".{path.name}.{time.time_ns()}.tmp")
+        temporary = path.with_name(f".{path.name}.{new_unique_token()}.tmp")
         try:
             self.root.mkdir(parents=True, exist_ok=True)
             self.root.chmod(0o700)

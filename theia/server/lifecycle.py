@@ -24,6 +24,7 @@ from ..core import (
     _codex_logger,
     _TurnState,
 )
+from ..identifiers import new_unique_token
 from .codex_update import CodexUpdateResult
 from .policy import MAX_CODEX_MEMORY_RESTART_BACKOFF
 
@@ -243,7 +244,7 @@ class CodexLifecycleMixin:
         if not database_files:
             return None
 
-        backup = self._codex_home / f"codex-database-repair-{time.time_ns()}"
+        backup = self._codex_home / f"codex-database-repair-{new_unique_token()}"
         moved: list[tuple[Path, Path]] = []
         try:
             backup.mkdir(mode=0o700)

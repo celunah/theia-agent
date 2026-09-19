@@ -32,6 +32,7 @@ from ..core import (
     _subtext,
     _truncate,
 )
+from ..identifiers import new_unique_token
 from .policy import (
     MAX_ATTACHMENT_BYTES,
     _APPROVAL_PATH_RE,
@@ -1106,7 +1107,7 @@ class CodexTransportMixin:
                 state.user_id,
                 state,
                 {
-                    "itemId": f"runtime-files-{time.monotonic_ns()}",
+                    "itemId": f"runtime-files-{new_unique_token()}",
                     "reason": (
                         "send a file from Theia's private runtime directory to Discord"
                     ),

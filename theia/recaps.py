@@ -4,7 +4,6 @@ import contextlib
 import json
 import os
 import re
-import time
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
@@ -17,6 +16,7 @@ from .core import (
     _redact_private_paths,
     _truncate,
 )
+from .identifiers import new_unique_token
 
 logger = _codex_logger()
 
@@ -172,7 +172,7 @@ class NightlyRecapManager:
         else:
             local_time = local_time.astimezone(self.timezone)
         scope = self._scope_key(guild_id, user_id)
-        event_id = str(request_id or f"{time.time_ns()}:{len(self._journal)}")
+        event_id = str(request_id or f"{new_unique_token()}:{len(self._journal)}")
         if any(event.get("id") == event_id for event in self._journal):
             return
         event = {
@@ -501,7 +501,7 @@ class NightlyRecapManager:
 
     def _quarantine(self, reason: str) -> None:
         quarantine = self.state_path.with_name(
-            f"{self.state_path.name}.corrupt-{time.time_ns()}"
+            f"{self.state_path.name}.corrupt-{new_unique_token()}"
         )
         try:
             self.state_path.replace(quarantine)

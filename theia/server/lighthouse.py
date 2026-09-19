@@ -815,8 +815,8 @@ class LighthouseView:
         changed = False
         try:
             fd = int(stream.fileno())
-            import termios
-            import tty
+            termios = cast(Any, __import__("termios"))
+            tty = cast(Any, __import__("tty"))
 
             old_attrs = termios.tcgetattr(fd)
             tty.setcbreak(fd)
@@ -832,8 +832,7 @@ class LighthouseView:
         ):
             if changed and fd is not None and old_attrs is not None:
                 with contextlib.suppress(Exception):
-                    import termios
-
+                    termios = cast(Any, __import__("termios"))
                     termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
             return
         self._keyboard_fd = fd
@@ -852,8 +851,7 @@ class LighthouseView:
             asyncio.get_running_loop().remove_reader(fd)
         if old_attrs is not None:
             with contextlib.suppress(Exception):
-                import termios
-
+                termios = cast(Any, __import__("termios"))
                 termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
 
     async def start(self) -> bool:

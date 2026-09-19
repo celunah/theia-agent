@@ -21,6 +21,7 @@ from ..core import (
     _safe_intermediate_text,
     _truncate,
 )
+from ..identifiers import new_unique_token
 from .attention_recurrence import (
     MINIMUM_REPETITION_CONFIDENCE,
     RECURRENCE_RELATIONSHIP_TYPES,
@@ -118,7 +119,7 @@ class CodexAttentionMixin:
     @staticmethod
     def _new_context_id(state: _ConversationAttentionState) -> str:
         while True:
-            context_id = f"context-{time.monotonic_ns()}"
+            context_id = f"context-{new_unique_token()}"
             if context_id not in state.contexts:
                 return context_id
 
@@ -798,7 +799,7 @@ class CodexAttentionMixin:
         if not session_key.strip():
             return None
         await self._ensure_running()
-        session_id = f"__attention__:{time.monotonic_ns()}"
+        session_id = f"__attention__:{new_unique_token()}"
         session = _Session(key=session_id)
         self._sessions[session_id] = session
         thread_id: str | None = None

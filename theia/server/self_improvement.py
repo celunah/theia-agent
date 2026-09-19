@@ -40,6 +40,7 @@ from ..core import (
     _subtext,
     _truncate,
 )
+from ..identifiers import new_unique_token
 from ..personality import PersonalityError
 from .usage import estimated_tokens
 from .worker_diagnostics import record_current_worker_failure, run_worker
@@ -134,7 +135,7 @@ class CodexSelfImprovementMixin:
         async with self._self_improvement_lock:
             if not self._has_turn_server_admin_access(channel, user_id, user):
                 return 0
-            review_key = f"__self_improvement__:{time.monotonic_ns()}"
+            review_key = f"__self_improvement__:{new_unique_token()}"
             review_session = _Session(key=review_key)
             self._sessions[review_key] = review_session
             review_state: _TurnState | None = None
@@ -306,7 +307,7 @@ class CodexSelfImprovementMixin:
     @staticmethod
     def _self_improvement_audit_id(*, revert: bool = False) -> str:
         suffix = "-revert" if revert else ""
-        return f"imp-{time.time_ns():x}{suffix}"
+        return f"imp-{new_unique_token()}{suffix}"
 
     @staticmethod
     def _safe_audit_label(value: Any, fallback: str) -> str:
@@ -676,7 +677,7 @@ class CodexSelfImprovementMixin:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.parent.chmod(0o700)
-            temporary = path.with_name(f".{path.name}.{time.time_ns()}.tmp")
+            temporary = path.with_name(f".{path.name}.{new_unique_token()}.tmp")
             temporary.write_text(text, encoding="utf-8")
             temporary.chmod(0o600)
             temporary.replace(path)
