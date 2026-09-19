@@ -67,6 +67,16 @@ class PerceptionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(route.native_indices, ())
         self.assertEqual(route.qwen_indices, (0,))
 
+    def test_unknown_capabilities_do_not_claim_native_audio(self) -> None:
+        capabilities = CodexModalityCapabilities.from_snapshot({"namespaceTools": True})
+        image = _attachment("photo.png", "image/png")
+        audio = _attachment("voice.ogg", "audio/ogg")
+
+        route = route_attachments((image, audio), capabilities, qwen_available=True)
+
+        self.assertEqual(route.native_indices, (0,))
+        self.assertEqual(route.qwen_indices, (1,))
+
     def test_dedicated_request_routes_native_media_only_once(self) -> None:
         capabilities = CodexModalityCapabilities.from_snapshot(
             {"inputModalities": ["image"]}

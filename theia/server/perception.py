@@ -378,10 +378,10 @@ class CodexModalityCapabilities:
         """Read explicit modality facts without assuming a fixed response shape."""
         modalities: set[str] = set()
         max_file_bytes: int | None = None
-        recognized = False
+        modality_facts_found = False
 
         def visit(value: Any, depth: int = 0) -> None:
-            nonlocal max_file_bytes, recognized
+            nonlocal max_file_bytes, modality_facts_found
             if depth > 3 or not isinstance(value, dict):
                 return
             for key, item in value.items():
@@ -393,18 +393,18 @@ class CodexModalityCapabilities:
                     "inputtypes",
                     "supportedinputs",
                 }:
-                    recognized = True
+                    modality_facts_found = True
                     _add_modalities(modalities, item)
                 elif normalized in {"imageinput", "supportsvision", "vision"}:
-                    recognized = True
+                    modality_facts_found = True
                     if item is True:
                         modalities.add("image")
                 elif normalized in {"audioinput", "supportsaudio"}:
-                    recognized = True
+                    modality_facts_found = True
                     if item is True:
                         modalities.add("audio")
                 elif normalized in {"videoinput", "supportsvideo"}:
-                    recognized = True
+                    modality_facts_found = True
                     if item is True:
                         modalities.add("video")
                 elif (
@@ -419,12 +419,11 @@ class CodexModalityCapabilities:
                     and isinstance(item, int)
                     and not isinstance(item, bool)
                 ):
-                    recognized = True
                     max_file_bytes = max(0, item)
                 visit(item, depth + 1)
 
         visit(snapshot)
-        return cls(frozenset(modalities), recognized, max_file_bytes)
+        return cls(frozenset(modalities), modality_facts_found, max_file_bytes)
 
     def supports(
         self,
@@ -444,7 +443,10 @@ class CodexModalityCapabilities:
             return False
         if self.known:
             return category in self.modalities
-        return native_input_type in {"localImage", "localAudio"}
+        # The current attachment contract has a proven image path. Do not
+        # silently claim native audio support when the provider snapshot does
+        # not advertise it; that media must be offloaded or reported absent.
+        return native_input_type == "localImage"
 
 
 @dataclass(frozen=True)
