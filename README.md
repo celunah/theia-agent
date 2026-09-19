@@ -85,6 +85,21 @@ export THEIA_GID="$(id -g)"
 docker compose up --build -d
 ```
 
+On a systemd user session with an unlocked GNOME Keyring, the checked-in
+`systemd/theia.service` can keep the container running and rebuild it when
+needed:
+
+```bash
+install -Dm644 systemd/theia.service "$HOME/.config/systemd/user/theia.service"
+systemctl --user daemon-reload
+systemctl --user enable --now theia.service
+```
+
+The unit requires `gnome-keyring-daemon.service` and passes the user D-Bus
+socket into the container for unattended vault unlocks. Starting the daemon
+alone does not unlock a login keyring; the user session must unlock its Secret
+Service collection first.
+
 On native Windows PowerShell, use:
 
 ```powershell
