@@ -174,7 +174,9 @@ Command responses, approvals, and choices use embeds. Statuses use compact `-#` 
   including `Compacting context` and `Generating image`. A generic `Thinking`
   status is deferred for five seconds and is skipped when the turn finishes
   sooner, so short turns do not create a transient progress message.
-- `Thought for N seconds` or `Thought for M minutes and S seconds` remains after completion.
+- The default thinking label retains the current runtime step. Sub-second
+  thinking messages are removed when the answer is ready; longer turns retain
+  `Thought for N seconds` or `Thought for M minutes and S seconds` after completion.
 - Natural-language Codex preambles and intermediate messages are shown when Codex emits them.
 - Updates are coalesced rather than token-streamed.
 - Raw commands, tool calls, paths, output, credentials, and chain-of-thought are not exposed.
@@ -205,6 +207,11 @@ durations, file sizes, token usage, and optional price estimates are reported
 separately under `/usage`. This checkout does not contain an encrypted Qwen
 credential database, so its optional adapter takes a private deployment API-key
 environment value and does not reuse the realtime voice token automatically.
+Other readable attachments, including archives and documents without a native
+Codex modality, remain available in Theia's private attachment workspace. The
+agent receives a safe local reference and decides whether tools can inspect the
+file; Theia does not reject those files solely because it cannot interpret them
+itself. Attachment count, size, cache, and workspace safety limits still apply.
 
 Rich Presence activity text is generated in short, low-effort ephemeral Codex
 turns with no tools, self-improvement, or session writes. Active task activity

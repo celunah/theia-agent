@@ -338,6 +338,25 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         self.assertEqual(calls[0]["content"], "-# Thinking")
         await delivery.finalize("The complete response.")
 
+    async def test_subsecond_thinking_status_is_removed_before_final_answer(
+        self,
+    ) -> None:
+        calls: list[dict] = []
+        status_message = _Message()
+
+        async def send(**kwargs):
+            calls.append(kwargs)
+            return status_message if len(calls) == 1 else _Message()
+
+        delivery = main._ResponseDelivery(send, {}, owner_id=7)
+        with patch("theia.delivery.time.monotonic", side_effect=[100.0, 100.5]):
+            await delivery.on_event("item_started", {"type": "commandExecution"})
+            await delivery.finalize("The complete response.")
+
+        self.assertTrue(status_message.deleted)
+        self.assertEqual(calls[-1]["content"], "The complete response.")
+        self.assertFalse(status_message.edits)
+
     async def test_intermediates_are_not_streamed_before_item_completion(self) -> None:
         calls: list[dict] = []
 
@@ -590,6 +609,10 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         self.assertNotIn("completed", calls[-1]["content"].casefold())
 
     def test_thought_duration_switches_units(self) -> None:
+        self.assertEqual(
+            main._format_thought_duration(0.5),
+            "Thought for less than a second",
+        )
         self.assertEqual(main._format_thought_duration(2), "Thought for 2 seconds")
         self.assertEqual(
             main._format_thought_duration(60),

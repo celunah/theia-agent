@@ -28,12 +28,12 @@ from .policy import (
 from .attachments import (
     AttachmentManifest,
     AttachmentPreparation,
+    available_attachment_note,
     attachment_capabilities,
     attachment_media_category,
     safe_attachment_content_type,
     safe_attachment_filename,
     unavailable_attachment_note,
-    unsupported_attachment_note,
     validate_cached_attachment,
 )
 from ..audio import AudioOutput, AudioProtocolError
@@ -1015,13 +1015,17 @@ class CodexWorkerMixin:
                     content_type=content_type,
                     cached=True,
                     readable=True,
-                    failure_reason="unsupported media",
+                    supported_semantic_capabilities=attachment_capabilities(
+                        category, readable=True
+                    ),
                 )
             )
             prepared.append(
                 {
                     "type": "text",
-                    "text": unsupported_attachment_note(filename, category),
+                    "text": available_attachment_note(
+                        filename, checked.path, content_type
+                    ),
                 }
             )
         return AttachmentPreparation(tuple(prepared), tuple(manifest))

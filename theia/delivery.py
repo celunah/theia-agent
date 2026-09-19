@@ -1071,7 +1071,7 @@ class _ResponseDelivery:
                     label(  # pylint: disable=not-callable
                         self.guild_id,
                         target,
-                        title,
+                        description if title == "Thinking" else title,
                         context=context,
                     )
                     if callable(label)
@@ -1079,7 +1079,7 @@ class _ResponseDelivery:
                         self.guild_id,
                         target,
                         "label",
-                        title,
+                        description if title == "Thinking" else title,
                         context=context,
                     )
                 )
@@ -1131,46 +1131,54 @@ class _ResponseDelivery:
         async with self.lock:
             self._generic_thinking.cancel()
             if self.status_message is not None and self.thought_started_at is not None:
-                thought = _format_thought_duration(
-                    time.monotonic() - self.thought_started_at
-                )
-                if self.customizer is not None:
-                    try:
-                        label = getattr(self.customizer, "label", None)
-                        thought = (
-                            label(
-                                self.guild_id,
-                                "label:thought_duration",
-                                thought,
-                                context={
-                                    **self.context,
-                                    "duration": thought.removeprefix("Thought for "),
-                                    "status": "Thought duration",
-                                    "text": thought,
-                                },
+                elapsed = time.monotonic() - self.thought_started_at
+                if elapsed < 1.0:
+                    with contextlib.suppress(discord.DiscordException, AttributeError):
+                        await self.status_message.delete()
+                    self.status_message = None
+                else:
+                    thought = _format_thought_duration(elapsed)
+                    if self.customizer is not None:
+                        try:
+                            label = getattr(self.customizer, "label", None)
+                            thought = (
+                                label(
+                                    self.guild_id,
+                                    "label:thought_duration",
+                                    thought,
+                                    context={
+                                        **self.context,
+                                        "duration": thought.removeprefix(
+                                            "Thought for "
+                                        ),
+                                        "status": "Thought duration",
+                                        "text": thought,
+                                    },
+                                )
+                                if callable(label)
+                                else self.customizer.render(
+                                    self.guild_id,
+                                    "label:thought_duration",
+                                    "label",
+                                    thought,
+                                    context={
+                                        **self.context,
+                                        "duration": thought.removeprefix(
+                                            "Thought for "
+                                        ),
+                                        "status": "Thought duration",
+                                        "text": thought,
+                                    },
+                                )
                             )
-                            if callable(label)
-                            else self.customizer.render(
-                                self.guild_id,
-                                "label:thought_duration",
-                                "label",
-                                thought,
-                                context={
-                                    **self.context,
-                                    "duration": thought.removeprefix("Thought for "),
-                                    "status": "Thought duration",
-                                    "text": thought,
-                                },
+                        except CustomizationError as exc:
+                            logger.debug(
+                                "Could not render thought status with frontend preferences "
+                                "(error=%s)",
+                                type(exc).__name__,
                             )
-                        )
-                    except CustomizationError as exc:
-                        logger.debug(
-                            "Could not render thought status with frontend preferences "
-                            "(error=%s)",
-                            type(exc).__name__,
-                        )
-                with contextlib.suppress(discord.DiscordException, AttributeError):
-                    await self.status_message.edit(content=_subtext(thought))
+                    with contextlib.suppress(discord.DiscordException, AttributeError):
+                        await self.status_message.edit(content=_subtext(thought))
         paths = tuple(
             dict.fromkeys(
                 path

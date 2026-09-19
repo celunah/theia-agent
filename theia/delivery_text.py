@@ -22,7 +22,9 @@ def _split_pages(text: str, limit: int = 1900) -> list[str]:
 
 
 def _format_thought_duration(seconds: float) -> str:
-    elapsed = max(0, int(seconds))
+    if seconds < 1:
+        return "Thought for less than a second"
+    elapsed = max(1, int(seconds))
     if elapsed < 60:
         unit = "second" if elapsed == 1 else "seconds"
         return f"Thought for {elapsed} {unit}"

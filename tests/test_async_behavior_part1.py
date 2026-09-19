@@ -419,6 +419,28 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
             assert delivery.status_message is not None
             self.assertEqual(calls[0]["content"], "-# Update: Checking the request.")
 
+    async def test_default_customized_thinking_status_keeps_the_runtime_step(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = main.FrontendCustomizationStore(Path(directory) / "frontend.json")
+            calls: list[dict] = []
+
+            async def send(**kwargs):
+                calls.append(kwargs)
+                return _Message()
+
+            delivery = main._ResponseDelivery(
+                send,
+                {},
+                owner_id=7,
+                customizer=store,
+                guild_id=42,
+            )
+            await delivery.on_event("item_started", {"type": "webSearch"})
+
+        self.assertEqual(calls[0]["content"], "-# Searching the web")
+
     async def test_self_improvement_statuses_are_customizable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = main.FrontendCustomizationStore(Path(directory) / "frontend.json")

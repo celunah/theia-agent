@@ -1034,7 +1034,7 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         self.assertTrue(preparation.manifest[0].cached)
         self.assertFalse(preparation.manifest[0].readable)
 
-    async def test_oversized_and_unsupported_video_are_truthful(self) -> None:
+    async def test_oversized_and_generic_attachments_remain_agent_visible(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             with patch.dict(
@@ -1057,10 +1057,19 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
                     size=4,
                     read=AsyncMock(return_value=b"video"),
                 )
+                archive = SimpleNamespace(
+                    filename="bundle.tar.gz",
+                    content_type="application/gzip",
+                    size=5,
+                    read=AsyncMock(return_value=b"gzip"),
+                )
                 oversized_preparation = await server._prepare_attachment_manifest(
                     (oversized,)
                 )
                 video_preparation = await server._prepare_attachment_manifest((video,))
+                archive_preparation = await server._prepare_attachment_manifest(
+                    (archive,)
+                )
 
         self.assertEqual(
             oversized_preparation.manifest[0].failure_reason, "attachment too large"
@@ -1070,16 +1079,17 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
             {item.get("type") for item in oversized_preparation.inputs},
         )
         self.assertEqual(video_preparation.manifest[0].media_category, "video")
-        self.assertEqual(
-            video_preparation.manifest[0].failure_reason, "unsupported media"
-        )
+        self.assertIsNone(video_preparation.manifest[0].failure_reason)
         self.assertEqual(
             video_preparation.manifest[0].supported_semantic_capabilities, ()
         )
-        self.assertNotIn(
-            "localVideo", {item.get("type") for item in video_preparation.inputs}
+        self.assertIn(
+            "available for local inspection", video_preparation.inputs[0]["text"]
         )
-        self.assertNotIn("watched", video_preparation.inputs[0]["text"])
+        self.assertEqual(archive_preparation.manifest[0].media_category, "other")
+        self.assertIsNone(archive_preparation.manifest[0].failure_reason)
+        self.assertIn("bundle.tar.gz", archive_preparation.inputs[0]["text"])
+        self.assertIn("application/gzip", archive_preparation.inputs[0]["text"])
 
     async def test_attachment_manifest_reaches_self_model_without_private_paths(
         self,
