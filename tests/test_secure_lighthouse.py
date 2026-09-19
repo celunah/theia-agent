@@ -10,7 +10,7 @@ from theia.server.lighthouse_render import render_lighthouse
 class SecureLighthouseTests(unittest.TestCase):
     def test_locked_lighthouse_redacts_runtime_data(self) -> None:
         snapshot = {
-            "version": "2.0.0",
+            "version": "2.1.0",
             "action": "Processing request",
             "model": "gpt-5.6-luna",
             "character": {"name": "Cel"},

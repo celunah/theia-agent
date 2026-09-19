@@ -15,7 +15,7 @@ RUN git rev-parse --short=7 HEAD > /theia-build-revision
 
 FROM python:3.12-slim-bookworm
 
-ARG THEIA_VERSION=2.0.0
+ARG THEIA_VERSION=2.1.0
 ARG THEIA_UID=1000
 ARG THEIA_GID=1000
 

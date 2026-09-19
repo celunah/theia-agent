@@ -19,7 +19,7 @@ from theia.colors import THEIA_COLORS, color_value
 
 def _snapshot(**overrides: Any) -> dict[str, Any]:
     value: dict[str, Any] = {
-        "version": "2.0.0",
+        "version": "2.1.0",
         "action": "Processing request",
         "mode": "text",
         "model": "gpt-5.6-luna",
@@ -653,7 +653,7 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
 
         rendered = render_lighthouse_diagnostics(snapshot, (record,))
 
-        self.assertIn("Theia 2.0.0 · Lighthouse Diagnostics", rendered)
+        self.assertIn("Theia 2.1.0 · Lighthouse Diagnostics", rendered)
         self.assertNotIn("Status       Processing request", rendered)
         self.assertNotIn("Runtime\n", rendered)
         self.assertIn("method=thread/delete", rendered)
@@ -1156,7 +1156,7 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(view._diagnostic_mode)
         self.assertTrue(live.update.called)
         self.assertIn(
-            "Theia 2.0.0 · Lighthouse Diagnostics", live.update.call_args.args[0]
+            "Theia 2.1.0 · Lighthouse Diagnostics", live.update.call_args.args[0]
         )
 
         view._handle_keyboard_text("\x1bOP")

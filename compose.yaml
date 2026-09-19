@@ -5,10 +5,10 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        THEIA_VERSION: 2.0.0
+        THEIA_VERSION: 2.1.0
         THEIA_UID: "${THEIA_UID:-1000}"
         THEIA_GID: "${THEIA_GID:-1000}"
-    image: theia-agent:2.0.0
+    image: theia-agent:2.1.0
     env_file:
       - .env
     environment:

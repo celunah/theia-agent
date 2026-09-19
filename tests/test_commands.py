@@ -985,7 +985,7 @@ class CommandSurfaceTests(unittest.TestCase):
         self.assertEqual(
             [(field.name, field.value) for field in embed.fields],
             [
-                ("Theia Agent", "2.0.0 (a1b2c3d)"),
+                ("Theia Agent", "2.1.0 (a1b2c3d)"),
                 ("Codex CLI", "0.153.0"),
                 ("Account", "@username"),
                 ("Plan", "Plus ($20/mo)"),
