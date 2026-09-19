@@ -789,7 +789,14 @@ class CodexStateMixin:
         session.lighthouse_user_name = None
         self._record_runtime_event("session_reset")
 
-    def rebind_session(self, old_key: str, new_key: str) -> bool:
+    def rebind_session(
+        self,
+        old_key: str,
+        new_key: str,
+        *,
+        channel: Any | None = None,
+        user: Any | None = None,
+    ) -> bool:
         """Keep a turn's Codex session available after moving to a Discord thread."""
         old_canonical = self._canonical_session_key(old_key)
         new_canonical = self._canonical_session_key(new_key)
@@ -813,7 +820,24 @@ class CodexStateMixin:
             if self._canonical_session_key(target) == old_canonical:
                 self._session_aliases[alias] = new_canonical
         self._session_aliases[old_canonical] = new_canonical
+        if channel is not None:
+            guild = getattr(channel, "guild", None)
+            session.lighthouse_is_guild = guild is not None
+            session.lighthouse_channel_name = (
+                _safe_intermediate_text(getattr(channel, "name", None), 60) or None
+            )
+            session.lighthouse_user_name = None
+            if guild is None and user is not None:
+                session.lighthouse_user_name = (
+                    _safe_intermediate_text(
+                        getattr(user, "display_name", None)
+                        or getattr(user, "name", None),
+                        60,
+                    )
+                    or None
+                )
         self._persist_state()
+        self._record_runtime_event("session_rebound")
         logger.info("Rebound Codex session to a newly created Discord thread")
         return True
 

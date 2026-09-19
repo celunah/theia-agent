@@ -49,6 +49,7 @@ _EVENT_LABELS = {
     "session_created": "Session created",
     "session_resumed": "Session resumed",
     "session_selected": "Session selected",
+    "session_rebound": "Session route changed",
     "session_reset": "Session reset",
     "session_degraded": "Session degraded",
     "codex_starting": "Codex starting",
@@ -551,12 +552,16 @@ def _event_lines(snapshot: dict[str, Any]) -> list[str]:
     if not events:
         return ["  No recent events"]
     lines: list[str] = []
-    for event in list(events)[-LIGHTHOUSE_EVENT_LIMIT:][::-1]:
-        if not isinstance(event, dict):
-            continue
+    visible_events = [
+        event
+        for event in events
+        if isinstance(event, dict)
+        and not _is_internal_worker_event(
+            str(event.get("event") or "").casefold(), event.get("detail")
+        )
+    ]
+    for event in visible_events[-LIGHTHOUSE_EVENT_LIMIT:][::-1]:
         event_name = str(event.get("event") or "").casefold()
-        if _is_internal_worker_event(event_name, event.get("detail")):
-            continue
         label = _event_title(event_name, event.get("detail"))
         severity = _event_severity(event_name, event.get("detail"))
         lines.append(
@@ -767,13 +772,16 @@ def _tight_compact_lines(snapshot: dict[str, Any], *, width: int) -> list[str]:
     runtime = parts["runtime"]
     events = snapshot.get("events")
     event_count = (
-        sum(
-            1
-            for event in events
-            if isinstance(event, dict)
-            and not _is_internal_worker_event(
-                str(event.get("event") or "").casefold(), event.get("detail")
-            )
+        min(
+            LIGHTHOUSE_EVENT_LIMIT,
+            sum(
+                1
+                for event in events
+                if isinstance(event, dict)
+                and not _is_internal_worker_event(
+                    str(event.get("event") or "").casefold(), event.get("detail")
+                )
+            ),
         )
         if isinstance(events, (list, tuple))
         else 0
@@ -1111,11 +1119,11 @@ def _diagnostic_lines(
     events = events if isinstance(events, (list, tuple)) else ()
     event_items = [
         event
-        for event in list(events)[-LIGHTHOUSE_EVENT_LIMIT:][::-1]
+        for event in reversed(events)
         if isinstance(event, dict)
         and str(event.get("event") or "").casefold() not in {"log_warning", "log_error"}
         and _dashboard_text(event.get("detail"), 180)
-    ]
+    ][:LIGHTHOUSE_EVENT_LIMIT]
     for event in event_items:
         lines.append(_styled_diagnostic_event(event))
     if event_items:

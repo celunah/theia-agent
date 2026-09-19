@@ -889,6 +889,8 @@ async def handle_request(
         bot.codex.rebind_session(
             request_session_key,
             session_key(new_channel, user_id),
+            channel=new_channel,
+            user=user,
         )
         if _is_thread(new_channel):
             bot._participating_threads.add(new_channel.id)

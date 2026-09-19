@@ -367,6 +367,41 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
             any(event["event"] == "session_created" for event in snapshot["events"])
         )
 
+    def test_rebinding_updates_the_lighthouse_route_after_the_turn(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(
+                os.environ,
+                {
+                    "THEIA_HOME": str(Path(directory) / "theia"),
+                    "THEIA_STATE": str(Path(directory) / "state.json"),
+                },
+            ),
+        ):
+            server = main.CodexAppServer()
+            source = SimpleNamespace(name="general", guild=SimpleNamespace(id=1))
+            thread = SimpleNamespace(name="codex-thread", guild=source.guild)
+            user = SimpleNamespace(display_name="Alice")
+            server.select_session("guild:1:channel:2:user:7", channel=source, user=user)
+
+            self.assertTrue(
+                server.rebind_session(
+                    "guild:1:channel:2:user:7",
+                    "guild:1:channel:99:user:7",
+                    channel=thread,
+                    user=user,
+                )
+            )
+            snapshot = server.lighthouse_snapshot()
+
+        self.assertEqual(
+            snapshot["session"]["current"], "Server conversation · #codex-thread"
+        )
+        self.assertTrue(
+            any(event["event"] == "session_rebound" for event in snapshot["events"])
+        )
+        self.assertIn("Session route changed", render_lighthouse(snapshot))
+
     async def test_live_session_display_tracks_active_turn_ownership(self) -> None:
         server = main.CodexAppServer()
         no_session = server.lighthouse_snapshot()
@@ -532,6 +567,16 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("thread/delete", rendered)
         self.assertNotIn("serverOverloaded", rendered)
         self.assertNotIn("internal protocol detail", rendered)
+
+    def test_filtered_worker_history_does_not_hide_visible_events(self) -> None:
+        events = ({"timestamp": 0, "event": "turn_completed"},) + tuple(
+            {"timestamp": index, "event": "worker_failed"} for index in range(1, 13)
+        )
+
+        rendered = render_lighthouse(_snapshot(events=events))
+
+        self.assertIn("Codex turn completed", rendered)
+        self.assertNotIn("No recent events", rendered)
 
     def test_discord_gateway_handshake_errors_are_specific_warnings(self) -> None:
         rendered = render_lighthouse(
@@ -1045,6 +1090,8 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError("diagnostic traceback")
             except RuntimeError:
                 logger.exception("preserved failure")
+            logger.warning("Codex turn timed out; interrupting it (duration_ms=100.0)")
+            record_event("turn_timed_out", "")
             await asyncio.sleep(0.05)
             await view.close()
 
@@ -1052,6 +1099,14 @@ class LighthouseTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("ERROR", output.value)
             self.assertTrue(any(record.exc_info for record in view._diagnostics))
             self.assertIn(("log_error", "preserved failure"), events)
+            self.assertIn(("turn_timed_out", ""), events)
+            self.assertNotIn(
+                (
+                    "log_warning",
+                    "Codex turn timed out; interrupting it (duration_ms=100.0)",
+                ),
+                events,
+            )
             self.assertIn("preserved failure", view.diagnostic_view())
             self.assertIn("RuntimeError: diagnostic traceback", view.diagnostic_view())
             self.assertEqual(list(handler.filters), [])

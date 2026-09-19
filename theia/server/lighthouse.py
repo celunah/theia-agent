@@ -27,6 +27,7 @@ from ..core import (
 )
 from .lighthouse_render import (
     LIGHTHOUSE_DIAGNOSTIC_LIMIT,
+    _stable_log_event_name,
     diagnostic_scroll_limit,
     render_lighthouse,
     render_lighthouse_diagnostics,
@@ -435,7 +436,9 @@ class CodexLighthouseMixin:
                 else {"status": "unknown", "reason": None},
             },
             "startup": startup,
-            "events": self.runtime_events(limit=12),
+            # Keep enough history for the renderer to discard internal worker
+            # events without hiding older operator-visible events.
+            "events": self.runtime_events(limit=100),
         }
         return snapshot
 
@@ -468,6 +471,11 @@ class _LighthouseDiagnosticHandler(logging.Handler):
         except Exception:  # noqa: BLE001 - diagnostics must never affect logging
             detail = ""
         if not detail:
+            return
+        if _stable_log_event_name(detail) == "turn_timed_out":
+            # The timeout path records a structured event immediately after
+            # logging this warning. Retain the log record for diagnostics but
+            # avoid emitting a duplicate dashboard row.
             return
         recorder = getattr(self.codex, "_record_runtime_event", None)
         if not callable(recorder):
