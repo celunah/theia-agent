@@ -19,6 +19,7 @@ from .attachments import (
     safe_attachment_content_type,
     safe_attachment_filename,
 )
+from .perception import CodexModalityCapabilities, QwenPerceptionClient
 from .policy import WORKSPACE_MAX_ENTRIES
 
 logger = _codex_logger()
@@ -105,28 +106,39 @@ class CodexSelfModelMixin:
         middleware_capabilities = getattr(middleware, "capabilities", None)
         transport_available = transport_health == "healthy"
         image_status = "available" if transport_available else "currently unavailable"
+        native_modalities = CodexModalityCapabilities.from_snapshot(
+            getattr(self, "_provider_capabilities", None)
+        ).modalities
+        qwen_perception_available = self._qwen_perception_available()
         audio_capable = bool(getattr(self, "voice_mode_available", False))
-        audio_status = (
-            "available"
-            if audio_capable and transport_available
-            else "currently unavailable"
-            if audio_capable
-            else "unavailable"
+        native_audio_capable = "audio" in native_modalities or (
+            audio_capable and voice_provider == "codex-realtime"
         )
-        semantic_audio_capable = (
+        third_party_audio_capable = qwen_perception_available or (
+            audio_capable and voice_provider in {"custom", "qwen"}
+        )
+        audio_status = self._modality_status(
+            native=native_audio_capable,
+            third_party=third_party_audio_capable,
+            transport_available=transport_available,
+        )
+        native_semantic_audio_capable = (
             bool(getattr(self, "realtime_voice_available", False))
             and voice_provider == "codex-realtime"
-        )
-        semantic_audio_capable = semantic_audio_capable or bool(
+        ) or "audio" in native_modalities
+        third_party_semantic_audio_capable = qwen_perception_available or bool(
             voice_provider == "qwen"
             and getattr(middleware_capabilities, "semantic_audio_understanding", False)
         )
-        semantic_audio_status = (
-            "available"
-            if semantic_audio_capable and transport_available
-            else "currently unavailable"
-            if semantic_audio_capable
-            else "unavailable"
+        semantic_audio_status = self._modality_status(
+            native=native_semantic_audio_capable,
+            third_party=third_party_semantic_audio_capable,
+            transport_available=transport_available,
+        )
+        video_status = self._modality_status(
+            native="video" in native_modalities,
+            third_party=qwen_perception_available,
+            transport_available=transport_available,
         )
         protected_status = (
             "available, requires approval"
@@ -144,7 +156,7 @@ class CodexSelfModelMixin:
             "image_input": image_status,
             "audio_input": audio_status,
             "semantic_audio_understanding": semantic_audio_status,
-            "video_input": "unavailable",
+            "video_input": video_status,
             "stt_provider": stt_status,
             "tts_provider": tts_status,
             "active_voice_provider": voice_provider or "none",
@@ -171,6 +183,8 @@ class CodexSelfModelMixin:
             capabilities.append("realtime voice")
         if getattr(self, "voice_mode_available", False) and transport_available:
             capabilities.append("voice input and output")
+        if qwen_perception_available and transport_available:
+            capabilities.append("audio and video perception via a third-party")
 
         revision = getattr(self, "_revision", None)
         if not isinstance(revision, str) or not revision:
@@ -206,7 +220,7 @@ class CodexSelfModelMixin:
             "image_input": image_status,
             "audio_input": audio_status,
             "semantic_audio_understanding": semantic_audio_status,
-            "video_input": "unavailable",
+            "video_input": video_status,
             "stt_provider": stt_status,
             "tts_provider": tts_status,
             "active_voice_provider": voice_provider or "none",
@@ -254,6 +268,34 @@ class CodexSelfModelMixin:
         if getattr(provider, "base_url", ""):
             return "configured but unavailable"
         return "not configured"
+
+    def _qwen_perception_available(self) -> bool:
+        """Return whether the configured third-party media client is usable."""
+        if "_qwen_perception_client" in self.__dict__:
+            client = self.__dict__["_qwen_perception_client"]
+        else:
+            try:
+                client = QwenPerceptionClient.from_environment(
+                    credentials=getattr(self, "_credential_environment", None),
+                    warn_if_incomplete=False,
+                )
+            except Exception:  # noqa: BLE001 - diagnostics must not block a turn
+                return False
+        return bool(client is not None and getattr(client, "available", False))
+
+    @staticmethod
+    def _modality_status(
+        *, native: bool, third_party: bool, transport_available: bool
+    ) -> str:
+        """Describe native and external modality support without overclaiming."""
+        configured = native or third_party
+        if configured and not transport_available:
+            return "currently unavailable"
+        if native:
+            return "available"
+        if third_party:
+            return "available via a third-party"
+        return "unavailable"
 
     def _safe_self_model_snapshot(
         self, *args: Any, **kwargs: Any

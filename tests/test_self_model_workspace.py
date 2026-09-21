@@ -100,9 +100,53 @@ class SelfModelTests(AsyncBehaviorTestBase):
         self.assertEqual(status["stt_provider"], "configured")
         self.assertEqual(status["tts_provider"], "configured")
         self.assertEqual(status["active_voice_provider"], "custom")
-        self.assertEqual(status["audio_input"], "available")
+        self.assertEqual(status["audio_input"], "available via a third-party")
         self.assertEqual(status["semantic_audio_understanding"], "unavailable")
         self.assertEqual(status["discord_tools"], "unavailable")
+
+    def test_qwen_perception_is_reported_as_third_party_support(self) -> None:
+        server = main.CodexAppServer()
+        session = server._session(_workspace_key("qwen-perception"))
+        self._healthy_transport(server)
+        with patch.dict(
+            os.environ,
+            {
+                "THEIA_QWEN_PERCEPTION_ENABLED": "true",
+                "THEIA_QWEN_PERCEPTION_BASE_URL": "https://qwen.example/v1",
+            },
+        ):
+            server._credential_environment = {
+                "THEIA_QWEN_PERCEPTION_API_KEY": "qwen-test-key"
+            }
+            status = server._self_model_snapshot(
+                session,
+                allow_tools=True,
+                allow_discord_tools=False,
+            )["capability_status"]
+
+        self.assertEqual(status["audio_input"], "available via a third-party")
+        self.assertEqual(
+            status["semantic_audio_understanding"], "available via a third-party"
+        )
+        self.assertEqual(status["video_input"], "available via a third-party")
+
+    def test_native_audio_and_video_support_remains_distinct(self) -> None:
+        server = main.CodexAppServer()
+        session = server._session(_workspace_key("native-modalities"))
+        self._healthy_transport(server)
+        server._provider_capabilities = {
+            "inputModalities": ["audio", "video"],
+        }
+
+        status = server._self_model_snapshot(
+            session,
+            allow_tools=True,
+            allow_discord_tools=False,
+        )["capability_status"]
+
+        self.assertEqual(status["audio_input"], "available")
+        self.assertEqual(status["semantic_audio_understanding"], "available")
+        self.assertEqual(status["video_input"], "available")
 
     def test_unavailable_capabilities_are_not_claimed(self) -> None:
         server = main.CodexAppServer()

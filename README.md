@@ -141,6 +141,8 @@ directly to Codex. Qwen receives only unsupported, oversized, or explicitly
 dedicated-perception media; the same item is never sent to both providers in
 one request. The perception report is neutral JSON context, while Codex still
 controls reasoning, personality, tools, and the final response. The current
+runtime self-model reports native modality support as `available` and active
+Qwen audio/video perception as `available via a third-party`.
 Theia's real launcher migrates supported provider secrets from the initial
 private deployment environment into an encrypted vault before connecting to
 Discord. The vault uses an interactive passphrase by default; the Lighthouse

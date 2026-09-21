@@ -556,6 +556,7 @@ class QwenPerceptionClient:
         *,
         credentials: Mapping[str, str] | None = None,
         usage_callback: Callable[[dict[str, Any]], None] | None = None,
+        warn_if_incomplete: bool = True,
     ) -> QwenPerceptionClient | None:
         """Build the optional client only when explicitly enabled and configured."""
         if not _env_bool(QWEN_PERCEPTION_ENABLED_ENV):
@@ -567,7 +568,8 @@ class QwenPerceptionClient:
             else os.getenv(QWEN_PERCEPTION_API_KEY_ENV, "")
         ).strip()
         if not base_url or not api_key:
-            logger.warning("Qwen perception is enabled but not fully configured")
+            if warn_if_incomplete:
+                logger.warning("Qwen perception is enabled but not fully configured")
             return None
         try:
             retries = int(os.getenv(QWEN_PERCEPTION_RETRIES_ENV, "1"))

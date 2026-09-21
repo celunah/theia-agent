@@ -206,9 +206,11 @@ dedicated-perception media go to `qwen3.8-omni-flash`, and a media item is never
 sent to both providers by the router. Qwen output is validated neutral JSON and
 injected as untrusted observational context. Perception requests, retries,
 durations, file sizes, token usage, and optional price estimates are reported
-separately under `/usage`. This checkout does not contain an encrypted Qwen
-credential database, so its optional adapter takes a private deployment API-key
-environment value and does not reuse the realtime voice token automatically.
+separately under `/usage`. Its optional adapter takes the private
+`THEIA_QWEN_PERCEPTION_API_KEY` vault value and does not reuse the realtime
+voice token automatically.
+The self-model distinguishes native support (`available`) from active Qwen
+support (`available via a third-party`) for audio and video perception.
 Other readable attachments, including archives and documents without a native
 Codex modality, remain available in Theia's private attachment workspace. The
 agent receives a safe local reference and decides whether tools can inspect the
