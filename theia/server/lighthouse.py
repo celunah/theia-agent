@@ -286,10 +286,15 @@ class CodexLighthouseMixin:
         if callable(secure_snapshot):
             vault = secure_snapshot()
             if isinstance(vault, dict) and vault.get("status") == "locked":
+                startup = self.startup_snapshot()
+                reason = (
+                    startup.get("reason") if startup["status"] == "degraded" else None
+                )
                 return {
                     "version": THEIA_VERSION,
-                    "action": "Locked",
+                    "action": f"FATAL · {reason}" if reason else "Locked",
                     "vault": vault,
+                    "startup": startup,
                     "events": tuple(vault.get("events", ())),
                 }
         active_sessions = self._lighthouse_active_sessions()

@@ -96,6 +96,7 @@ from theia.server.codex_update import (
     CodexUpdater,
 )
 from theia.server.lighthouse import LighthouseView, render_lighthouse
+from theia.server.launcher import run_secure_launcher
 from theia.server.vault import VaultError
 from theia.core import (
     ADAPTIVE_REASONING_ENV,
@@ -441,27 +442,7 @@ __all__ = [
 
 async def _run_secure_launcher() -> None:
     """Unlock the private credential vault before connecting to Discord."""
-    bot.codex.enable_secure_credentials()
-    try:
-        await bot.lighthouse.start()
-        await bot.lighthouse.pause_secret_input()
-        try:
-            await bot.codex.unlock_secure_credentials()
-        finally:
-            bot.lighthouse.resume_secret_input()
-        token = (
-            bot.codex.secure_credential("TOKEN")
-            or bot.codex.secure_credential("DISCORD_TOKEN")
-            or bot.codex.secure_credential("THEIA_DISCORD_TOKEN")
-        )
-        if not token:
-            raise VaultError("The credential vault does not contain a Discord token.")
-        try:
-            await bot.start(token)
-        finally:
-            del token
-    finally:
-        await bot.close()
+    await run_secure_launcher(bot)
 
 
 if __name__ == "__main__":

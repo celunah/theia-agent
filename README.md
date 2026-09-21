@@ -117,7 +117,9 @@ identity (`1000:1000`) automatically. Theia repairs ownership of the runtime
 and workspace mounts at startup, verifies access as that identity, and then
 drops container privileges. If access still fails, or another startup component
 cannot initialize, the Lighthouse remains available with a `FATAL` degraded
-state instead of hiding the startup failure.
+state instead of hiding the startup failure. The dashboard starts before
+Discord authentication and remains on screen when Discord rejects the bot
+token, with a redacted authentication failure reason.
 
 Administrator requests can inspect the private `.theia` runtime when needed,
 but operations there always require approval.

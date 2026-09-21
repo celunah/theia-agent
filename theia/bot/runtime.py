@@ -545,7 +545,7 @@ class TheiaBot(commands.Bot):
                 type(exc).__name__,
             )
 
-    async def close(self) -> None:
+    async def close(self, *, close_lighthouse: bool = True) -> None:
         """Stop background services and close Discord and Codex resources in order."""
         await self._cancel_interaction_recovery_tasks()
         await self._cancel_request_tasks()
@@ -559,7 +559,8 @@ class TheiaBot(commands.Bot):
             with contextlib.suppress(asyncio.CancelledError):
                 await self._nightly_recap_task
             self._nightly_recap_task = None
-        await self.lighthouse.close()
+        if close_lighthouse:
+            await self.lighthouse.close()
         await self.rich_presence.close()
         await self.presence.close()
         await self.voice.close()

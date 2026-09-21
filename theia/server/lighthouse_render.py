@@ -579,11 +579,20 @@ def _locked_lines(snapshot: dict[str, Any], *, width: int) -> list[str]:
     """Render only the safe unlock surface while credential data is locked."""
     vault = snapshot.get("vault")
     vault = vault if isinstance(vault, dict) else {}
+    startup = snapshot.get("startup")
+    startup = startup if isinstance(startup, dict) else {}
+    startup_degraded = startup.get("status") == "degraded"
+    startup_reason = _dashboard_text(startup.get("reason"), 120)
     lines = [
         f"Theia {_dashboard_text(snapshot.get('version'), 24) or THEIA_VERSION} · Lighthouse View",
         _separator(width),
-        "Status       Locked",
-        f"Reason       {_dashboard_text(vault.get('reason'), 120) or 'Vault unlock required'}",
+        "Status       FATAL" if startup_degraded else "Status       Locked",
+        "Reason       "
+        + (
+            startup_reason
+            or _dashboard_text(vault.get("reason"), 120)
+            or "Vault unlock required"
+        ),
         _separator(width),
         "Recent events",
     ]

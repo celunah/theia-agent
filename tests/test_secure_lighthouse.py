@@ -40,3 +40,21 @@ class SecureLighthouseTests(unittest.TestCase):
         self.assertNotIn("Cel", rendered)
         self.assertNotIn("Server conversation", rendered)
         self.assertNotIn("rss_bytes", rendered)
+
+    def test_locked_lighthouse_keeps_safe_startup_failure_visible(self) -> None:
+        rendered = render_lighthouse(
+            {
+                "version": "2.1.0",
+                "vault": {"status": "locked", "reason": "Vault closed"},
+                "startup": {
+                    "status": "degraded",
+                    "reason": "Discord authentication failed. Check the bot token.",
+                },
+            }
+        )
+
+        self.assertIn("Status       FATAL", rendered)
+        self.assertIn(
+            "Reason       Discord authentication failed. Check the bot token.",
+            rendered,
+        )

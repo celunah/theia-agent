@@ -60,8 +60,10 @@ category estimates, and the cost estimate is not subscription billing. Provider
 usage limits are shown separately by `/credits`.
 
 The Lighthouse View is a read-only Rich terminal dashboard of live harness
-state. It shows Codex health, active work, the resolved character and logical
-profile path, presence, voice,
+state. It starts before Discord authentication so vault, Discord login, and
+other startup failures remain visible as safe `FATAL` state while the process
+waits for shutdown. It shows Codex health, active work, the resolved character
+and logical profile path, presence, voice,
 attention, mood, the latest assessed reasoning effort, workspace, approvals,
 memory counts, watchdog recovery, and
 bounded recent events. Global characters show their logical profile path,
