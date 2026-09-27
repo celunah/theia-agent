@@ -5,9 +5,16 @@ services:
     environment:
       THEIA_VAULT_KEYCHAIN: "true"
       THEIA_VAULT_UNLOCK_MODE: "unattended"
+      THEIA_VAULT_PASSPHRASE_FILE: /run/secrets/theia-vault-passphrase
       DBUS_SESSION_BUS_ADDRESS: "${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/1000/bus}"
     volumes:
       - type: bind
         source: ${THEIA_RUNTIME_DIR:-/run/user/1000}/bus
         target: /run/user/${THEIA_UID:-1000}/bus
         read_only: true
+      - type: bind
+        source: ${THEIA_VAULT_PASSPHRASE_FILE:-/dev/null}
+        target: /run/secrets/theia-vault-passphrase
+        read_only: true
+        bind:
+          create_host_path: false

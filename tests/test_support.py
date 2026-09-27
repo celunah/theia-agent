@@ -152,17 +152,20 @@ class _ForbiddenHistoryChannel(_Channel):
 
 class AsyncBehaviorTestBase(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        """Keep default-policy tests independent of a developer's .env file."""
+        """Keep tests independent of developer configuration and runtime state."""
+        self._theia_home = Path(tempfile.mkdtemp(prefix="theia-test-home-"))
         self._hermes_home = Path(tempfile.mkdtemp(prefix="theia-test-hermes-"))
         self._approval_environment = patch.dict(
             os.environ,
             {
                 "THEIA_APPROVAL_LEVEL": "high",
+                "THEIA_HOME": str(self._theia_home),
                 "HERMES_HOME": str(self._hermes_home),
             },
         )
         self._approval_environment.start()
         self.addCleanup(self._approval_environment.stop)
+        self.addCleanup(shutil.rmtree, self._theia_home, ignore_errors=True)
         self.addCleanup(shutil.rmtree, self._hermes_home, ignore_errors=True)
 
 

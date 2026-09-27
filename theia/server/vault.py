@@ -8,6 +8,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import tempfile
 import time
 from collections import deque
@@ -26,9 +27,11 @@ VAULT_VERSION = 1
 VAULT_FILE_ENV = "THEIA_VAULT_PATH"
 VAULT_UNLOCK_MODE_ENV = "THEIA_VAULT_UNLOCK_MODE"
 VAULT_KEYCHAIN_ENV = "THEIA_VAULT_KEYCHAIN"
+VAULT_PASSPHRASE_FILE_ENV = "THEIA_VAULT_PASSPHRASE_FILE"
 VAULT_KEYCHAIN_SERVICE = "theia-agent-vault"
 VAULT_MIN_PASSPHRASE_LENGTH = 12
 VAULT_MAX_BYTES = 4 * 1024 * 1024
+_MAX_PASSPHRASE_FILE_BYTES = 4096
 VAULT_EVENT_LIMIT = 12
 _KDF_MEMORY_KIB = 64 * 1024
 _KDF_TIME_COST = 3
@@ -143,6 +146,54 @@ def _system_keyring() -> Any | None:
         "keyring.backends.kwallet",
     )
     return backend if module.startswith(supported) else None
+
+
+def _read_protected_passphrase_file(path: Path) -> str | None:
+    """Read a private, owner-only recovery file without following symlinks."""
+    try:
+        candidate = path.expanduser()
+        if candidate.is_symlink():
+            return None
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(candidate, flags)
+    except (OSError, ValueError):
+        return None
+    try:
+        metadata = os.fstat(descriptor)
+        current_uid = getattr(os, "geteuid", lambda: None)()
+        if (
+            current_uid is None
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != current_uid
+            or stat.S_IMODE(metadata.st_mode) & 0o077
+            or not stat.S_IMODE(metadata.st_mode) & 0o400
+            or metadata.st_size > _MAX_PASSPHRASE_FILE_BYTES
+        ):
+            return None
+        contents = os.read(descriptor, _MAX_PASSPHRASE_FILE_BYTES + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+
+    if len(contents) > _MAX_PASSPHRASE_FILE_BYTES:
+        return None
+    try:
+        passphrase = contents.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if passphrase.endswith("\r\n"):
+        passphrase = passphrase[:-2]
+    elif passphrase.endswith("\n"):
+        passphrase = passphrase[:-1]
+    if (
+        len(passphrase) < VAULT_MIN_PASSPHRASE_LENGTH
+        or "\x00" in passphrase
+        or "\r" in passphrase
+        or "\n" in passphrase
+    ):
+        return None
+    return passphrase
 
 
 def _keychain_get(vault_id: str) -> bytearray | None:
@@ -566,6 +617,25 @@ class CredentialVault:
             _zeroize(kek)
             if self.locked:
                 _zeroize(dek)
+
+    def unlock_from_passphrase_file(self, path: Path) -> tuple[bool, bool]:
+        """Unlock from a protected recovery file and refresh the OS keychain."""
+        passphrase = _read_protected_passphrase_file(path)
+        if passphrase is None:
+            return False, False
+        try:
+            try:
+                self.unlock(passphrase)
+            except InvalidPassphrase:
+                return False, False
+            if not self.keychain_enabled:
+                return True, False
+            try:
+                return True, self.store_passphrase_key(passphrase)
+            except VaultError:
+                return True, False
+        finally:
+            del passphrase
 
     def store_passphrase_key(self, passphrase: str) -> bool:
         """Save the current passphrase-derived KEK in the OS keychain."""

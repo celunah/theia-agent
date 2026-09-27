@@ -18,6 +18,7 @@ from .vault import (
     CredentialVault,
     InvalidPassphrase,
     VaultError,
+    VAULT_PASSPHRASE_FILE_ENV,
     legacy_environment_credentials,
     legacy_secret_environment_names,
     scrub_legacy_dotenv,
@@ -263,6 +264,26 @@ class SecureCredentialLifecycleMixin:
                 self.apply_secure_credentials()
                 return
             vault.record_event("WARNING", "No usable keychain credential found")
+            recovery_file = os.getenv(VAULT_PASSPHRASE_FILE_ENV, "")
+            if vault.keychain_enabled and recovery_file.strip():
+                vault.record_event("INFO", "Checking protected recovery file")
+                unlocked, keychain_saved = vault.unlock_from_passphrase_file(
+                    Path(recovery_file).expanduser()
+                )
+                if unlocked:
+                    if keychain_saved:
+                        vault.record_event(
+                            "INFO", "OS keychain credential restored from recovery file"
+                        )
+                    else:
+                        vault.record_event(
+                            "WARNING", "Vault unlocked; OS keychain update unavailable"
+                        )
+                    self.apply_secure_credentials()
+                    return
+                vault.record_event(
+                    "WARNING", "Protected recovery file unavailable or rejected"
+                )
             if mode == "unattended":
                 raise VaultError("No usable OS keychain credential was found.")
         vault.record_event("INFO", "Passphrase required")

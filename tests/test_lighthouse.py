@@ -78,7 +78,7 @@ class _TTYBuffer(io.StringIO):
         return self.getvalue()
 
 
-class LighthouseTests(unittest.IsolatedAsyncioTestCase):
+class LighthouseTests(AsyncBehaviorTestBase):
     def test_lighthouse_uses_the_shared_default_palette(self) -> None:
         self.assertEqual(
             THEIA_COLORS,

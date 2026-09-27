@@ -96,9 +96,14 @@ systemctl --user enable --now theia.service
 ```
 
 The unit requires `gnome-keyring-daemon.service` and passes the user D-Bus
-socket into the container for unattended vault unlocks. Starting the daemon
-alone does not unlock a login keyring; the user session must unlock its Secret
-Service collection first.
+socket into the container for unattended vault unlocks. It also mounts the
+owner-only vault recovery file read-only. The default host file is
+`$HOME/theia-vault-password.txt`; set `THEIA_VAULT_PASSPHRASE_FILE` in the
+unit environment to use another file, or `/dev/null` to disable file recovery.
+When the file is absent, the unit starts without the recovery mount. Keep a
+configured recovery file owned by the service account with mode `0600`. Starting
+the daemon alone does not unlock a login keyring; the user session must unlock
+its Secret Service collection first.
 
 On native Windows PowerShell, use:
 
@@ -149,7 +154,11 @@ Discord. The vault uses an interactive passphrase by default; the Lighthouse
 starts in a redacted `Locked` state until it is unlocked. Set
 `THEIA_VAULT_KEYCHAIN=true` and `THEIA_VAULT_UNLOCK_MODE=auto` to try the OS
 keychain first, or use `unattended` to fail without prompting when no keychain
-credential is available. `THEIA_VAULT_IDLE_TIMEOUT` enables optional inactivity
+credential is available. In either mode, set `THEIA_VAULT_PASSPHRASE_FILE` to
+an owner-only recovery file to let Theia authenticate the vault and restore a
+missing keychain entry before prompting or failing. The systemd Compose overlay
+mounts this file read-only; other container deployments must mount it
+read-only themselves. `THEIA_VAULT_IDLE_TIMEOUT` enables optional inactivity
 locking in seconds. While the Lighthouse is running, Ctrl+L manually locks or
 unlocks the vault from the terminal. The encrypted vault is stored at
 `$THEIA_HOME/credentials.vault`; the passphrase is never stored there.
