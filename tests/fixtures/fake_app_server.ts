@@ -21,8 +21,10 @@ interface ActiveTurn {
 const scenario = (process.env.FAKE_APP_SERVER_SCENARIO || "").toLowerCase();
 let nextThreadId = 1;
 let nextTurnId = 1;
+let characterInterruptionUsed = false;
 const activeTurns = new Map<string, ActiveTurn>();
 const threadCwds = new Map<string, string>();
+const ephemeralThreads = new Set<string>();
 const threadTotalTokens = new Map<
   string,
   { inputTokens: number; outputTokens: number; totalTokens: number }
@@ -379,6 +381,14 @@ function startTurn(request: RpcRequest): void {
   if (scenarioIs("interrupt")) {
     return;
   }
+  if (
+    scenarioIs("character-interruption") &&
+    !ephemeralThreads.has(threadId) &&
+    !characterInterruptionUsed
+  ) {
+    characterInterruptionUsed = true;
+    return;
+  }
   if (scenarioIs("outage")) {
     setTimeout(() => {
       notify("error", {
@@ -553,6 +563,9 @@ function handleRequest(request: RpcRequest): void {
     case "thread/start": {
       const threadId = `thread-${nextThreadId++}`;
       threadCwds.set(threadId, stringParam(params, "cwd"));
+      if (params.ephemeral === true) {
+        ephemeralThreads.add(threadId);
+      }
       respond(request, { thread: { id: threadId } });
       notify("thread/started", { thread: { id: threadId }, threadId });
       return;
@@ -560,6 +573,7 @@ function handleRequest(request: RpcRequest): void {
     case "thread/resume": {
       const threadId = stringParam(params, "threadId") || "thread-missing";
       threadCwds.set(threadId, stringParam(params, "cwd"));
+      ephemeralThreads.delete(threadId);
       respond(request, { thread: { id: threadId } });
       notify("thread/started", { thread: { id: threadId }, threadId });
       return;

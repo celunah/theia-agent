@@ -598,6 +598,62 @@ class TestLocalCodexBoundary(unittest.IsolatedAsyncioTestCase):
             "streamed response",
         )
 
+    async def test_selected_character_survives_interruption_and_followup(self) -> None:
+        """Keep the selected style through an interrupted turn on the real boundary."""
+        evaluation = json.loads(
+            (
+                Path(__file__).parent / "fixtures" / "character_fidelity_eval.json"
+            ).read_text(encoding="utf-8")
+        )
+        case = next(
+            item for item in evaluation["cases"] if item["id"] == "voice_interruption"
+        )
+        profile = evaluation["profile"]
+        session_key = "guild:42:channel:7:user:9"
+        server = await self._server(scenario="character-interruption")
+        await server.configure_personality(
+            session_key,
+            name=profile["name"],
+            attachment=SimpleNamespace(
+                filename="evaluation.md",
+                size=len(profile["instructions"].encode("utf-8")),
+                read=AsyncMock(return_value=profile["instructions"].encode("utf-8")),
+            ),
+            scope="me",
+            actor_user_id=9,
+            guild_id=42,
+        )
+        first_turn = asyncio.create_task(
+            self._ask(
+                server,
+                case["initial_user_turn"],
+                session_key=session_key,
+                user_id=9,
+            )
+        )
+        await self._wait_for(lambda: server.status(session_key)["turn_id"] is not None)
+        self.assertTrue(await server.interrupt(session_key))
+        with self.assertRaises(main.CodexTurnCancelled):
+            await first_turn
+
+        session = server._session(session_key)
+        selected_instructions = server._system_instructions(session, allow_tools=False)
+        self.assertEqual(server.active_personality(session_key), profile["name"])
+        self.assertIn(profile["instructions"], selected_instructions)
+        self.assertEqual(
+            await self._ask(
+                server,
+                case["user_turn"],
+                session_key=session_key,
+                user_id=9,
+            ),
+            "streamed response",
+        )
+        self.assertEqual(
+            server._system_instructions(session, allow_tools=False),
+            selected_instructions,
+        )
+
     async def test_timeout_is_interrupted_and_reported_to_the_caller(self) -> None:
         """Verify a turn that never completes follows the timeout recovery path."""
         server = await self._server(
