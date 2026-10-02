@@ -229,6 +229,10 @@ For memory-relevant administrator requests, Theia may run a bounded, ephemeral
 read-only retrieval pass. It returns at most three paraphrased memory facts to
 the current turn; the worker has no tools and cannot write memory, skills,
 recaps, personality data, or self-improvement changes.
+When attention validates a return to an earlier topic, this pass can also select
+up to three records from the current user's own memory or nightly recaps without
+requiring a memory keyword. Each selected fact carries its memory source, scope,
+date, and record ID into the turn; this return path does not write new memory.
 
 Server administrators can use `/customize` to change Discord-only embed
 titles, embed content, embed colors, status labels, and interaction button

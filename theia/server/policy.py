@@ -246,9 +246,12 @@ _PERSONALITY_SUMMARY_TIMEOUT = 15.0
 _MEMORY_RETRIEVAL_SOURCE_LIMIT = 32 * 1024
 _MEMORY_RETRIEVAL_REQUEST_LIMIT = 12 * 1024
 _MEMORY_RETRIEVAL_TIMEOUT = 8.0
+_MEMORY_RETRIEVAL_CANDIDATE_LIMIT = 12
 _MEMORY_RETRIEVAL_HINT_RE = re.compile(
-    r"\b(?:remember|memory|previous|earlier|last\s+time|before|again|"
-    r"discuss(?:ed|ion)|history|known|what\s+did\s+we|who\s+did)\b",
+    r"\b(?:remember|memory|previous|earlier|last\s+time|"
+    r"discuss(?:ed|ion)|history|what\s+did\s+we|who\s+did\s+we)\b|"
+    r"\b(?:did|have)\s+(?:we|i)\s+(?:discuss|talk|mention|cover)\b|"
+    r"\bwe\s+(?:discussed|talked|mentioned)\s+before\b",
     re.IGNORECASE,
 )
 _MEMORY_ENTRY_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\S")

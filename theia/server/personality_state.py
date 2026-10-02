@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from .policy import (
     MEMORY_FILE_LIMIT,
+    _MEMORY_RETRIEVAL_CANDIDATE_LIMIT,
     _MEMORY_ENTRY_RE,
     _MEMORY_RETRIEVAL_REQUEST_LIMIT,
     _MEMORY_RETRIEVAL_SOURCE_LIMIT,
@@ -52,6 +53,8 @@ from .memory_records import (
     workspace_record,
 )
 from .prompts import (
+    _MEMORY_RECORD_SELECTION_DEVELOPER_INSTRUCTIONS,
+    _MEMORY_RECORD_SELECTION_OUTPUT_SCHEMA,
     _MEMORY_RETRIEVAL_DEVELOPER_INSTRUCTIONS,
     _MEMORY_RETRIEVAL_OUTPUT_SCHEMA,
     _PERSONALITY_SUMMARY_DEVELOPER_INSTRUCTIONS,
@@ -439,6 +442,43 @@ class CodexPersonalityStateMixin:
             "total_entries": len(serialized),
             "search": search.strip() if isinstance(search, str) else "",
         }
+
+    def _memory_retrieval_candidates(
+        self,
+        session_key: str,
+        *,
+        actor_user_id: int | None,
+    ) -> list[dict[str, Any]]:
+        """Return a small set of inspectable records from this user's scope."""
+        if (
+            isinstance(actor_user_id, bool)
+            or not isinstance(actor_user_id, int)
+            or actor_user_id <= 0
+        ):
+            return []
+        key_user_id = self._personality_scope_identity(
+            self._canonical_session_key(session_key)
+        )[1]
+        if key_user_id is not None and key_user_id != actor_user_id:
+            return []
+        view = self.memory_view(
+            session_key,
+            "me",
+            actor_user_id=actor_user_id,
+            server_admin=False,
+            super_admin=False,
+        )
+        records = view.get("records")
+        if not isinstance(records, list):
+            return []
+        return [
+            record
+            for record in records
+            if isinstance(record, dict)
+            and record.get("source_category") in {"user_memory", "recap"}
+            and isinstance(record.get("record_id"), str)
+            and isinstance(record.get("text"), str)
+        ][:_MEMORY_RETRIEVAL_CANDIDATE_LIMIT]
 
     def memory_record(
         self, session_key: str, record_id: str, scope: str = "me", **kwargs: Any
@@ -843,11 +883,29 @@ class CodexPersonalityStateMixin:
     @staticmethod
     def _memory_retrieval_prompt(
         request: str,
-        memory: str,
+        memory: str | None,
         personality: str | None,
+        *,
+        candidate_records: list[dict[str, str]] | None = None,
     ) -> str:
         """Build the bounded data envelope for the neutral retrieval worker."""
         character = personality or "No personality profile is currently selected."
+        if candidate_records is not None:
+            return (
+                "Select only candidate records that help answer the current "
+                "request. Return JSON with a `matches` array containing selected "
+                "record IDs and confidence values. Do not rewrite or infer facts. "
+                "Return an empty array when no record is relevant.\n\n"
+                "<active_character>\n"
+                f"{_truncate(character, 6000)}\n"
+                "</active_character>\n\n"
+                "<current_request>\n"
+                f"{_truncate(request, _MEMORY_RETRIEVAL_REQUEST_LIMIT)}\n"
+                "</current_request>\n\n"
+                "<candidate_records>\n"
+                f"{json.dumps(candidate_records, ensure_ascii=False)}\n"
+                "</candidate_records>"
+            )
         return (
             "Find only the persistent memory facts that help answer the current "
             "request. Return JSON with a `matches` array; each item must contain "
@@ -860,7 +918,7 @@ class CodexPersonalityStateMixin:
             f"{_truncate(request, _MEMORY_RETRIEVAL_REQUEST_LIMIT)}\n"
             "</current_request>\n\n"
             "<memory_snapshot>\n"
-            f"{_truncate(memory, _MEMORY_RETRIEVAL_SOURCE_LIMIT)}\n"
+            f"{_truncate(memory or '', _MEMORY_RETRIEVAL_SOURCE_LIMIT)}\n"
             "</memory_snapshot>"
         )
 
@@ -871,6 +929,7 @@ class CodexPersonalityStateMixin:
         session_key: str | None = None,
         allow_tools: bool = False,
         timeout: float | None = None,
+        candidate_records: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
         """Select bounded, transient memory context in a neutral no-tool turn."""
         if session_key is not None:
@@ -882,10 +941,15 @@ class CodexPersonalityStateMixin:
                     session_key=session_key,
                     allow_tools=allow_tools,
                     timeout=timeout,
+                    candidate_records=candidate_records,
                 ),
             )
         return await self._generate_memory_retrieval(
-            prompt, session_key=None, allow_tools=allow_tools, timeout=timeout
+            prompt,
+            session_key=None,
+            allow_tools=allow_tools,
+            timeout=timeout,
+            candidate_records=candidate_records,
         )
 
     async def _generate_memory_retrieval(
@@ -895,14 +959,25 @@ class CodexPersonalityStateMixin:
         session_key: str | None = None,
         allow_tools: bool = False,
         timeout: float | None = None,
+        candidate_records: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
         """Run one transient memory lookup without retaining its worker turn."""
         if not allow_tools:
             return None
         await self._ensure_running()
-        memory = self._memory_instructions(allow_tools=True)
-        if not memory:
-            return None
+        safe_records = (
+            self._safe_memory_retrieval_candidates(candidate_records)
+            if candidate_records is not None
+            else None
+        )
+        if safe_records is not None:
+            if not safe_records:
+                return None
+            memory = None
+        else:
+            memory = self._memory_instructions(allow_tools=True)
+            if not memory:
+                return None
         personality_name = (
             self.active_personality(session_key) if session_key is not None else None
         )
@@ -927,7 +1002,11 @@ class CodexPersonalityStateMixin:
                     "ephemeral": True,
                     "runtimeWorkspaceRoots": [],
                     "baseInstructions": BASE_PRIORS,
-                    "developerInstructions": _MEMORY_RETRIEVAL_DEVELOPER_INSTRUCTIONS,
+                    "developerInstructions": (
+                        _MEMORY_RECORD_SELECTION_DEVELOPER_INSTRUCTIONS
+                        if safe_records is not None
+                        else _MEMORY_RETRIEVAL_DEVELOPER_INSTRUCTIONS
+                    ),
                     **({"model": self._model} if self._model is not None else {}),
                 },
                 timeout=request_timeout,
@@ -943,12 +1022,19 @@ class CodexPersonalityStateMixin:
                         {
                             "type": "text",
                             "text": self._memory_retrieval_prompt(
-                                prompt, memory, personality
+                                prompt,
+                                memory,
+                                personality,
+                                candidate_records=safe_records,
                             ),
                         }
                     ],
                     "effort": "low",
-                    "outputSchema": _MEMORY_RETRIEVAL_OUTPUT_SCHEMA,
+                    "outputSchema": (
+                        _MEMORY_RECORD_SELECTION_OUTPUT_SCHEMA
+                        if safe_records is not None
+                        else _MEMORY_RETRIEVAL_OUTPUT_SCHEMA
+                    ),
                     **({"model": self._model} if self._model is not None else {}),
                 },
                 timeout=request_timeout,
@@ -966,6 +1052,8 @@ class CodexPersonalityStateMixin:
                 turn_id,
                 timeout=wait_timeout,
             )
+            if safe_records is not None:
+                return self._parse_memory_record_selection(response, safe_records)
             return self._parse_memory_retrieval(response)
         except asyncio.CancelledError:
             if thread_id and turn_id:
@@ -988,6 +1076,104 @@ class CodexPersonalityStateMixin:
             if turn_id:
                 self._turns.pop(turn_id, None)
             self._sessions.pop(session_id, None)
+
+    @staticmethod
+    def _safe_memory_retrieval_candidates(
+        records: list[dict[str, Any]] | None,
+    ) -> list[dict[str, str]]:
+        """Strip retrieval candidates down to safe, source-labeled fields."""
+        if not isinstance(records, list):
+            return []
+        safe_records: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for record in records[:_MEMORY_RETRIEVAL_CANDIDATE_LIMIT]:
+            if not isinstance(record, dict):
+                continue
+            source_category = record.get("source_category")
+            if source_category not in {"user_memory", "recap"}:
+                continue
+            record_id = safe_memory_text(record.get("record_id"), 64)
+            text = safe_memory_text(record.get("text"), 1200)
+            source = safe_memory_text(source_category, 40)
+            scope = safe_memory_text(record.get("scope"), 40)
+            metadata = record.get("display_metadata")
+            updated = (
+                safe_memory_text(metadata.get("updated"), 16)
+                if isinstance(metadata, dict)
+                else "unknown"
+            )
+            if not record_id or not text or not source or not scope:
+                continue
+            if record_id in seen:
+                continue
+            seen.add(record_id)
+            safe_records.append(
+                {
+                    "record_id": record_id,
+                    "text": text,
+                    "source": source.replace("_", " "),
+                    "scope": scope,
+                    "updated": updated or "unknown",
+                }
+            )
+        return safe_records
+
+    @staticmethod
+    def _parse_memory_record_selection(
+        text: str,
+        candidate_records: list[dict[str, str]],
+    ) -> dict[str, Any] | None:
+        """Resolve worker selections to actual candidate text and provenance."""
+        candidate_map = {
+            record["record_id"]: record
+            for record in candidate_records
+            if isinstance(record.get("record_id"), str)
+        }
+        candidates = [text.strip()]
+        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        if match:
+            candidates.append(match.group(0))
+        for candidate in candidates:
+            candidate = candidate.removeprefix("```json").removesuffix("```").strip()
+            try:
+                value = json.loads(candidate)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(value, dict) or not isinstance(
+                value.get("matches"), list
+            ):
+                continue
+            matches: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for item in value["matches"][:3]:
+                if not isinstance(item, dict):
+                    continue
+                record_id = item.get("record_id")
+                confidence = item.get("confidence")
+                if (
+                    not isinstance(record_id, str)
+                    or record_id not in candidate_map
+                    or record_id in seen
+                    or isinstance(confidence, bool)
+                    or not isinstance(confidence, (int, float))
+                    or not math.isfinite(float(confidence))
+                ):
+                    continue
+                seen.add(record_id)
+                record = candidate_map[record_id]
+                summary = (
+                    f"Memory source {record['source']}; {record['scope']}; "
+                    f"updated {record['updated']}; record {record_id}. "
+                    f"{record['text']}"
+                )
+                matches.append(
+                    {
+                        "summary": _safe_intermediate_text(summary, 320),
+                        "confidence": max(0.0, min(1.0, float(confidence))),
+                    }
+                )
+            return {"matches": matches}
+        return None
 
     @staticmethod
     def _parse_memory_retrieval(text: str) -> dict[str, Any] | None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from collections.abc import Awaitable, Callable, Iterable
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import discord
 
+from .attention_recurrence import MINIMUM_REPETITION_CONFIDENCE
 from .policy import (
     MAX_CODEX_MEMORY_TURN_RETRIES,
     SESSION_ARCHIVE_AFTER,
@@ -40,6 +42,42 @@ from .usage import estimated_tokens
 
 logger = _codex_logger()
 
+
+def _memory_retrieval_mode(
+    text: str,
+    attention_transition: dict[str, Any] | None,
+) -> str | None:
+    """Return the retrieval path for explicit recall or a verified topic return."""
+    if _MEMORY_RETRIEVAL_HINT_RE.search(text):
+        return "explicit"
+    if not isinstance(attention_transition, dict):
+        return None
+    relation = str(attention_transition.get("relation") or "").upper()
+    recurrence = attention_transition.get("recurrence")
+    if attention_transition.get("type") == "conversation_recurrence":
+        recurrence = attention_transition
+    if not isinstance(recurrence, dict):
+        return None
+    recurrence_relation = str(recurrence.get("relation") or relation).upper()
+    confidence = recurrence.get("classifier_confidence")
+    if (
+        relation not in {"RETURN", "NESTED_RETURN"}
+        or recurrence_relation not in {"RETURN", "NESTED_RETURN"}
+        or recurrence.get("type") != "conversation_recurrence"
+        or recurrence.get("relationship_type") != "return"
+        or not isinstance(recurrence.get("matched_context_id"), str)
+        or not recurrence.get("matched_context_id")
+        or not isinstance(recurrence.get("evidence_summary"), str)
+        or not recurrence.get("evidence_summary")
+        or isinstance(confidence, bool)
+        or not isinstance(confidence, (int, float))
+        or not math.isfinite(float(confidence))
+        or float(confidence) < MINIMUM_REPETITION_CONFIDENCE
+    ):
+        return None
+    return "semantic_return"
+
+
 _SESSION_CLEANUP_ATTEMPTS = 2
 _SESSION_CLEANUP_TIMEOUT = 5.0
 _SESSION_CLEANUP_RETRY_DELAY = 0.1
@@ -53,6 +91,14 @@ class CodexRequestMixin:
         _approval_level: str
         _adaptive_reasoning: bool
         _thread_delete_supported: bool | None
+
+        def _memory_retrieval_candidates(
+            self,
+            session_key: str,
+            *,
+            actor_user_id: int | None,
+        ) -> list[dict[str, Any]]:
+            raise NotImplementedError
 
     def __getattr__(self, name: str) -> Any:
         raise AttributeError(name)
@@ -617,14 +663,34 @@ class CodexRequestMixin:
                     perception_report_context
                 )
             memory_context = None
+            retrieval_mode = _memory_retrieval_mode(
+                user_prompt or prompt,
+                attention_transition,
+            )
+            memory_candidates = None
+            if allow_tools and retrieval_mode == "semantic_return":
+                memory_candidates = self._memory_retrieval_candidates(
+                    session_key,
+                    actor_user_id=user_id,
+                )
             memory_retrieval_used = bool(
-                allow_tools and _MEMORY_RETRIEVAL_HINT_RE.search(user_prompt or prompt)
+                allow_tools
+                and (
+                    retrieval_mode == "explicit"
+                    or (retrieval_mode == "semantic_return" and memory_candidates)
+                )
             )
             if memory_retrieval_used:
+                retrieval_options = (
+                    {"candidate_records": memory_candidates}
+                    if retrieval_mode == "semantic_return"
+                    else {}
+                )
                 memory_context = await self.generate_memory_retrieval(
-                    prompt,
+                    user_prompt or prompt,
                     session_key=session_key,
                     allow_tools=allow_tools,
+                    **retrieval_options,
                 )
             self_model = self._safe_self_model_snapshot(
                 session,
