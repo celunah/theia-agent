@@ -235,6 +235,9 @@ class RelationshipMemoryTests(AsyncBehaviorTestBase):
 
         self.assertNotIn("Please keep replies concise", safe_instructions)
         self.assertIn("Please keep replies concise", authorized_instructions)
+        self.assertIn(
+            "apply communication preferences silently", authorized_instructions
+        )
         self.assertNotIn("Please keep replies concise", unselected_instructions)
         self.assertIsNone(server.active_personality(unselected.key))
 
