@@ -42,6 +42,11 @@ administrators can inspect the current server, and Super Admins can inspect
 broader scopes. The full capability inventory is in
 [`THEIA_FEATURES.md`](THEIA_FEATURES.md).
 Entries are shown newest-first with their UTC calendar date.
+When the optional post-turn review is enabled for an administrator turn, it can
+also save explicit communication preferences or corrections for that user and
+their selected character. These notes stay private to that pair and use the
+same `/memory` inspect, edit, and confirmed-forget controls; the review does
+not infer intimacy or subjective experience.
 
 Its Recent events feed shows bounded timestamps, severity, and stable event
 titles. Technical event details remain available through its diagnostic view.

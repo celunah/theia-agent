@@ -746,6 +746,10 @@ class CodexConversationMixin:
         memory = self._memory_instructions(allow_tools=allow_tools)
         if memory:
             parts.append(memory)
+        if allow_tools:
+            relationship_memory = self._relationship_memory_instructions(session.key)
+            if relationship_memory:
+                parts.append(relationship_memory)
         if personality:
             parts.append(personality)
         instructions = "\n\n".join(parts)

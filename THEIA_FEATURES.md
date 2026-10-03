@@ -110,6 +110,12 @@ record identifier; search, inspect, forget, and confirmed edit operations are
 available without requiring migration of existing Markdown memory files. Entries
 show a UTC calendar date and are ordered with the most recently added memory
 first.
+When the optional post-turn review is enabled for an administrator turn, it can
+append a user's explicit communication preference, correction, or user-confirmed
+meaningful event to a record scoped to that user and selected character. The
+record appears in the same `/memory` controls for inspection, editing, and
+confirmed removal. Notes are not inferred from ordinary conversation, do not
+grant tool authority, and do not establish subjective experience.
 
 Each isolated conversation also has a temporary simulated mood. It derives a
 resting affect from the active personality, uses a bounded private Codex

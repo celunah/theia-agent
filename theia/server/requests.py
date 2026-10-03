@@ -646,14 +646,17 @@ class CodexRequestMixin:
                             type(exc).__name__,
                         )
             workspace = self._workspace_snapshot(session)
+            memory_contexts = [self._memory_instructions(allow_tools=allow_tools) or ""]
+            if allow_tools:
+                memory_contexts.append(
+                    self._relationship_memory_instructions(session.key) or ""
+                )
             prompt_attribution = {
                 "system_instructions": estimated_tokens(BASE_PRIORS),
                 "identity_self_model": estimated_tokens(
                     self._personality_instructions(session) or ""
                 ),
-                "memory_data": estimated_tokens(
-                    self._memory_instructions(allow_tools=allow_tools) or ""
-                ),
+                "memory_data": estimated_tokens("\n\n".join(memory_contexts)),
                 "tool_definitions": estimated_tokens(
                     self._tool_instructions(allow_tools)
                 ),

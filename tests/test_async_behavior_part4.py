@@ -18,7 +18,8 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         self.assertIn("repeatable workflow, procedure, tool-use pattern", instructions)
         self.assertIn("create a new skill when no existing skill fits", instructions)
         self.assertIn(
-            "memory, user-profile, skill, and personality updates separately", prompt
+            "memory, user-profile, relationship, skill, and personality updates separately",
+            prompt,
         )
         self.assertIn("update a matching skill or create a new one", prompt)
 

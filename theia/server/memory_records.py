@@ -127,8 +127,12 @@ def _record_id(
     scope: str,
     text: str,
     ordinal: int,
+    namespace: str | None = None,
 ) -> str:
-    value = "\0".join((source_file, scope, str(ordinal), text))
+    parts = (source_file, scope, str(ordinal), text)
+    if namespace:
+        parts += (namespace,)
+    value = "\0".join(parts)
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:24]
 
 
@@ -283,6 +287,8 @@ def markdown_records(
     character_slug: str,
     source_category: str,
     default_scope: str = "legacy",
+    scope_override: str | None = None,
+    record_namespace: str | None = None,
 ) -> list[MemoryRecord]:
     """Parse a compatible Markdown file into bounded records."""
     try:
@@ -292,7 +298,9 @@ def markdown_records(
         updated_at = _safe_timestamp(path.stat().st_mtime)
     except (OSError, UnicodeDecodeError):
         return []
-    scope = _file_scope(path, _source_scope(path, root, default_scope))
+    scope = normalize_memory_scope(scope_override) or _file_scope(
+        path, _source_scope(path, root, default_scope)
+    )
     records: list[MemoryRecord] = []
     for ordinal, (display, start, end) in enumerate(_markdown_blocks(text)):
         bounded = safe_memory_text(display)
@@ -306,6 +314,7 @@ def markdown_records(
             scope=scope,
             text=display,
             ordinal=ordinal,
+            namespace=record_namespace,
         )
         records.append(
             MemoryRecord(
@@ -409,6 +418,7 @@ def append_audit(
     record: MemoryRecord,
     action: str,
     replacement: str | None,
+    retain_contents: bool = True,
 ) -> bool:
     """Write a private recoverable pre-change snapshot before mutation."""
     if action not in {"forget", "edit"}:
@@ -427,8 +437,10 @@ def append_audit(
         ).hexdigest()[:24],
         "record_id": record.record_id,
         "action": action,
-        "text": record.text,
-        "replacement": safe_memory_text(replacement) if replacement else None,
+        "text": record.text if retain_contents else None,
+        "replacement": (
+            safe_memory_text(replacement) if retain_contents and replacement else None
+        ),
         "scope": record.scope,
         "source_file": record.source_file,
         "source_category": record.source_category,

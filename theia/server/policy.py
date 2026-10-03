@@ -165,10 +165,17 @@ _SELF_IMPROVEMENT_OUTPUT_SCHEMA = {
                 "properties": {
                     "kind": {
                         "type": "string",
-                        "enum": ["memory", "user_profile", "skill", "personality"],
+                        "enum": [
+                            "memory",
+                            "user_profile",
+                            "relationship",
+                            "skill",
+                            "personality",
+                        ],
                     },
                     "path": {"type": "string"},
                     "content": {"type": "string"},
+                    "evidence": {"type": "string"},
                 },
                 "required": ["kind", "path", "content"],
                 "additionalProperties": False,

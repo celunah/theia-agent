@@ -33,11 +33,17 @@ class CharacterFidelityEvaluationTests(unittest.IsolatedAsyncioTestCase):
                 "harness_error",
                 "recall_with_evidence",
                 "recall_without_evidence",
+                "relationship_with_explicit_evidence",
+                "relationship_without_explicit_evidence",
+                "relationship_character_switch",
                 "voice_interruption",
             },
         )
         self.assertEqual(self.evaluation["scoring"]["values"], ["pass", "fail"])
-        self.assertIn("blocks Phase 2", self.evaluation["scoring"]["acceptance"])
+        self.assertIn(
+            "blocks later character-continuity phases",
+            self.evaluation["scoring"]["acceptance"],
+        )
         rubric_ids = {item["id"] for item in self.evaluation["rubric"]}
         self.assertTrue(rubric_ids)
         for case in cases:

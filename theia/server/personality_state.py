@@ -52,6 +52,7 @@ from .memory_records import (
     safe_memory_text,
     workspace_record,
 )
+from .relationship_memory import CodexRelationshipMemoryMixin
 from .prompts import (
     _MEMORY_RECORD_SELECTION_DEVELOPER_INSTRUCTIONS,
     _MEMORY_RECORD_SELECTION_OUTPUT_SCHEMA,
@@ -64,7 +65,7 @@ from .prompts import (
 logger = _codex_logger()
 
 
-class CodexPersonalityStateMixin:
+class CodexPersonalityStateMixin(CodexRelationshipMemoryMixin):
     """Expose scoped personality profiles without mixing them into Codex state."""
 
     if TYPE_CHECKING:
@@ -281,6 +282,14 @@ class CodexPersonalityStateMixin:
                 character_slug=character_slug,
             )
         )
+        records.extend(
+            self._relationship_memory_records(
+                canonical_key,
+                target_scope,
+                character_name=character_name,
+                character_slug=character_slug,
+            )
+        )
         session = self._sessions.get(canonical_key)
         workspace = getattr(session, "workspace", None)
         if workspace is not None:
@@ -300,6 +309,7 @@ class CodexPersonalityStateMixin:
                 if record is not None:
                     records.append(record)
         source_priority = {
+            "relationship_memory": 4,
             "user_memory": 3,
             "server_memory": 2,
             "character_memory": 1,
@@ -549,9 +559,14 @@ class CodexPersonalityStateMixin:
             source = path.read_text(encoding="utf-8-sig")
         except (OSError, UnicodeDecodeError):
             return False
-        source_category = (
-            "user_memory" if path.name.casefold() == "user.md" else "character_memory"
-        )
+        if record.source_category == "relationship_memory":
+            source_category = "relationship_memory"
+        else:
+            source_category = (
+                "user_memory"
+                if path.name.casefold() == "user.md"
+                else "character_memory"
+            )
         fresh = next(
             (
                 item
@@ -561,6 +576,16 @@ class CodexPersonalityStateMixin:
                     character_name=record.character_name,
                     character_slug=record.character_slug,
                     source_category=source_category,
+                    scope_override=(
+                        record.scope
+                        if record.source_category == "relationship_memory"
+                        else None
+                    ),
+                    record_namespace=(
+                        record.character_slug
+                        if record.source_category == "relationship_memory"
+                        else None
+                    ),
                 )
                 if item.record_id == record.record_id
             ),
@@ -584,6 +609,7 @@ class CodexPersonalityStateMixin:
             record=record,
             action=action,
             replacement=replacement,
+            retain_contents=record.source_category != "relationship_memory",
         ):
             return False
         updated_block = "" if action == "forget" else f"- {replacement}\n"

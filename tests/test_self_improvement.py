@@ -18,7 +18,8 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         self.assertIn("repeatable workflow, procedure, tool-use pattern", instructions)
         self.assertIn("create a new skill when no existing skill fits", instructions)
         self.assertIn(
-            "memory, user-profile, skill, and personality updates separately", prompt
+            "memory, user-profile, relationship, skill, and personality updates separately",
+            prompt,
         )
         self.assertIn("update a matching skill or create a new one", prompt)
 
@@ -226,6 +227,88 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
             self.assertFalse(any(key.startswith("__") for key in server._sessions))
             persisted = json.loads((root / "state.json").read_text(encoding="utf-8"))
             self.assertFalse(any(key.startswith("__") for key in persisted["sessions"]))
+
+    async def test_admin_review_writes_only_the_current_users_relationship_excerpt(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            user_message = "Please keep answers concise for deployment discussions."
+            evidence = "Please keep answers concise"
+            with patch.dict(
+                os.environ,
+                {
+                    "THEIA_HOME": str(root / "theia"),
+                    "THEIA_STATE": str(root / "state.json"),
+                    "CODEX_MEMORY_ROOTS": str(root / "theia" / "memories"),
+                },
+            ):
+                server = main.CodexAppServer()
+                server._self_improvement_enabled = True
+                key = "guild:1:channel:7:user:9"
+                profile = b"Use measured phrasing."
+                await server.configure_personality(
+                    key,
+                    name="Measured",
+                    attachment=SimpleNamespace(
+                        filename="measured.md",
+                        size=len(profile),
+                        read=AsyncMock(return_value=profile),
+                    ),
+                    scope="me",
+                    actor_user_id=9,
+                    guild_id=1,
+                )
+                session = server._session(key)
+                server._request = AsyncMock(
+                    side_effect=(
+                        {"thread": {"id": "relationship-review-thread"}},
+                        {"turn": {"id": "relationship-review-turn"}},
+                    )
+                )
+                server._wait_for_turn = AsyncMock(
+                    return_value=json.dumps(
+                        {
+                            "updates": [
+                                {
+                                    "kind": "relationship",
+                                    "path": "active",
+                                    "content": evidence,
+                                    "evidence": evidence,
+                                }
+                            ]
+                        }
+                    )
+                )
+                channel = _Channel()
+                channel.guild = _admin_guild(user_id=9)
+                applied = await server._run_self_improvement_review(
+                    session,
+                    user_message,
+                    "I will keep those replies concise.",
+                    channel=cast(Any, channel),
+                    user_id=9,
+                    user=SimpleNamespace(
+                        id=9,
+                        guild_permissions=SimpleNamespace(administrator=True),
+                    ),
+                    allow_tools=True,
+                )
+                path = server._relationship_memory_path(key, 9)
+                assert path is not None
+                saved = path.read_text(encoding="utf-8")
+                history = server.self_improvement_history(limit=1)[0]
+                review_prompt = cast(Any, server._request.await_args_list[1]).args[1][
+                    "input"
+                ][0]["text"]
+
+        self.assertEqual(applied, 1)
+        self.assertEqual(server._request.await_count, 2)
+        self.assertIn(evidence, saved)
+        self.assertNotIn(evidence, session.pending_self_improvement_summary or "")
+        self.assertEqual(history["target"], "relationship:active")
+        self.assertIn(evidence, review_prompt)
+        self.assertEqual(len(channel.sent), 1)
 
     async def test_self_improvement_no_change_is_recorded_in_session_context(
         self,
