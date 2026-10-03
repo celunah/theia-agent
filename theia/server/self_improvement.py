@@ -41,7 +41,7 @@ from ..core import (
     _truncate,
 )
 from ..identifiers import new_unique_token
-from ..personality import PersonalityError
+from ..personality import CHARACTER_CONTRACT_MARKER, PersonalityError
 from .usage import estimated_tokens
 from .worker_diagnostics import record_current_worker_failure, run_worker
 
@@ -1134,6 +1134,18 @@ class CodexSelfImprovementMixin:
                     target=target,
                     status="rejected",
                     reason="Malformed review update.",
+                    target_name=personality_name,
+                )
+                continue
+            if kind == "personality" and CHARACTER_CONTRACT_MARKER in raw_content:
+                self._append_self_improvement_audit(
+                    category=kind,
+                    target=target,
+                    status="rejected",
+                    reason=(
+                        "Structured character preferences can only be changed "
+                        "through a profile upload."
+                    ),
                     target_name=personality_name,
                 )
                 continue

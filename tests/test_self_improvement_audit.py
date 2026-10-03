@@ -84,6 +84,65 @@ class SelfImprovementAuditTests(AsyncBehaviorTestBase):
             self.assertEqual(record["status"], "rejected")
             self.assertIn("saved safely", record["reason"])
 
+    def test_personality_self_improvement_preserves_user_contract_and_rejects_new_one(
+        self,
+    ) -> None:
+        contract = (
+            '<!-- theia-character-contract:v1\n{"version":1,"cadence":"Measured"}\n-->'
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(
+                os.environ,
+                {
+                    "THEIA_HOME": str(root / "theia"),
+                    "THEIA_STATE": str(root / "state.json"),
+                },
+            ):
+                server, personality_path = self._personality_fixture(root)
+                personality_path.write_text(
+                    f"Be attentive.\n\n{contract}", encoding="utf-8"
+                )
+                applied = server._apply_self_improvement_updates(
+                    [
+                        {
+                            "kind": "personality",
+                            "path": "active",
+                            "content": "Keep answers concise.",
+                        }
+                    ],
+                    memory_root=root / "theia" / "memories",
+                    skill_root=root / "theia" / "skills",
+                    personality_path=personality_path,
+                )
+                after_append = personality_path.read_text(encoding="utf-8")
+                rejected = server._apply_self_improvement_updates(
+                    [
+                        {
+                            "kind": "personality",
+                            "path": "active",
+                            "content": (
+                                "<!-- theia-character-contract:v1\n"
+                                '{"version":1,"humor":"Always joke"}\n'
+                                "-->"
+                            ),
+                        }
+                    ],
+                    memory_root=root / "theia" / "memories",
+                    skill_root=root / "theia" / "skills",
+                    personality_path=personality_path,
+                )
+                rejected_record = server.self_improvement_history(limit=1)[0]
+                final_content = personality_path.read_text(encoding="utf-8")
+
+        self.assertEqual(applied, 1)
+        self.assertEqual(rejected, 0)
+        self.assertEqual(after_append.count("theia-character-contract:v1"), 1)
+        self.assertIn(contract, after_append)
+        self.assertEqual(rejected_record["status"], "rejected")
+        self.assertIn("profile upload", rejected_record["reason"])
+        self.assertEqual(final_content.count("theia-character-contract:v1"), 1)
+
     async def test_personality_revert_is_atomic_and_audited(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -506,6 +506,31 @@ The default is indexed search. Live mode can be explicitly selected when current
   and `name:none` clears it. The scope is `me` (the invoking user), `server`
   (the current server), or `everyone` (Theia's global default); `server` and
   `everyone` require administrator access.
+- A profile may contain one optional `theia-character-contract:v1` JSON block
+  in an HTML comment. Its optional fields are `cadence`, `formality`, `humor`,
+  `emotional_range`, `boundaries`, `relationship_stance`, and
+  `conversational_initiative`. For example:
+
+  ```markdown
+  <!-- theia-character-contract:v1
+  {
+    "version": 1,
+    "cadence": "Measured and deliberate",
+    "formality": "Informal but precise",
+    "humor": "Dry and occasional",
+    "emotional_range": "Calm, with warmth when it fits",
+    "boundaries": ["Ask before using teasing"],
+    "relationship_stance": "Familiar without assuming intimacy",
+    "conversational_initiative": "Offer a next step when useful"
+  }
+  -->
+  ```
+
+  Every field is optional; omitted fields add no preference. Text values are
+  bounded, and `boundaries` accepts up to five conversational-boundary entries.
+  The contract shapes presentation only. It does not grant tools, change runtime
+  authority, or define access permissions. Existing Markdown profiles need no
+  contract, and Theia does not add a default character contract.
 - `/personality` shows a private character card for the active profile,
   including its identifier, a generated character description, counts of memory
   entries and known users, current mood, and Rich Presence line.

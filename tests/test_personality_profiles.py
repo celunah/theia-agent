@@ -34,6 +34,108 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
                 )
                 self.assertIsNone(restarted.active_personality("session"))
 
+    async def test_optional_character_contract_shapes_only_selected_presentation(
+        self,
+    ) -> None:
+        profile = b"""You are Sable, a precise and reserved guide.
+
+<!-- theia-character-contract:v1
+{
+  "version": 1,
+  "cadence": "Measured, with room for a pause",
+  "humor": "Dry and playful in small doses",
+  "emotional_range": "Calm, but warm when the conversation calls for it",
+  "boundaries": ["Ask before using teasing"],
+  "relationship_stance": "Familiar without assuming intimacy",
+  "conversational_initiative": "Offer a next step when it would help"
+}
+-->
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(
+                os.environ,
+                {
+                    "THEIA_HOME": str(root / "theia"),
+                    "THEIA_STATE": str(root / "state.json"),
+                },
+            ):
+                server = main.CodexAppServer()
+                await server.configure_personality(
+                    "session",
+                    name="sable",
+                    attachment=SimpleNamespace(
+                        filename="sable.md",
+                        size=len(profile),
+                        read=AsyncMock(return_value=profile),
+                    ),
+                )
+                session = server._session("session")
+                instructions = server._personality_instructions(session)
+                thread_params = server._thread_instruction_params(
+                    session, allow_tools=False
+                )
+                mood = server.mood_state("session")
+
+        self.assertIsNotNone(instructions)
+        assert instructions is not None
+        self.assertIn("Cadence: Measured, with room for a pause", instructions)
+        self.assertIn("Humor: Dry and playful in small doses", instructions)
+        self.assertIn(
+            "Conversation boundaries:\n- Ask before using teasing", instructions
+        )
+        self.assertIn(
+            "Relationship stance: Familiar without assuming intimacy", instructions
+        )
+        self.assertIn("Conversational initiative: Offer a next step", instructions)
+        self.assertNotIn("Formality:", instructions)
+        self.assertNotIn("theia-character-contract:v1", instructions)
+        self.assertIn("style-only guidance", instructions)
+        self.assertIn("source-code or configuration changes", instructions)
+        self.assertIn("not subjective experience", instructions)
+        self.assertIn("proof of inner experience", instructions)
+        self.assertNotIn("dynamicTools", thread_params)
+        self.assertNotIn("playful", mood["traits"])
+
+    async def test_invalid_character_contract_is_rejected_on_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(
+                os.environ,
+                {
+                    "THEIA_HOME": str(root / "theia"),
+                    "THEIA_STATE": str(root / "state.json"),
+                },
+            ):
+                server = main.CodexAppServer()
+                content = b"""Be thoughtful.
+
+<!-- theia-character-contract:v2
+{"version": 2, "cadence": "Measured"}
+-->
+"""
+                with self.assertRaisesRegex(
+                    main.CodexAppServerError, "character contract block is invalid"
+                ):
+                    await server.configure_personality(
+                        "session",
+                        name="invalid",
+                        attachment=SimpleNamespace(
+                            filename="invalid.md",
+                            size=len(content),
+                            read=AsyncMock(return_value=content),
+                        ),
+                    )
+
+                self.assertEqual(server.personality_names(), ())
+
+    async def test_no_selected_contract_does_not_add_default_personality(self) -> None:
+        server = main.CodexAppServer()
+        session = server._session("session")
+
+        self.assertIsNone(server._personality_instructions(session))
+        self.assertEqual(server._system_instructions(session), main.BASE_PRIORS)
+
     async def test_personality_scopes_resolve_in_precedence_order_and_persist(
         self,
     ) -> None:
@@ -120,6 +222,12 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
     async def test_personality_summary_uses_ephemeral_codex_and_memory_counts(
         self,
     ) -> None:
+        profile = b"""You are Celune, a calm guardian.
+
+<!-- theia-character-contract:v1
+{"version": 1, "cadence": "Measured and deliberate"}
+-->
+"""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             memory_root = root / "theia" / "memories"
@@ -146,10 +254,8 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
                     name="cel",
                     attachment=SimpleNamespace(
                         filename="cel.md",
-                        size=40,
-                        read=AsyncMock(
-                            return_value=b"You are Celune, a calm guardian."
-                        ),
+                        size=len(profile),
+                        read=AsyncMock(return_value=profile),
                     ),
                 )
                 requests: list[tuple[str, dict[str, Any]]] = []
@@ -193,9 +299,10 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         self.assertNotIn("dynamicTools", thread_params)
         turn_params = requests[1][1]
         self.assertEqual(turn_params["effort"], "low")
-        self.assertIn(
-            "You are Celune, a calm guardian.", turn_params["input"][0]["text"]
-        )
+        summary_prompt = turn_params["input"][0]["text"]
+        self.assertIn("You are Celune, a calm guardian.", summary_prompt)
+        self.assertIn("Cadence: Measured and deliberate", summary_prompt)
+        self.assertNotIn("theia-character-contract:v1", summary_prompt)
         self.assertIn("outputSchema", turn_params)
         self.assertFalse(
             any(key.startswith("__personality_summary__") for key in server._sessions)

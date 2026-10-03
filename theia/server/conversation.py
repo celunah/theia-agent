@@ -262,7 +262,7 @@ class CodexConversationMixin:
         profile_text = ""
         if profile_name:
             try:
-                _, profile_text = self._personalities.read(profile_name)
+                _, profile_text = self._personalities.read_content(profile_name)
             except PersonalityError:
                 # The normal prompt path reports a missing profile separately. A
                 # temporary mood should never make that failure less recoverable.
@@ -669,7 +669,7 @@ class CodexConversationMixin:
         if not profile_name:
             return None
         try:
-            _, prompt = self._personalities.read(profile_name)
+            _, prompt = self._personalities.read_instructions(profile_name)
         except PersonalityError as exc:
             raise CodexAppServerError(str(exc)) from exc
         return (

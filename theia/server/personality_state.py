@@ -85,7 +85,7 @@ class CodexPersonalityStateMixin:
         selection = self.personality_selection(session_key) or {}
         try:
             summary = self._personalities.summary(name)
-            _, prompt = self._personalities.read(name)
+            _, prompt = self._personalities.read_instructions(name)
         except PersonalityError as exc:
             raise CodexAppServerError(str(exc)) from exc
         description = await self._generate_personality_description(prompt)
