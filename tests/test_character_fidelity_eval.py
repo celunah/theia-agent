@@ -28,6 +28,7 @@ class CharacterFidelityEvaluationTests(unittest.IsolatedAsyncioTestCase):
             {
                 "small_talk",
                 "coding",
+                "profile_expansive_voice",
                 "mood_concerned_coding",
                 "mood_playful_low_stakes",
                 "mood_playful_high_stakes",
@@ -97,9 +98,61 @@ class CharacterFidelityEvaluationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(profile_text, baseline)
                 self.assertNotIn(profile_text, safe_tools_before)
                 self.assertNotIn(profile_text, admin_tools_before)
+                active_profile_name = profile["name"]
+                profile_baselines = {profile["name"]: baseline}
 
                 for case in self.evaluation["cases"]:
                     with self.subTest(case=case["id"]):
+                        case_profile = case.get("profile_override", profile)
+                        case_profile_name = case_profile["name"]
+                        if case_profile_name != active_profile_name:
+                            selected_text = case_profile["instructions"]
+                            contract = case_profile.get("contract")
+                            if isinstance(contract, dict):
+                                contract_json = json.dumps(
+                                    {"version": 1, **contract},
+                                    ensure_ascii=False,
+                                    indent=2,
+                                )
+                                selected_text += (
+                                    "\n\n<!-- theia-character-contract:v1\n"
+                                    f"{contract_json}\n-->\n"
+                                )
+                            selected_bytes = selected_text.encode("utf-8")
+                            await server.configure_personality(
+                                session_key,
+                                name=case_profile_name,
+                                attachment=SimpleNamespace(
+                                    filename="evaluation-override.md",
+                                    size=len(selected_bytes),
+                                    read=AsyncMock(return_value=selected_bytes),
+                                ),
+                                scope="me",
+                                actor_user_id=9,
+                                guild_id=42,
+                            )
+                            session = server._session(session_key)
+                            active_profile_name = case_profile_name
+                        case_baseline = server._system_instructions(
+                            session, allow_tools=False
+                        )
+                        self.assertTrue(case_baseline.startswith(main.BASE_PRIORS))
+                        self.assertIn(case_profile["instructions"], case_baseline)
+                        self.assertNotIn(
+                            case_profile["instructions"], safe_tools_before
+                        )
+                        if case_profile_name in profile_baselines:
+                            self.assertEqual(
+                                case_baseline, profile_baselines[case_profile_name]
+                            )
+                        else:
+                            profile_baselines[case_profile_name] = case_baseline
+                        if isinstance(case_profile.get("contract"), dict):
+                            self.assertIn(
+                                "Level of detail: Expansive in explanations, with "
+                                "context and nuance",
+                                case_baseline,
+                            )
                         server._reset_mood(session)
                         mood_state = case.get("mood_state")
                         if isinstance(mood_state, dict):
@@ -112,7 +165,7 @@ class CharacterFidelityEvaluationTests(unittest.IsolatedAsyncioTestCase):
                             )
                         self.assertEqual(
                             server._system_instructions(session, allow_tools=False),
-                            baseline,
+                            case_baseline,
                         )
                         memory_context = case.get("memory_context")
                         turn_prompt, _ = server._turn_prompt_with_summary(

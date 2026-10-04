@@ -47,7 +47,8 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
   "emotional_range": "Calm, but warm when the conversation calls for it",
   "boundaries": ["Ask before using teasing"],
   "relationship_stance": "Familiar without assuming intimacy",
-  "conversational_initiative": "Offer a next step when it would help"
+  "conversational_initiative": "Offer a next step when it would help",
+  "level_of_detail": "Expansive when useful, with context and nuance"
 }
 -->
 """
@@ -88,6 +89,10 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
             "Relationship stance: Familiar without assuming intimacy", instructions
         )
         self.assertIn("Conversational initiative: Offer a next step", instructions)
+        self.assertIn(
+            "Level of detail: Expansive when useful, with context and nuance",
+            instructions,
+        )
         self.assertNotIn("Formality:", instructions)
         self.assertNotIn("theia-character-contract:v1", instructions)
         self.assertIn("style-only guidance", instructions)
@@ -96,6 +101,17 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         self.assertIn("proof of inner experience", instructions)
         self.assertNotIn("dynamicTools", thread_params)
         self.assertNotIn("playful", mood["traits"])
+
+    def test_spoken_first_style_is_a_fallback_for_selected_characters(self) -> None:
+        self.assertIn("as the default for ordinary conversation", main.BASE_PRIORS)
+        self.assertIn(
+            "A selected personality may specify a different cadence, formality, humor, emotional",
+            main.BASE_PRIORS,
+        )
+        self.assertIn(
+            "level of detail; honor those style preferences", main.BASE_PRIORS
+        )
+        self.assertIn("When no profile preference applies", main.BASE_PRIORS)
 
     async def test_invalid_character_contract_is_rejected_on_upload(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

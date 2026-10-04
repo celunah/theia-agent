@@ -522,8 +522,8 @@ The default is indexed search. Live mode can be explicitly selected when current
   `everyone` require administrator access.
 - A profile may contain one optional `theia-character-contract:v1` JSON block
   in an HTML comment. Its optional fields are `cadence`, `formality`, `humor`,
-  `emotional_range`, `boundaries`, `relationship_stance`, and
-  `conversational_initiative`. For example:
+  `emotional_range`, `boundaries`, `relationship_stance`,
+  `conversational_initiative`, and `level_of_detail`. For example:
 
   ```markdown
   <!-- theia-character-contract:v1
@@ -535,7 +535,8 @@ The default is indexed search. Live mode can be explicitly selected when current
     "emotional_range": "Calm, with warmth when it fits",
     "boundaries": ["Ask before using teasing"],
     "relationship_stance": "Familiar without assuming intimacy",
-    "conversational_initiative": "Offer a next step when useful"
+    "conversational_initiative": "Offer a next step when useful",
+    "level_of_detail": "Expansive when useful, with context and nuance"
   }
   -->
   ```
@@ -545,6 +546,10 @@ The default is indexed search. Live mode can be explicitly selected when current
   The contract shapes presentation only. It does not grant tools, change runtime
   authority, or define access permissions. Existing Markdown profiles need no
   contract, and Theia does not add a default character contract.
+- The conversational, spoken-first style is a fallback. A selected profile may
+  specify a different cadence, formality, humor, emotional range, or level of
+  detail. With no selected profile preference, ordinary replies retain the
+  concise default.
 - `/personality` shows a private character card for the active profile,
   including its identifier, a generated character description, counts of memory
   entries and known users, current mood, and Rich Presence line.

@@ -37,6 +37,7 @@ _CHARACTER_CONTRACT_LABELS = (
     ("emotional_range", "Emotional range"),
     ("relationship_stance", "Relationship stance"),
     ("conversational_initiative", "Conversational initiative"),
+    ("level_of_detail", "Level of detail"),
 )
 _CHARACTER_CONTRACT_KEYS = frozenset(
     {"version", "boundaries"} | {field for field, _label in _CHARACTER_CONTRACT_LABELS}
@@ -75,6 +76,7 @@ class CharacterContract:
     boundaries: tuple[str, ...] = ()
     relationship_stance: str | None = None
     conversational_initiative: str | None = None
+    level_of_detail: str | None = None
 
     def render(self) -> str:
         """Render only selected settings as bounded, untrusted style guidance."""
@@ -184,6 +186,7 @@ def _parse_character_contract(
             boundaries=tuple(boundaries),
             relationship_stance=fields.get("relationship_stance"),
             conversational_initiative=fields.get("conversational_initiative"),
+            level_of_detail=fields.get("level_of_detail"),
         ),
         True,
         True,

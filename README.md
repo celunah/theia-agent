@@ -13,7 +13,7 @@ services, or a configured Qwen Audio middleware endpoint.
 - Personality profiles can be selected for yourself, the current server, or
   everyone in Theia, with administrator protection for shared scopes.
 - Profiles may include an optional structured character contract for response
-  style; profiles without one keep their existing behavior.
+  style and level of detail; the concise spoken-first style is only the fallback.
 - Model selection, web search, approvals, and safe controls for agent actions.
 - Theia-only usage tracking with compact and detailed views, background work, daily recaps, and optional self-improvement.
 - Temporary simulated mood can subtly shape replies for a selected character,
