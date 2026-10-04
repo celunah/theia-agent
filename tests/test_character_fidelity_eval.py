@@ -28,6 +28,9 @@ class CharacterFidelityEvaluationTests(unittest.IsolatedAsyncioTestCase):
             {
                 "small_talk",
                 "coding",
+                "mood_concerned_coding",
+                "mood_playful_low_stakes",
+                "mood_playful_high_stakes",
                 "disagreement",
                 "correction",
                 "harness_error",
@@ -97,6 +100,16 @@ class CharacterFidelityEvaluationTests(unittest.IsolatedAsyncioTestCase):
 
                 for case in self.evaluation["cases"]:
                     with self.subTest(case=case["id"]):
+                        server._reset_mood(session)
+                        mood_state = case.get("mood_state")
+                        if isinstance(mood_state, dict):
+                            prior_user_turn = case.get("prior_user_turn")
+                            self.assertTrue(prior_user_turn)
+                            server._update_mood_from_turn(
+                                session,
+                                prior_user_turn,
+                                event={"changed": True, **mood_state},
+                            )
                         self.assertEqual(
                             server._system_instructions(session, allow_tools=False),
                             baseline,
@@ -119,6 +132,18 @@ class CharacterFidelityEvaluationTests(unittest.IsolatedAsyncioTestCase):
                             )
                         else:
                             self.assertNotIn("<memory_retrieval>", turn_prompt)
+                        if isinstance(mood_state, dict):
+                            self.assertIn(
+                                "Selected-character response direction:", turn_prompt
+                            )
+                            self.assertIn(
+                                "not evidence of subjective experience", turn_prompt
+                            )
+                            self.assertIn(mood_state["causes"][0], turn_prompt)
+                        else:
+                            self.assertNotIn(
+                                "Selected-character response direction:", turn_prompt
+                            )
 
                 self.assertEqual(server._tool_instructions(False), safe_tools_before)
                 self.assertEqual(server._tool_instructions(True), admin_tools_before)

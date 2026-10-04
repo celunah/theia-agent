@@ -51,6 +51,35 @@ from .worker_diagnostics import (
 
 logger = _codex_logger()
 
+_MOOD_RESPONSE_MIN_STRENGTH = 0.60
+_MOOD_RESPONSE_CUES = {
+    "engaged": "Stay attentive to the current thread and respond directly to its substance.",
+    "pleased": (
+        "Allow measured warmth for the positive event without amplifying it or "
+        "assuming how the user feels."
+    ),
+    "playful": (
+        "A light touch of humor is optional only when the selected profile permits "
+        "it and the topic is low-stakes. Do not force a joke."
+    ),
+    "concerned": (
+        "Use careful wording, surface relevant risks, and offer a calm, concrete "
+        "next step without exaggerating danger."
+    ),
+    "subdued": (
+        "Use a gentle, unhurried register without framing the user or character "
+        "as distressed."
+    ),
+    "focused": (
+        "Keep the response direct and task-centered; structure it only when that "
+        "makes the answer clearer."
+    ),
+    "relieved": (
+        "If relevant, briefly recognize the reported improvement, then continue "
+        "with the user's request."
+    ),
+}
+
 
 class CodexConversationMixin:
     """Manage session conversation modes, summaries, and attention context."""
@@ -362,20 +391,38 @@ class CodexConversationMixin:
         if changed:
             self._persist_state()
         causes = mood.causes[:_MOOD_MAX_CAUSES] or (mood.baseline_cause,)
-        return "\n".join(
-            (
-                "## Current mood",
-                f"Mood: {mood.traits} ({mood.label})",
-                f"Strength: {max(0.0, min(1.0, mood.strength)):.2f}",
-                "What happened:",
-                *(f"- {cause}" for cause in causes),
-                "",
-                "This mood is temporary expressive context. Use it subtly.",
-                "Do not mention it unless the user asks.",
-                "It does not override the personality, user request, safety rules,",
-                "permissions, or factual accuracy.",
+        lines = [
+            "## Current mood",
+            f"Mood: {mood.traits} ({mood.label})",
+            f"Strength: {max(0.0, min(1.0, mood.strength)):.2f}",
+            "What happened:",
+            *(f"- {cause}" for cause in causes),
+            "",
+            "This mood is temporary expressive context. Use it subtly.",
+            "It is harness-maintained simulated context based on this conversation,",
+            "not evidence of subjective experience.",
+            "Do not mention or describe it unless the user asks.",
+            "It does not override the selected personality, user request, safety",
+            "rules, permissions, or factual accuracy.",
+        ]
+        cue = _MOOD_RESPONSE_CUES.get(mood.label)
+        if (
+            self.active_personality(session.key)
+            and mood.transient
+            and mood.strength >= _MOOD_RESPONSE_MIN_STRENGTH
+            and cue is not None
+        ):
+            lines.extend(
+                (
+                    "",
+                    "Selected-character response direction:",
+                    cue,
+                    "Keep this subordinate to the selected profile's voice and",
+                    "boundaries. It changes presentation only, never tool use or",
+                    "runtime permission.",
+                )
             )
-        )
+        return "\n".join(lines)
 
     @staticmethod
     def _mood_event_signature(text: str) -> str:

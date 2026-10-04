@@ -121,6 +121,14 @@ Each isolated conversation also has a temporary simulated mood. It derives a
 resting affect from the active personality, uses a bounded private Codex
 appraisal for meaningful user turns, decays with real elapsed time, and is never
 written to permanent memories, skills, recaps, or personality files.
+For a selected character, a sufficiently strong transient mood can add one short
+response direction: concern favors careful wording and concrete next steps, for
+example, while playfulness permits humor only when the profile and low-stakes
+context allow it. The current request and profile boundaries remain in control.
+This uses the existing session state and prompt; it adds no appraisal call,
+memory, tool access, or runtime permission. Without a selected character or a
+meaningful transient mood, no character-specific direction is added. The state
+is harness-maintained and simulated, not evidence of subjective experience.
 
 Theia can keep a small set of explicit, session-scoped open loops such as a
 deferred question or promised follow-up. `/commitments` lists the current loops;

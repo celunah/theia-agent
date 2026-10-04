@@ -75,6 +75,92 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
             "This mood is temporary expressive context. Use it subtly.", turn_prompt
         )
 
+    async def test_selected_character_mood_cues_are_subtle_and_bounded(self) -> None:
+        profile = b"You are Sable, measured and warm, with dry humor only when it fits."
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(
+                os.environ,
+                {
+                    "THEIA_HOME": str(root / "theia"),
+                    "THEIA_STATE": str(root / "state.json"),
+                },
+            ):
+                server = main.CodexAppServer()
+                await server.configure_personality(
+                    "session",
+                    name="sable",
+                    attachment=SimpleNamespace(
+                        filename="sable.md",
+                        size=len(profile),
+                        read=AsyncMock(return_value=profile),
+                    ),
+                )
+                session = server._session("session")
+                safe_tools = server._tool_instructions(False)
+                admin_tools = server._tool_instructions(True)
+                expected = {
+                    "engaged": "Stay attentive to the current thread",
+                    "pleased": "Allow measured warmth",
+                    "playful": "only when the selected profile permits it",
+                    "concerned": "surface relevant risks",
+                    "subdued": "Use a gentle, unhurried register",
+                    "focused": "Keep the response direct and task-centered",
+                    "relieved": "briefly recognize the reported improvement",
+                }
+                for index, (label, direction) in enumerate(expected.items()):
+                    with self.subTest(label=label):
+                        _apply_mood_event(
+                            server,
+                            session,
+                            f"A meaningful {label} event {index}.",
+                            now=100.0 + index,
+                            label=label,
+                            traits=f"temporarily {label}",
+                            strength=0.72,
+                            causes=[f"The user reported a {label} event."],
+                        )
+                        rendered = server._render_mood(session, now=100.0 + index)
+                        self.assertIn(
+                            "Selected-character response direction:", rendered
+                        )
+                        self.assertIn(direction, rendered)
+
+                _apply_mood_event(
+                    server,
+                    session,
+                    "A weak focused event.",
+                    now=200.0,
+                    label="focused",
+                    strength=0.59,
+                )
+                weak = server._render_mood(session, now=200.0)
+                self.assertNotIn("Selected-character response direction:", weak)
+                self.assertIn("not evidence of subjective experience", weak)
+
+                server._reset_mood(session)
+                neutral = server._render_mood(session, now=201.0)
+                self.assertNotIn("Selected-character response direction:", neutral)
+                self.assertEqual(server._tool_instructions(False), safe_tools)
+                self.assertEqual(server._tool_instructions(True), admin_tools)
+
+    def test_mood_response_cue_requires_a_selected_character(self) -> None:
+        server = main.CodexAppServer()
+        session = server._session(_mood_test_key("no-selected-character"))
+        _apply_mood_event(
+            server,
+            session,
+            "A meaningful concerned event.",
+            now=100.0,
+            label="concerned",
+            strength=0.72,
+        )
+
+        rendered = server._render_mood(session, now=100.0)
+
+        self.assertNotIn("Selected-character response direction:", rendered)
+        self.assertIn("not evidence of subjective experience", rendered)
+
     def test_transient_mood_has_traits_label_strength_and_causes(self) -> None:
         server = main.CodexAppServer()
         session = server._session(_mood_test_key("transient"))

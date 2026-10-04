@@ -16,7 +16,8 @@ services, or a configured Qwen Audio middleware endpoint.
   style; profiles without one keep their existing behavior.
 - Model selection, web search, approvals, and safe controls for agent actions.
 - Theia-only usage tracking with compact and detailed views, background work, daily recaps, and optional self-improvement.
-- A temporary, personality-aware mood, Rich Presence, and server-specific customization.
+- Temporary simulated mood can subtly shape replies for a selected character,
+  alongside Rich Presence and server-specific customization.
 - Conversational attention that preserves substantial topic changes and follows brief tangents naturally.
 - Optional automatic Codex CLI updates with staged verification and rollback.
 
