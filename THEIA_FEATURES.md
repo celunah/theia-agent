@@ -552,9 +552,10 @@ The default is indexed search. Live mode can be explicitly selected when current
   detail. With no selected profile preference, ordinary replies retain the
   concise default.
 - `/personality prompt` privately shows the active base prior, character prompt,
-  and current mood prompt for the invoking user's session. Long prompts are
-  split across owner-locked pages. This view makes no model calls and omits
-  memory and tool-policy context.
+  and current mood prompt for the invoking user's session, one section per
+  owner-locked page. Long Markdown sections split at heading boundaries when
+  possible. This view makes no model calls and omits memory and tool-policy
+  context.
 - `/personality profile` shows a private character card for the active profile,
   including its identifier, a generated character description, counts of memory
   entries and known users, current mood, and Rich Presence line.

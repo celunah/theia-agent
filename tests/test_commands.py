@@ -944,7 +944,11 @@ class CommandSurfaceTests(unittest.TestCase):
         self.assertTrue(expected.issubset(set(main.LABEL_TARGETS)))
 
     def test_personality_prompt_embeds_are_customizable_and_paginated(self) -> None:
-        character_prompt = "C" * 6000
+        character_prompt = (
+            "## Concise\n" + "C" * 1000 + "\n\n"
+            "## Boundaries\n" + "D" * 1000 + "\n\n"
+            "## Emotional range\n" + "E" * 1000
+        )
         with tempfile.TemporaryDirectory() as directory:
             store = main.FrontendCustomizationStore(Path(directory) / "frontend.json")
             channel = SimpleNamespace(id=7, guild=SimpleNamespace(id=42))
@@ -981,31 +985,44 @@ class CommandSurfaceTests(unittest.TestCase):
 
         self.assertEqual(defaults[0].title, "Current prompt layers")
         self.assertEqual(
-            [field.name for field in defaults[0].fields],
+            [page.fields[0].name for page in defaults],
             ["Base prior", "Character prompt", "Mood prompt"],
         )
-        self.assertEqual(defaults[0].footer.text, "Page 1 of 1")
+        self.assertEqual(defaults[0].footer.text, "Page 1 of 3")
         self.assertEqual(
-            defaults[0].fields[1].value,
+            defaults[1].fields[0].value,
             "No character prompt is active for this session.",
         )
-        self.assertEqual(len(pages), 2)
+        self.assertEqual(len(pages), 5)
         self.assertEqual(pages[0].title, "Prompt layers")
-        self.assertEqual(pages[0].footer.text, "Sheet 1 / 2")
+        self.assertEqual(pages[0].footer.text, "Sheet 1 / 5")
         character_fields = [
             field
             for page in pages
             for field in page.fields
-            if (field.name or "").startswith("Character contract")
+            if field.name == "Character contract"
         ]
         self.assertEqual(
             "".join(field.value or "" for field in character_fields),
             character_prompt,
         )
-        self.assertEqual(pages[0].fields[0].name, "Base instructions")
-        self.assertTrue((pages[-1].fields[-1].name or "").startswith("Mood cue"))
+        self.assertEqual(
+            [page.fields[0].name for page in pages],
+            [
+                "Base instructions",
+                "Character contract",
+                "Character contract",
+                "Character contract",
+                "Mood cue",
+            ],
+        )
+        self.assertTrue((pages[1].fields[0].value or "").startswith("## Concise"))
+        self.assertTrue((pages[2].fields[0].value or "").startswith("## Boundaries"))
+        self.assertTrue(
+            (pages[3].fields[0].value or "").startswith("## Emotional range")
+        )
         for page in pages:
-            self.assertLessEqual(len(page.fields), 5)
+            self.assertEqual(len(page.fields), 1)
             self.assertLessEqual(
                 len(page.title or "")
                 + len(page.description or "")
@@ -1022,6 +1039,25 @@ class CommandSurfaceTests(unittest.TestCase):
                     for field in page.fields
                 )
             )
+
+    def test_personality_prompt_splits_long_unheaded_section(self) -> None:
+        prompt = "C" * 2500
+        pages = main._personality_prompt_embeds(
+            {"base_prior": "", "character_prompt": prompt, "mood_prompt": ""}
+        )
+        character_pages = [
+            page.fields[0]
+            for page in pages
+            if page.fields[0].name == "Character prompt"
+        ]
+
+        self.assertEqual(len(character_pages), 3)
+        self.assertEqual(
+            "".join(field.value or "" for field in character_pages), prompt
+        )
+        self.assertTrue(
+            all(len(field.value or "") <= 1024 for field in character_pages)
+        )
 
     def test_frontend_embed_customization_does_not_change_default_without_server(
         self,

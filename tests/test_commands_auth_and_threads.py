@@ -164,7 +164,7 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         )
         prompt_parts = {
             "base_prior": "Base prior text.",
-            "character_prompt": "Character prompt. " + ("C" * 6000),
+            "character_prompt": "Character prompt. " + ("C" * 1000),
             "mood_prompt": "Mood prompt text.",
         }
         with (
@@ -186,7 +186,7 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         self.assertFalse(kwargs["allowed_mentions"].roles)
         self.assertEqual(kwargs["embed"].fields[0].name, "Base prior")
         self.assertIsNotNone(kwargs["view"])
-        self.assertEqual(len(kwargs["view"].pages), 2)
+        self.assertEqual(len(kwargs["view"].pages), 3)
 
         response = SimpleNamespace(edit_message=AsyncMock())
         navigation = SimpleNamespace(user=user, response=response)
@@ -196,7 +196,7 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         self.assertEqual(kwargs["view"].index, 1)
         self.assertEqual(
             response.edit_message.await_args.kwargs["embed"].footer.text,
-            "Page 2 of 2",
+            "Page 2 of 3",
         )
         rejected_response = SimpleNamespace(send_message=AsyncMock())
         rejected = SimpleNamespace(

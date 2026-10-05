@@ -13,7 +13,7 @@ from typing import Any
 import discord
 
 from ..colors import discord_color
-from ..delivery_text import _split_pages
+from ..delivery_text import _split_markdown_pages
 from .support import (
     _current_revision,
     _frontend_embed,
@@ -880,10 +880,8 @@ def _personality_prompt_embeds(
             user=user,
             context=context,
         )[:128]
-        chunks = _split_pages(text, limit=850)
-        for index, chunk in enumerate(chunks, start=1):
-            name = label if len(chunks) == 1 else f"{label} ({index}/{len(chunks)})"
-            fields.append((name[:256], chunk or " "))
+        for chunk in _split_markdown_pages(text, limit=1024):
+            fields.append((label, chunk or " "))
 
     title = _frontend_label(
         "label:personality_prompt_title",
@@ -893,12 +891,10 @@ def _personality_prompt_embeds(
         context=context,
     )[:128]
     pages: list[discord.Embed] = []
-    total_pages = (len(fields) + 4) // 5
-    for offset in range(0, len(fields), 5):
-        page_number = len(pages) + 1
+    total_pages = len(fields)
+    for page_number, (name, value) in enumerate(fields, start=1):
         embed = discord.Embed(title=title, color=discord_color("INFO"))
-        for name, value in fields[offset : offset + 5]:
-            embed.add_field(name=name, value=value, inline=False)
+        embed.add_field(name=name, value=value, inline=False)
         embed.set_footer(
             text=_frontend_label(
                 "label:personality_prompt_page",
