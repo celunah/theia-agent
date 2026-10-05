@@ -19,7 +19,8 @@ The current commands are:
 - `/undo`
 - `/btw [prompt] [file]` (a blank prompt opens a request modal)
 - `/skill <skill_name>`
-- `/personality [file] [name]`
+- `/personality profile [file] [name] [scope]`
+- `/personality prompt`
 - `/memory [scope]`
 - `/commitments [action] [commitment_id]`
 - `/model <model>`
@@ -335,7 +336,7 @@ agent state.
 
 ## Models and reasoning
 
-- The default Codex model is `gpt-5.6-luna`.
+- The default Codex model is `gpt-6-luna`.
 - `/model` obtains available models dynamically through `model/list`.
 - Model autocomplete is populated from the current Codex model catalog.
 - `/model` replaces the default for future turns and persists across restarts.
@@ -515,11 +516,11 @@ The default is indexed search. Live mode can be explicitly selected when current
 
 ### Personalities
 
-- `/personality file name [scope]` uploads and activates a Markdown/text
-  personality. `/personality name [scope]` switches to an existing profile,
-  and `name:none` clears it. The scope is `me` (the invoking user), `server`
-  (the current server), or `everyone` (Theia's global default); `server` and
-  `everyone` require administrator access.
+- `/personality profile` shows the private character card. Add a file and name
+  to upload and activate a Markdown/text personality; provide a name to switch
+  to an existing profile, or `none` to clear it. The scope is `me` (the
+  invoking user), `server` (the current server), or `everyone` (Theia's global
+  default). The `server` and `everyone` scopes require administrator access.
 - A profile may contain one optional `theia-character-contract:v1` JSON block
   in an HTML comment. Its optional fields are `cadence`, `formality`, `humor`,
   `emotional_range`, `boundaries`, `relationship_stance`,
@@ -550,10 +551,15 @@ The default is indexed search. Live mode can be explicitly selected when current
   specify a different cadence, formality, humor, emotional range, or level of
   detail. With no selected profile preference, ordinary replies retain the
   concise default.
-- `/personality` shows a private character card for the active profile,
+- `/personality prompt` privately shows the active base prior, character prompt,
+  and current mood prompt for the invoking user's session. Long prompts are
+  split across owner-locked pages. This view makes no model calls and omits
+  memory and tool-policy context.
+- `/personality profile` shows a private character card for the active profile,
   including its identifier, a generated character description, counts of memory
   entries and known users, current mood, and Rich Presence line.
-- The character card footer explains how to add or change a character.
+- The character card footer explains how to add or change a character with
+  `/personality profile`.
 - Personality-name autocomplete is supported.
 - Personality resolution uses `me`, then `server`, then `everyone` precedence,
   and the character card records the active scope and setter ID.

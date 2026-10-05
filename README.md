@@ -31,7 +31,8 @@ threads, and voice.
 ```text
 /login  /about  /usage  /credits  /model  /mode
 /approve  /deny  /stop  /undo  /btw [prompt] [file]
-/skill  /personality  /memory [scope]  /commitments [action] [id]
+/skill  /personality profile [file] [name] [scope]
+/personality prompt  /memory [scope]  /commitments [action] [id]
 /improvements  /customize  /restart
 ```
 

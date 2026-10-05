@@ -103,15 +103,15 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         self.assertNotIn("playful", mood["traits"])
 
     def test_spoken_first_style_is_a_fallback_for_selected_characters(self) -> None:
-        self.assertIn("as the default for ordinary conversation", main.BASE_PRIORS)
         self.assertIn(
-            "A selected personality may specify a different cadence, formality, humor, emotional",
+            "When a personality was provided, answer from that character's perspective",
             main.BASE_PRIORS,
         )
+        self.assertIn("Do not default to a generic assistant answer", main.BASE_PRIORS)
         self.assertIn(
-            "level of detail; honor those style preferences", main.BASE_PRIORS
+            "When no personality was provided, respond as a neutral assistant.",
+            main.BASE_PRIORS,
         )
-        self.assertIn("When no profile preference applies", main.BASE_PRIORS)
 
     async def test_invalid_character_contract_is_rejected_on_upload(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -151,6 +151,57 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
 
         self.assertIsNone(server._personality_instructions(session))
         self.assertEqual(server._system_instructions(session), main.BASE_PRIORS)
+
+    async def test_prompt_parts_are_grounded_and_preview_mood_without_side_effects(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(
+                os.environ,
+                {
+                    "THEIA_HOME": str(root / "theia"),
+                    "THEIA_STATE": str(root / "state.json"),
+                },
+            ):
+                server = main.CodexAppServer()
+                await server.configure_personality(
+                    "session",
+                    name="sable",
+                    attachment=SimpleNamespace(
+                        filename="sable.md",
+                        size=24,
+                        read=AsyncMock(return_value=b"Be precise and reserved."),
+                    ),
+                )
+                session = server._session("session")
+                mood = session.mood
+                assert mood is not None
+                mood.label = "concerned"
+                mood.traits = "careful and attentive"
+                mood.strength = 0.9
+                mood.causes = ("The user reported a concrete deployment failure.",)
+                mood.updated_at = time.time()
+                mood.transient = True
+                before = server._serialize_mood_state(session.mood)
+                with patch.object(server, "_persist_state") as persist:
+                    parts = server.personality_prompt_parts("session")
+
+        self.assertEqual(set(parts), {"base_prior", "character_prompt", "mood_prompt"})
+        self.assertEqual(parts["base_prior"], main.BASE_PRIORS)
+        self.assertIn("Be precise and reserved.", parts["character_prompt"] or "")
+        self.assertIn(
+            "The user reported a concrete deployment failure.",
+            parts["mood_prompt"] or "",
+        )
+        self.assertIn(
+            "not evidence of subjective experience", parts["mood_prompt"] or ""
+        )
+        self.assertIn(
+            "Selected-character response direction", parts["mood_prompt"] or ""
+        )
+        self.assertEqual(before, server._serialize_mood_state(session.mood))
+        persist.assert_not_called()
 
     async def test_personality_scopes_resolve_in_precedence_order_and_persist(
         self,

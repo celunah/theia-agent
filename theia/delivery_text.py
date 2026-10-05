@@ -13,7 +13,7 @@ def _split_pages(text: str, limit: int = 1900) -> list[str]:
             split_at = remaining.rfind("\n", 0, limit + 1)
         if split_at < limit // 2:
             split_at = remaining.rfind(" ", 0, limit + 1)
-        if split_at <= 0:
+        if split_at < limit // 2:
             split_at = limit
         pages.append(remaining[:split_at])
         remaining = remaining[split_at:]

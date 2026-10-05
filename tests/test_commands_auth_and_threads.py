@@ -148,7 +148,64 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         )
         self.assertEqual(
             embed.footer.text,
-            "Add or change the character with `/personality <file> <slug>`.",
+            "Add or change the character with `/personality profile`.",
+        )
+
+    async def test_personality_prompt_is_ephemeral_and_uses_owner_locked_pages(
+        self,
+    ) -> None:
+        channel = SimpleNamespace(id=7, guild=SimpleNamespace(id=42))
+        user = SimpleNamespace(id=9, name="username")
+        interaction = SimpleNamespace(
+            channel=channel,
+            user=user,
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        prompt_parts = {
+            "base_prior": "Base prior text.",
+            "character_prompt": "Character prompt. " + ("C" * 6000),
+            "mood_prompt": "Mood prompt text.",
+        }
+        with (
+            patch.object(main.bot.presence, "touch", new=AsyncMock()),
+            patch.object(
+                main.bot.codex,
+                "personality_prompt_parts",
+                return_value=prompt_parts,
+            ) as inspect_prompt,
+        ):
+            await cast(Any, main.codex_personality_prompt.callback)(interaction)
+
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        inspect_prompt.assert_called_once_with("guild:42:channel:7:user:9")
+        kwargs = interaction.followup.send.await_args.kwargs
+        self.assertTrue(kwargs["ephemeral"])
+        self.assertFalse(kwargs["allowed_mentions"].everyone)
+        self.assertFalse(kwargs["allowed_mentions"].users)
+        self.assertFalse(kwargs["allowed_mentions"].roles)
+        self.assertEqual(kwargs["embed"].fields[0].name, "Base prior")
+        self.assertIsNotNone(kwargs["view"])
+        self.assertEqual(len(kwargs["view"].pages), 2)
+
+        response = SimpleNamespace(edit_message=AsyncMock())
+        navigation = SimpleNamespace(user=user, response=response)
+        next_button = kwargs["view"].children[1]
+        await cast(Any, next_button.callback)(navigation)
+
+        self.assertEqual(kwargs["view"].index, 1)
+        self.assertEqual(
+            response.edit_message.await_args.kwargs["embed"].footer.text,
+            "Page 2 of 2",
+        )
+        rejected_response = SimpleNamespace(send_message=AsyncMock())
+        rejected = SimpleNamespace(
+            user=SimpleNamespace(id=10), response=rejected_response
+        )
+        self.assertFalse(await kwargs["view"].interaction_check(rejected))
+        rejected_response.send_message.assert_awaited_once_with(
+            "Only the user who requested this prompt can navigate it.",
+            ephemeral=True,
         )
 
     async def test_personality_shared_scopes_require_administrator_access(self) -> None:

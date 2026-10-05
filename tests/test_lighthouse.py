@@ -203,7 +203,7 @@ class LighthouseTests(AsyncBehaviorTestBase):
         self.assertEqual(snapshot["reasoning"], "high")
         self.assertEqual(snapshot["reasoning_mode"], "adaptive")
         rendered = render_lighthouse(snapshot)
-        self.assertIn("Model        GPT-5.6 Luna · adaptive", rendered)
+        self.assertIn("Model        GPT-6 Luna · adaptive", rendered)
         self.assertIn("Reasoning    high", rendered)
 
     def test_lighthouse_does_not_invent_reasoning_without_an_assessment(self) -> None:

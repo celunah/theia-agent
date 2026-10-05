@@ -16,8 +16,8 @@ class CommandSurfaceTests(unittest.TestCase):
         ):
             server = main.CodexAppServer()
 
-        self.assertEqual(server.model_name(), "gpt-5.6-luna")
-        self.assertEqual(server.status("model-default")["model"], "gpt-5.6-luna")
+        self.assertEqual(server.model_name(), "gpt-6-luna")
+        self.assertEqual(server.status("model-default")["model"], "gpt-6-luna")
 
     def test_realtime_voice_is_the_default_when_custom_audio_is_absent(self) -> None:
         with patch.dict(
@@ -238,6 +238,13 @@ class CommandSurfaceTests(unittest.TestCase):
                 "improvements",
             },
         )
+        personality = main.bot.tree.get_command("personality")
+        self.assertIsNotNone(personality)
+        self.assertEqual(
+            {command.name for command in cast(Any, personality).commands},
+            {"profile", "prompt"},
+        )
+        self.assertIn("personality", main.COMMAND_TARGETS)
         self.assertEqual(main.bot.command_prefix, ())
         self.assertIsNone(main.bot.help_command)
         self.assertIs(main.CodexBot, main.TheiaBot)
@@ -316,20 +323,16 @@ class CommandSurfaceTests(unittest.TestCase):
         self.assertNotIn("Theia", main.BASE_PRIORS)
 
     def test_base_priors_make_ordinary_conversation_spoken_first(self) -> None:
-        self.assertIn("spoken-first delivery", main.BASE_PRIORS)
-        self.assertIn("acknowledge\nthe user's request directly", main.BASE_PRIORS)
+        self.assertIn("Spoken-first delivery", main.BASE_PRIORS)
         self.assertIn("one thought at a time", main.BASE_PRIORS)
-        self.assertIn("short,\nnatural paragraphs", main.BASE_PRIORS)
-        self.assertIn("without filler, forced slang", main.BASE_PRIORS)
-        self.assertIn("headings, and lists in ordinary conversation", main.BASE_PRIORS)
+        self.assertIn("without filler or forced slang", main.BASE_PRIORS)
+        self.assertIn("avoid unnecessary framing, repetition", main.BASE_PRIORS)
+        self.assertIn("When no personality was provided", main.BASE_PRIORS)
 
     def test_base_priors_keep_technical_answers_complete(self) -> None:
-        self.assertIn("For code,\nreviews, procedures", main.BASE_PRIORS)
-        self.assertIn("explicit requests for detail", main.BASE_PRIORS)
-        self.assertIn("expand as needed", main.BASE_PRIORS)
-        self.assertIn(
-            "preserve\nimportant facts and complete reasoning", main.BASE_PRIORS
-        )
+        self.assertIn("especially for code,", main.BASE_PRIORS)
+        self.assertIn("reviews, or procedures", main.BASE_PRIORS)
+        self.assertIn("Do not impose a hard sentence limit", main.BASE_PRIORS)
 
     def test_medium_is_the_non_adaptive_default(self) -> None:
         self.assertEqual(main.DEFAULT_REASONING_EFFORT, "medium")
@@ -926,6 +929,12 @@ class CommandSurfaceTests(unittest.TestCase):
                     "personality_mood",
                     "personality_presence",
                     "personality_footer",
+                    "personality_prompt_title",
+                    "personality_prompt_base",
+                    "personality_prompt_character",
+                    "personality_prompt_mood",
+                    "personality_prompt_none",
+                    "personality_prompt_page",
                 ),
                 ("memory_total_entries", "memory_page"),
                 ("image_follow_up",),
@@ -933,6 +942,86 @@ class CommandSurfaceTests(unittest.TestCase):
             for name in group
         }
         self.assertTrue(expected.issubset(set(main.LABEL_TARGETS)))
+
+    def test_personality_prompt_embeds_are_customizable_and_paginated(self) -> None:
+        character_prompt = "C" * 6000
+        with tempfile.TemporaryDirectory() as directory:
+            store = main.FrontendCustomizationStore(Path(directory) / "frontend.json")
+            channel = SimpleNamespace(id=7, guild=SimpleNamespace(id=42))
+            user = cast(Any, SimpleNamespace(id=9, name="Luna"))
+            with patch.object(main.bot, "customizations", store):
+                defaults = main._personality_prompt_embeds(
+                    {
+                        "base_prior": "Base text.",
+                        "character_prompt": None,
+                        "mood_prompt": "Mood text.",
+                    },
+                    channel=channel,
+                    user=user,
+                )
+            for target, value in (
+                ("personality_prompt_title", "Prompt layers"),
+                ("personality_prompt_base", "Base instructions"),
+                ("personality_prompt_character", "Character contract"),
+                ("personality_prompt_mood", "Mood cue"),
+                ("personality_prompt_none", "No character chosen"),
+                ("personality_prompt_page", "Sheet {page} / {pages}"),
+            ):
+                store.set(42, target, "label", value)
+            with patch.object(main.bot, "customizations", store):
+                pages = main._personality_prompt_embeds(
+                    {
+                        "base_prior": "B" * 100,
+                        "character_prompt": character_prompt,
+                        "mood_prompt": "M" * 100,
+                    },
+                    channel=channel,
+                    user=user,
+                )
+
+        self.assertEqual(defaults[0].title, "Current prompt layers")
+        self.assertEqual(
+            [field.name for field in defaults[0].fields],
+            ["Base prior", "Character prompt", "Mood prompt"],
+        )
+        self.assertEqual(defaults[0].footer.text, "Page 1 of 1")
+        self.assertEqual(
+            defaults[0].fields[1].value,
+            "No character prompt is active for this session.",
+        )
+        self.assertEqual(len(pages), 2)
+        self.assertEqual(pages[0].title, "Prompt layers")
+        self.assertEqual(pages[0].footer.text, "Sheet 1 / 2")
+        character_fields = [
+            field
+            for page in pages
+            for field in page.fields
+            if (field.name or "").startswith("Character contract")
+        ]
+        self.assertEqual(
+            "".join(field.value or "" for field in character_fields),
+            character_prompt,
+        )
+        self.assertEqual(pages[0].fields[0].name, "Base instructions")
+        self.assertTrue((pages[-1].fields[-1].name or "").startswith("Mood cue"))
+        for page in pages:
+            self.assertLessEqual(len(page.fields), 5)
+            self.assertLessEqual(
+                len(page.title or "")
+                + len(page.description or "")
+                + len(page.footer.text or "" if page.footer else "")
+                + sum(
+                    len(field.name or "") + len(field.value or "")
+                    for field in page.fields
+                ),
+                6000,
+            )
+            self.assertTrue(
+                all(
+                    len(field.name or "") <= 256 and len(field.value or "") <= 1024
+                    for field in page.fields
+                )
+            )
 
     def test_frontend_embed_customization_does_not_change_default_without_server(
         self,

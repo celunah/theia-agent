@@ -148,7 +148,7 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         )
         self.assertEqual(
             embed.footer.text,
-            "Add or change the character with `/personality <file> <slug>`.",
+            "Add or change the character with `/personality profile`.",
         )
 
     async def test_personality_shared_scopes_require_administrator_access(self) -> None:

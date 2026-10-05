@@ -13,6 +13,7 @@ from typing import Any
 import discord
 
 from ..colors import discord_color
+from ..delivery_text import _split_pages
 from .support import (
     _current_revision,
     _frontend_embed,
@@ -837,13 +838,82 @@ def _personality_summary_embed(
     )
     footer = _frontend_label(
         "label:personality_footer",
-        "Add or change the character with `/personality <file> <slug>`.",
+        "Add or change the character with `/personality profile`.",
         channel=channel,
         user=user,
         context=context,
     )
     embed.set_footer(text=footer)
     return embed
+
+
+def _personality_prompt_embeds(
+    parts: dict[str, str | None],
+    *,
+    channel: Any | None = None,
+    user: discord.abc.User | None = None,
+) -> list[discord.Embed]:
+    """Build bounded embeds for the visible presentation prompt layers."""
+    context = {"command": "/personality prompt"}
+    sections = (
+        ("personality_prompt_base", "Base prior", parts.get("base_prior") or ""),
+        (
+            "personality_prompt_character",
+            "Character prompt",
+            parts.get("character_prompt")
+            or _frontend_label(
+                "label:personality_prompt_none",
+                "No character prompt is active for this session.",
+                channel=channel,
+                user=user,
+                context=context,
+            ),
+        ),
+        ("personality_prompt_mood", "Mood prompt", parts.get("mood_prompt") or ""),
+    )
+    fields: list[tuple[str, str]] = []
+    for target, default, text in sections:
+        label = _frontend_label(
+            f"label:{target}",
+            default,
+            channel=channel,
+            user=user,
+            context=context,
+        )[:128]
+        chunks = _split_pages(text, limit=850)
+        for index, chunk in enumerate(chunks, start=1):
+            name = label if len(chunks) == 1 else f"{label} ({index}/{len(chunks)})"
+            fields.append((name[:256], chunk or " "))
+
+    title = _frontend_label(
+        "label:personality_prompt_title",
+        "Current prompt layers",
+        channel=channel,
+        user=user,
+        context=context,
+    )[:128]
+    pages: list[discord.Embed] = []
+    total_pages = (len(fields) + 4) // 5
+    for offset in range(0, len(fields), 5):
+        page_number = len(pages) + 1
+        embed = discord.Embed(title=title, color=discord_color("INFO"))
+        for name, value in fields[offset : offset + 5]:
+            embed.add_field(name=name, value=value, inline=False)
+        embed.set_footer(
+            text=_frontend_label(
+                "label:personality_prompt_page",
+                "Page {page} of {pages}",
+                channel=channel,
+                user=user,
+                context={
+                    **context,
+                    "page": page_number,
+                    "pages": total_pages,
+                },
+            )[:128]
+        )
+        pages.append(embed)
+    return pages
 
 
 def _login_required_embed(

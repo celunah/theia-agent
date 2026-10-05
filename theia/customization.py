@@ -132,6 +132,12 @@ LABEL_TARGETS = (
     "personality_mood",
     "personality_presence",
     "personality_footer",
+    "personality_prompt_title",
+    "personality_prompt_base",
+    "personality_prompt_character",
+    "personality_prompt_mood",
+    "personality_prompt_none",
+    "personality_prompt_page",
     "image_follow_up",
 )
 

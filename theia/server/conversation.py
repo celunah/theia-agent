@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import math
 import re
@@ -390,6 +391,12 @@ class CodexConversationMixin:
         )
         if changed:
             self._persist_state()
+        return self._mood_prompt_text(session)
+
+    def _mood_prompt_text(self, session: _Session) -> str:
+        """Render the current mood state without advancing or persisting it."""
+        mood = session.mood
+        assert mood is not None
         causes = mood.causes[:_MOOD_MAX_CAUSES] or (mood.baseline_cause,)
         lines = [
             "## Current mood",
@@ -423,6 +430,25 @@ class CodexConversationMixin:
                 )
             )
         return "\n".join(lines)
+
+    def personality_prompt_parts(self, session_key: str) -> dict[str, str | None]:
+        """Return the active presentation prompt layers without model calls.
+
+        The mood preview is rendered from a private copy so inspecting it does
+        not advance or persist session mood. Memory and tool-policy instructions
+        are intentionally excluded from this user-facing presentation view.
+        """
+        session = self._session(session_key)
+        preview = copy.copy(session)
+        preview.mood = copy.copy(session.mood) if session.mood is not None else None
+        self._ensure_mood_state(preview)
+        assert preview.mood is not None
+        self._decay_mood(preview.mood, now=time.time())
+        return {
+            "base_prior": BASE_PRIORS,
+            "character_prompt": self._personality_instructions(session),
+            "mood_prompt": self._mood_prompt_text(preview),
+        }
 
     @staticmethod
     def _mood_event_signature(text: str) -> str:
