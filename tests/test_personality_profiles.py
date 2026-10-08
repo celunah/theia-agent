@@ -117,14 +117,32 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         self.assertIn("Avoid canned affirmations", BASE_PRIOR_TEMPLATE)
         self.assertIn("Use plain ASCII punctuation", BASE_PRIOR_TEMPLATE)
         self.assertEqual(main.BASE_PRIORS, render_base_prior())
-        self.assertTrue(main.BASE_PRIORS.startswith("You are Theia, responding"))
+        self.assertTrue(
+            main.BASE_PRIORS.startswith(
+                f"You are {main.DEFAULT_CODEX_MODEL}, responding"
+            )
+        )
         self.assertTrue(main.BASE_PRIORS.endswith("--- CHARACTER ---\nNone"))
-        selected = render_base_prior("Be precise and reserved.")
-        self.assertTrue(selected.startswith("You are Theia, responding"))
+        selected = render_base_prior(
+            model_name="gpt-test-model",
+            character_prompt="Be precise and reserved.",
+        )
+        self.assertTrue(selected.startswith("You are gpt-test-model, responding"))
         self.assertTrue(
             selected.endswith("--- CHARACTER ---\nBe precise and reserved.")
         )
         self.assertNotIn("<personality_profile>", selected)
+
+    def test_system_prior_uses_the_selected_gpt_model_name(self) -> None:
+        server = main.CodexAppServer()
+        server._model = "gpt-test-model"
+
+        instructions = server._system_instructions(
+            server._session("session"), allow_tools=False
+        )
+
+        self.assertTrue(instructions.startswith("You are gpt-test-model,"))
+        self.assertTrue(instructions.endswith("--- CHARACTER ---\nNone"))
 
     async def test_invalid_character_contract_is_rejected_on_upload(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -201,7 +219,11 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
                     parts = server.personality_prompt_parts("session")
 
         self.assertEqual(set(parts), {"base_prior", "character_prompt", "mood_prompt"})
-        self.assertTrue((parts["base_prior"] or "").startswith("You are Theia"))
+        self.assertTrue(
+            (parts["base_prior"] or "").startswith(
+                f"You are {main.DEFAULT_CODEX_MODEL}"
+            )
+        )
         self.assertIn(
             "--- CHARACTER ---\nBe precise and reserved.",
             parts["base_prior"] or "",

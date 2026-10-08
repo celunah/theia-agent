@@ -47,6 +47,7 @@ _load_environment()
 AGENT_NAME = "Theia"
 AGENT_DISPLAY_NAME = "Theia Agent"
 THEIA_VERSION = "2.1.0"
+DEFAULT_CODEX_MODEL = "gpt-6-luna"
 _REVISION_RE = re.compile(r"^[0-9a-f]{7,40}$", re.IGNORECASE)
 _BUILD_REVISION_FILENAME = "build-revision.txt"
 BASE_PRIOR_TEMPLATE = (
@@ -68,10 +69,13 @@ BASE_PRIOR_TEMPLATE = (
 )
 
 
-def render_base_prior(character_prompt: str = "None") -> str:
-    """Render Theia's shared response prior with the selected character text."""
+def render_base_prior(
+    model_name: str = DEFAULT_CODEX_MODEL,
+    character_prompt: str = "None",
+) -> str:
+    """Render the shared response prior for one model and character prompt."""
     return BASE_PRIOR_TEMPLATE.format(
-        model_name=AGENT_NAME,
+        model_name=model_name,
         character_prompt=character_prompt,
     )
 
@@ -79,7 +83,6 @@ def render_base_prior(character_prompt: str = "None") -> str:
 BASE_PRIORS = render_base_prior()
 
 DEFAULT_REASONING_EFFORT = "medium"
-DEFAULT_CODEX_MODEL = "gpt-6-luna"
 MOOD_BASELINE_STRENGTH = 0.50
 MOOD_DECAY_PER_MINUTE = 0.03
 MOOD_LABELS = frozenset(

@@ -532,7 +532,9 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
 
         params = cast(Any, server._request.await_args).args[1]
         self.assertTrue(
-            params["baseInstructions"].startswith("You are Theia, responding")
+            params["baseInstructions"].startswith(
+                f"You are {main.DEFAULT_CODEX_MODEL}, responding"
+            )
         )
         self.assertIn("--- CHARACTER ---\nUse a warm tone.", params["baseInstructions"])
         self.assertIn("source code", params["developerInstructions"])

@@ -547,12 +547,12 @@ The default is indexed search. Live mode can be explicitly selected when current
   The contract shapes presentation only. It does not grant tools, change runtime
   authority, or define access permissions. Existing Markdown profiles need no
   contract, and Theia does not add a default character contract.
-- The base prior identifies Theia and places the selected profile prompt
-  directly in its `CHARACTER` section. With no selected profile, that section
-  contains `None` and replies use a neutral assistant voice. Replies use plain
-  ASCII punctuation and stay concise and natural for speech by default; more
-  detail and formatting are used when requested or when the task benefits from
-  them.
+- The base prior identifies the selected GPT model and places the selected
+  profile prompt directly in its `CHARACTER` section. With no selected profile,
+  that section contains `None` and replies use a neutral assistant voice.
+  Replies use plain ASCII punctuation and stay concise and natural for speech by
+  default; more detail and formatting are used when requested or when the task
+  benefits from them.
 - `/personality prompt` privately shows the active base prior, character prompt,
   and current mood prompt for the invoking user's session, one section per
   owner-locked page. Long Markdown sections split at heading boundaries when

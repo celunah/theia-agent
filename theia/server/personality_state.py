@@ -29,7 +29,7 @@ from .worker_diagnostics import (
     run_worker,
 )
 from ..core import (
-    BASE_PRIORS,
+    DEFAULT_CODEX_MODEL,
     CodexAppServerError,
     _Session,
     _TurnState,
@@ -38,6 +38,7 @@ from ..core import (
     _path_is_under,
     _safe_intermediate_text,
     _truncate,
+    render_base_prior,
 )
 from ..identifiers import new_unique_token
 from ..personality import PersonalityError
@@ -1027,7 +1028,9 @@ class CodexPersonalityStateMixin(CodexRelationshipMemoryMixin):
                     "sandbox": "read-only",
                     "ephemeral": True,
                     "runtimeWorkspaceRoots": [],
-                    "baseInstructions": BASE_PRIORS,
+                    "baseInstructions": render_base_prior(
+                        model_name=self._model or DEFAULT_CODEX_MODEL
+                    ),
                     "developerInstructions": (
                         _MEMORY_RECORD_SELECTION_DEVELOPER_INSTRUCTIONS
                         if safe_records is not None
@@ -1263,7 +1266,9 @@ class CodexPersonalityStateMixin(CodexRelationshipMemoryMixin):
                     "sandbox": "read-only",
                     "ephemeral": True,
                     "runtimeWorkspaceRoots": [],
-                    "baseInstructions": BASE_PRIORS,
+                    "baseInstructions": render_base_prior(
+                        model_name=self._model or DEFAULT_CODEX_MODEL
+                    ),
                     "developerInstructions": _PERSONALITY_SUMMARY_DEVELOPER_INSTRUCTIONS,
                     **({"model": self._model} if self._model is not None else {}),
                 },

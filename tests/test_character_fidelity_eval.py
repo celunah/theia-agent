@@ -93,7 +93,7 @@ class CharacterFidelityEvaluationTests(unittest.IsolatedAsyncioTestCase):
                 session = server._session(session_key)
                 baseline = server._system_instructions(session, allow_tools=False)
 
-                self.assertTrue(baseline.startswith("You are Theia,"))
+                self.assertTrue(baseline.startswith(f"You are {server.model_name()},"))
                 self.assertIn("responding to a user's request.", baseline)
                 self.assertIn("--- CHARACTER ---\n" + profile_text, baseline)
                 self.assertNotIn("<personality_profile>", baseline)
@@ -138,7 +138,9 @@ class CharacterFidelityEvaluationTests(unittest.IsolatedAsyncioTestCase):
                         case_baseline = server._system_instructions(
                             session, allow_tools=False
                         )
-                        self.assertTrue(case_baseline.startswith("You are Theia,"))
+                        self.assertTrue(
+                            case_baseline.startswith(f"You are {server.model_name()},")
+                        )
                         self.assertIn("responding to a user's request.", case_baseline)
                         self.assertIn(case_profile["instructions"], case_baseline)
                         self.assertNotIn(

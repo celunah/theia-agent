@@ -446,7 +446,10 @@ class CodexConversationMixin:
         self._decay_mood(preview.mood, now=time.time())
         character_prompt = self._personality_instructions(session)
         return {
-            "base_prior": render_base_prior(character_prompt or "None"),
+            "base_prior": render_base_prior(
+                model_name=self._model or DEFAULT_CODEX_MODEL,
+                character_prompt=character_prompt or "None",
+            ),
             "character_prompt": character_prompt,
             "mood_prompt": self._mood_prompt_text(preview),
         }
@@ -808,7 +811,12 @@ class CodexConversationMixin:
         self, session: _Session, *, allow_tools: bool = True
     ) -> str:
         personality = self._personality_instructions(session)
-        parts = [render_base_prior(personality or "None")]
+        parts = [
+            render_base_prior(
+                model_name=self._model or DEFAULT_CODEX_MODEL,
+                character_prompt=personality or "None",
+            )
+        ]
         memory = self._memory_instructions(allow_tools=allow_tools)
         if memory:
             parts.append(memory)

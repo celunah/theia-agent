@@ -39,7 +39,7 @@ from .attachments import (
 from ..audio import AudioOutput, AudioProtocolError
 from ..core import (
     AGENT_NAME,
-    BASE_PRIORS,
+    DEFAULT_CODEX_MODEL,
     DEFAULT_REASONING_EFFORT,
     CodexAppServerError,
     MOOD_LABELS,
@@ -50,6 +50,7 @@ from ..core import (
     _path_is_under,
     _is_missing_codex_thread_error,
     _safe_intermediate_text,
+    render_base_prior,
     _truncate,
 )
 from ..identifiers import new_unique_token
@@ -621,7 +622,9 @@ class CodexWorkerMixin:
                 "approvalPolicy": "never",
                 "sandbox": "read-only",
                 "ephemeral": True,
-                "baseInstructions": BASE_PRIORS,
+                "baseInstructions": render_base_prior(
+                    model_name=self._model or DEFAULT_CODEX_MODEL
+                ),
                 "developerInstructions": _ASSESSMENT_DEVELOPER_INSTRUCTIONS,
             }
             if self._model is not None:

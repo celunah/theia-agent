@@ -25,7 +25,7 @@ from .perception import (
     route_attachments,
 )
 from ..core import (
-    BASE_PRIORS,
+    DEFAULT_CODEX_MODEL,
     DEFAULT_MODE,
     CodexAppServerError,
     CodexTransientRestartError,
@@ -37,6 +37,7 @@ from ..core import (
     _is_invalid_codex_thread_id_error,
     _is_unsupported_codex_method_error,
     _safe_log_label,
+    render_base_prior,
 )
 from .usage import estimated_tokens
 
@@ -652,7 +653,9 @@ class CodexRequestMixin:
                     self._relationship_memory_instructions(session.key) or ""
                 )
             prompt_attribution = {
-                "system_instructions": estimated_tokens(BASE_PRIORS),
+                "system_instructions": estimated_tokens(
+                    render_base_prior(model_name=self._model or DEFAULT_CODEX_MODEL)
+                ),
                 "identity_self_model": estimated_tokens(
                     self._personality_instructions(session) or ""
                 ),

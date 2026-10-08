@@ -11,7 +11,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from ..core import (
-    BASE_PRIORS,
+    DEFAULT_CODEX_MODEL,
     CodexAppServerError,
     _ConversationAttentionState,
     _ConversationContext,
@@ -20,6 +20,7 @@ from ..core import (
     _codex_logger,
     _safe_intermediate_text,
     _truncate,
+    render_base_prior,
 )
 from ..identifiers import new_unique_token
 from .attention_recurrence import (
@@ -814,7 +815,9 @@ class CodexAttentionMixin:
                     "sandbox": "read-only",
                     "ephemeral": True,
                     "runtimeWorkspaceRoots": [],
-                    "baseInstructions": BASE_PRIORS,
+                    "baseInstructions": render_base_prior(
+                        model_name=self._model or DEFAULT_CODEX_MODEL
+                    ),
                     "developerInstructions": _ATTENTION_CLASSIFICATION_DEVELOPER_INSTRUCTIONS,
                     **({"model": self._model} if self._model is not None else {}),
                 },

@@ -30,7 +30,7 @@ from .policy import (
     _SELF_IMPROVEMENT_SUMMARY_MAX_BYTES,
 )
 from ..core import (
-    BASE_PRIORS,
+    DEFAULT_CODEX_MODEL,
     _TurnState,
     _Session,
     CodexAppServerError,
@@ -39,6 +39,7 @@ from ..core import (
     _safe_intermediate_text,
     _subtext,
     _truncate,
+    render_base_prior,
 )
 from ..identifiers import new_unique_token
 from ..personality import CHARACTER_CONTRACT_MARKER, PersonalityError
@@ -837,7 +838,10 @@ class CodexSelfImprovementMixin:
         parts: list[str] = []
         if prompt_attribution is not None:
             prompt_attribution.setdefault(
-                "system_instructions", estimated_tokens(BASE_PRIORS)
+                "system_instructions",
+                estimated_tokens(
+                    render_base_prior(model_name=self._model or DEFAULT_CODEX_MODEL)
+                ),
             )
         if summary is not None:
             add_part(

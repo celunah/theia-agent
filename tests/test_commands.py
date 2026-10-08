@@ -318,9 +318,13 @@ class CommandSurfaceTests(unittest.TestCase):
         )
         self.assertIn("\x1b[", handler.format(record))
 
-    def test_base_prior_uses_theia_as_the_model_name(self) -> None:
+    def test_base_prior_uses_the_default_gpt_model_name(self) -> None:
         self.assertNotIn("Codex", main.BASE_PRIORS)
-        self.assertTrue(main.BASE_PRIORS.startswith("You are Theia, responding"))
+        self.assertTrue(
+            main.BASE_PRIORS.startswith(
+                f"You are {main.DEFAULT_CODEX_MODEL}, responding"
+            )
+        )
         self.assertTrue(main.BASE_PRIORS.endswith("--- CHARACTER ---\nNone"))
         self.assertIn("neutral assistant voice", main.BASE_PRIORS)
         self.assertIn("Use plain ASCII punctuation", main.BASE_PRIORS)

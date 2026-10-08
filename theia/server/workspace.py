@@ -24,7 +24,7 @@ from .prompts import (
     _WORKSPACE_REVIEW_OUTPUT_SCHEMA,
 )
 from ..core import (
-    BASE_PRIORS,
+    DEFAULT_CODEX_MODEL,
     _Session,
     _SessionWorkspace,
     _TurnState,
@@ -32,6 +32,7 @@ from ..core import (
     _codex_logger,
     _safe_intermediate_text,
     _truncate,
+    render_base_prior,
 )
 from ..identifiers import new_unique_token
 from .worker_diagnostics import record_current_worker_failure, run_worker
@@ -548,7 +549,9 @@ class CodexWorkspaceMixin:
                     "sandbox": "read-only",
                     "ephemeral": True,
                     "runtimeWorkspaceRoots": [],
-                    "baseInstructions": BASE_PRIORS,
+                    "baseInstructions": render_base_prior(
+                        model_name=self._model or DEFAULT_CODEX_MODEL
+                    ),
                     "developerInstructions": _WORKSPACE_REVIEW_DEVELOPER_INSTRUCTIONS,
                     **({"model": self._model} if self._model is not None else {}),
                 },
