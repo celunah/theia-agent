@@ -54,10 +54,8 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
                 )
                 instructions = server._system_instructions(session)
 
-        self.assertLess(
-            instructions.index("<personality_profile>"),
-            instructions.index("Be warm."),
-        )
+        self.assertIn("--- CHARACTER ---\nBe warm.", instructions)
+        self.assertNotIn("<personality_profile>", instructions)
         self.assertLess(
             turn_prompt.index("## Current mood"),
             turn_prompt.index("the actual user request"),
@@ -498,12 +496,9 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
 
         params = cast(Any, server._request.await_args).args[1]
         self.assertTrue(
-            params["baseInstructions"].startswith("You are friendly, responding")
+            params["baseInstructions"].startswith("You are Theia, responding")
         )
-        self.assertIn("style-only guidance", params["baseInstructions"])
-        self.assertIn(
-            "<personality_profile>\nUse a warm tone.", params["baseInstructions"]
-        )
+        self.assertIn("--- CHARACTER ---\nUse a warm tone.", params["baseInstructions"])
         self.assertIn("source code", params["developerInstructions"])
         self.assertIn("server administrator", params["developerInstructions"])
 

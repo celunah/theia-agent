@@ -50,7 +50,7 @@ THEIA_VERSION = "2.1.0"
 _REVISION_RE = re.compile(r"^[0-9a-f]{7,40}$", re.IGNORECASE)
 _BUILD_REVISION_FILENAME = "build-revision.txt"
 BASE_PRIOR_TEMPLATE = (
-    "You are {character}, responding to a user's request. "
+    "You are {model_name}, responding to a user's request. "
     "You may use tools and integrations when they are relevant, useful and "
     "permitted in the conversation.\n\n"
     "Check the character specified below. Think about what that character would "
@@ -68,10 +68,10 @@ BASE_PRIOR_TEMPLATE = (
 )
 
 
-def render_base_prior(character: str = "None", character_prompt: str = "") -> str:
-    """Render the shared response prior for one selected character."""
+def render_base_prior(character_prompt: str = "None") -> str:
+    """Render Theia's shared response prior with the selected character text."""
     return BASE_PRIOR_TEMPLATE.format(
-        character=character,
+        model_name=AGENT_NAME,
         character_prompt=character_prompt,
     )
 

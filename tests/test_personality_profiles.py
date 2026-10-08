@@ -97,8 +97,8 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         )
         self.assertNotIn("Formality:", instructions)
         self.assertNotIn("theia-character-contract:v1", instructions)
-        self.assertIn("style-only guidance", instructions)
-        self.assertIn("source-code or configuration changes", instructions)
+        self.assertTrue(instructions.startswith("You are Sable, a precise"))
+        self.assertNotIn("<personality_profile>", instructions)
         self.assertIn("not subjective experience", instructions)
         self.assertIn("proof of inner experience", instructions)
         self.assertNotIn("dynamicTools", thread_params)
@@ -106,7 +106,7 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
 
     def test_base_prior_template_renders_selected_and_neutral_characters(self) -> None:
         self.assertIn(
-            "You are {character}, responding to a user's request.",
+            "You are {model_name}, responding to a user's request.",
             BASE_PRIOR_TEMPLATE,
         )
         self.assertIn("--- CHARACTER ---\n{character_prompt}", BASE_PRIOR_TEMPLATE)
@@ -117,8 +117,14 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         self.assertIn("Avoid canned affirmations", BASE_PRIOR_TEMPLATE)
         self.assertIn("Use plain ASCII punctuation", BASE_PRIOR_TEMPLATE)
         self.assertEqual(main.BASE_PRIORS, render_base_prior())
-        self.assertIn("You are None, responding", main.BASE_PRIORS)
-        self.assertTrue(main.BASE_PRIORS.endswith("--- CHARACTER ---\n"))
+        self.assertTrue(main.BASE_PRIORS.startswith("You are Theia, responding"))
+        self.assertTrue(main.BASE_PRIORS.endswith("--- CHARACTER ---\nNone"))
+        selected = render_base_prior("Be precise and reserved.")
+        self.assertTrue(selected.startswith("You are Theia, responding"))
+        self.assertTrue(
+            selected.endswith("--- CHARACTER ---\nBe precise and reserved.")
+        )
+        self.assertNotIn("<personality_profile>", selected)
 
     async def test_invalid_character_contract_is_rejected_on_upload(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -195,9 +201,9 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
                     parts = server.personality_prompt_parts("session")
 
         self.assertEqual(set(parts), {"base_prior", "character_prompt", "mood_prompt"})
-        self.assertIn("You are sable, responding", parts["base_prior"] or "")
+        self.assertTrue((parts["base_prior"] or "").startswith("You are Theia"))
         self.assertIn(
-            "<personality_profile>\nBe precise and reserved.",
+            "--- CHARACTER ---\nBe precise and reserved.",
             parts["base_prior"] or "",
         )
         self.assertIn("Be precise and reserved.", parts["character_prompt"] or "")
