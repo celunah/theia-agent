@@ -318,21 +318,13 @@ class CommandSurfaceTests(unittest.TestCase):
         )
         self.assertIn("\x1b[", handler.format(record))
 
-    def test_base_priors_are_identity_neutral(self) -> None:
+    def test_base_prior_uses_neutral_voice_without_a_selected_character(self) -> None:
         self.assertNotIn("Codex", main.BASE_PRIORS)
         self.assertNotIn("Theia", main.BASE_PRIORS)
-
-    def test_base_priors_make_ordinary_conversation_spoken_first(self) -> None:
-        self.assertIn("Spoken-first delivery", main.BASE_PRIORS)
-        self.assertIn("one thought at a time", main.BASE_PRIORS)
-        self.assertIn("without filler or forced slang", main.BASE_PRIORS)
-        self.assertIn("avoid unnecessary framing, repetition", main.BASE_PRIORS)
-        self.assertIn("When no personality was provided", main.BASE_PRIORS)
-
-    def test_base_priors_keep_technical_answers_complete(self) -> None:
-        self.assertIn("especially for code,", main.BASE_PRIORS)
-        self.assertIn("reviews, or procedures", main.BASE_PRIORS)
-        self.assertIn("Do not impose a hard sentence limit", main.BASE_PRIORS)
+        self.assertIn("You are None, responding", main.BASE_PRIORS)
+        self.assertIn("neutral assistant voice", main.BASE_PRIORS)
+        self.assertIn("Use plain ASCII punctuation", main.BASE_PRIORS)
+        self.assertIn("Give more detail when the user asks", main.BASE_PRIORS)
 
     def test_medium_is_the_non_adaptive_default(self) -> None:
         self.assertEqual(main.DEFAULT_REASONING_EFFORT, "medium")

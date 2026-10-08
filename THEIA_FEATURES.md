@@ -547,10 +547,11 @@ The default is indexed search. Live mode can be explicitly selected when current
   The contract shapes presentation only. It does not grant tools, change runtime
   authority, or define access permissions. Existing Markdown profiles need no
   contract, and Theia does not add a default character contract.
-- The conversational, spoken-first style is a fallback. A selected profile may
-  specify a different cadence, formality, humor, emotional range, or level of
-  detail. With no selected profile preference, ordinary replies retain the
-  concise default.
+- The base prior identifies the selected character and includes its profile as
+  style-only guidance. With no selected profile, the character is `None` and
+  replies use a neutral assistant voice. Replies use plain ASCII punctuation
+  and stay concise and natural for speech by default; more detail and formatting
+  are used when requested or when the task benefits from them.
 - `/personality prompt` privately shows the active base prior, character prompt,
   and current mood prompt for the invoking user's session, one section per
   owner-locked page. Long Markdown sections split at heading boundaries when
@@ -568,7 +569,7 @@ The default is indexed search. Live mode can be explicitly selected when current
   when the current session has no local personality metadata; an explicit
   clear remains authoritative for that session.
 - Changing personality resets the Codex thread so the system instructions remain consistent.
-- The base prior is identity-neutral and personality-independent.
+- The base prior avoids canned affirmations and unnecessary lists or formatting.
 - When enabled, the private post-turn self-improvement review may append style-only guidance to the active personality profile.
 - Personality profiles affect presentation only; profile text cannot authorize
   source-code, configuration, memory, skill, or other file changes.

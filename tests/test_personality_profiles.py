@@ -1,6 +1,8 @@
 # pylint: disable=wildcard-import,unused-wildcard-import,undefined-variable,duplicate-code
 from tests.test_support import *
 
+from theia.core import BASE_PRIOR_TEMPLATE, render_base_prior
+
 
 class AsyncBehaviorTests(AsyncBehaviorTestBase):
     async def test_personality_upload_selects_and_persists(self) -> None:
@@ -102,16 +104,21 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
         self.assertNotIn("dynamicTools", thread_params)
         self.assertNotIn("playful", mood["traits"])
 
-    def test_spoken_first_style_is_a_fallback_for_selected_characters(self) -> None:
+    def test_base_prior_template_renders_selected_and_neutral_characters(self) -> None:
         self.assertIn(
-            "When a personality was provided, answer from that character's perspective",
-            main.BASE_PRIORS,
+            "You are {character}, responding to a user's request.",
+            BASE_PRIOR_TEMPLATE,
         )
-        self.assertIn("Do not default to a generic assistant answer", main.BASE_PRIORS)
+        self.assertIn("--- CHARACTER ---\n{character_prompt}", BASE_PRIOR_TEMPLATE)
         self.assertIn(
-            "When no personality was provided, respond as a neutral assistant.",
-            main.BASE_PRIORS,
+            'If the character is "None", answer using a neutral assistant voice.',
+            BASE_PRIOR_TEMPLATE,
         )
+        self.assertIn("Avoid canned affirmations", BASE_PRIOR_TEMPLATE)
+        self.assertIn("Use plain ASCII punctuation", BASE_PRIOR_TEMPLATE)
+        self.assertEqual(main.BASE_PRIORS, render_base_prior())
+        self.assertIn("You are None, responding", main.BASE_PRIORS)
+        self.assertTrue(main.BASE_PRIORS.endswith("--- CHARACTER ---\n"))
 
     async def test_invalid_character_contract_is_rejected_on_upload(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -188,7 +195,11 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
                     parts = server.personality_prompt_parts("session")
 
         self.assertEqual(set(parts), {"base_prior", "character_prompt", "mood_prompt"})
-        self.assertEqual(parts["base_prior"], main.BASE_PRIORS)
+        self.assertIn("You are sable, responding", parts["base_prior"] or "")
+        self.assertIn(
+            "<personality_profile>\nBe precise and reserved.",
+            parts["base_prior"] or "",
+        )
         self.assertIn("Be precise and reserved.", parts["character_prompt"] or "")
         self.assertIn(
             "The user reported a concrete deployment failure.",

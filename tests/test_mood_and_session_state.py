@@ -497,7 +497,9 @@ class AsyncBehaviorTests(AsyncBehaviorTestBase):
                 await server._ensure_thread(server._session("session"))
 
         params = cast(Any, server._request.await_args).args[1]
-        self.assertTrue(params["baseInstructions"].startswith(main.BASE_PRIORS))
+        self.assertTrue(
+            params["baseInstructions"].startswith("You are friendly, responding")
+        )
         self.assertIn("style-only guidance", params["baseInstructions"])
         self.assertIn(
             "<personality_profile>\nUse a warm tone.", params["baseInstructions"]
